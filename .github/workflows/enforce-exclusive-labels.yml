@@ -1,0 +1,42 @@
+name: Enforce Exclusive Labels
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  enforce-exclusive:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Remove conflicting labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ADDED_LABEL: ${{ github.event.label.name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Define mutually exclusive label groups (prefix-based)
+          # Use | as delimiter since label names contain spaces
+          declare -A LABEL_GROUPS=(
+            ["type:"]="type: bug|type: feature|type: chore|type: docs"
+            ["status:"]="status: triage|status: ready|status: needs info"
+            ["prio:"]="prio: p0|prio: p1|prio: p2|prio: p3"
+            ["size:"]="size: s|size: m|size: l"
+          )
+
+          # Find which group the added label belongs to
+          for prefix in "${!LABEL_GROUPS[@]}"; do
+            if [[ "$ADDED_LABEL" == $prefix* ]]; then
+              # Remove other labels in this group
+              IFS='|' read -ra labels <<< "${LABEL_GROUPS[$prefix]}"
+              for label in "${labels[@]}"; do
+                if [[ "$label" != "$ADDED_LABEL" ]]; then
+                  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" 2>/dev/null || true
+                fi
+              done
+              break
+            fi
+          done

@@ -1,0 +1,1 @@
+CREATE INDEX idx_transcript_utterances_document ON transcript_utterances(document_id);

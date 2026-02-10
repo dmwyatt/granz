@@ -1,0 +1,264 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - '.github/workflows/release.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+# Only one release workflow can run at a time. Cancel in-progress runs
+# when a new push arrives on the same day.
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Compute Version
+    runs-on: ubuntu-latest
+    outputs:
+      calver: ${{ steps.version.outputs.calver }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha_short: ${{ steps.version.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute CalVer and short SHA
+        id: version
+        run: |
+          CALVER=$(date -u +'%Y.%-m.%-d')
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          echo "calver=${CALVER}" >> $GITHUB_OUTPUT
+          echo "tag=v${CALVER}" >> $GITHUB_OUTPUT
+          echo "sha_short=${SHA_SHORT}" >> $GITHUB_OUTPUT
+
+  build-linux:
+    name: Build Linux
+    needs: [version]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          GRANS_BUILD_DATE: ${{ needs.version.outputs.calver }}
+          GRANS_BUILD_SHA: ${{ needs.version.outputs.sha_short }}
+        run: cargo build --profile ci-release --features cuda
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grans-linux-x86_64
+          path: target/ci-release/grans
+
+  build-macos:
+    name: Build macOS
+    needs: [version]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          GRANS_BUILD_DATE: ${{ needs.version.outputs.calver }}
+          GRANS_BUILD_SHA: ${{ needs.version.outputs.sha_short }}
+        run: cargo build --profile ci-release --target aarch64-apple-darwin --features coreml
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grans-macos-aarch64
+          path: target/aarch64-apple-darwin/ci-release/grans
+
+  build-windows:
+    name: Build Windows
+    needs: [version]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          GRANS_BUILD_DATE: ${{ needs.version.outputs.calver }}
+          GRANS_BUILD_SHA: ${{ needs.version.outputs.sha_short }}
+        run: cargo build --profile ci-release --target x86_64-pc-windows-msvc --features directml
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grans-windows-x86_64.exe
+          path: target/x86_64-pc-windows-msvc/ci-release/grans.exe
+
+  release:
+    name: Create Release
+    needs: [version, build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir release
+          mv artifacts/grans-linux-x86_64/grans release/grans-linux-x86_64
+          mv artifacts/grans-macos-aarch64/grans release/grans-macos-aarch64
+          mv artifacts/grans-windows-x86_64.exe/grans.exe release/grans-windows-x86_64.exe
+          chmod +x release/grans-linux-x86_64 release/grans-macos-aarch64
+
+      - name: Get changelog commits
+        id: commits
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          # Find the previous v* tag (excluding today's tag if it exists)
+          PREV_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -v "^${TAG}$" | head -1 || true)
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "prev_tag=${PREV_TAG}" >> $GITHUB_OUTPUT
+            echo "commits<<EOF" >> $GITHUB_OUTPUT
+            git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "prev_tag=" >> $GITHUB_OUTPUT
+            echo "commits<<EOF" >> $GITHUB_OUTPUT
+            git log --pretty=format:"- %s (%h)" -20 >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate changelog with Claude
+        id: changelog
+        env:
+          CLAUDE_CODE_USE_OAUTH: "1"
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          COMMITS: ${{ steps.commits.outputs.commits }}
+        run: |
+          npm install -g @anthropic-ai/claude-code
+
+          # Build the prompt
+          PROMPT="Generate a concise changelog for a GitHub release based on these commits:
+
+          ${COMMITS}
+
+          Format the changelog as markdown with these sections (only include sections that have relevant commits):
+          - **Features** - new functionality
+          - **Fixes** - bug fixes
+          - **Improvements** - enhancements, refactoring, performance
+          - **Docs** - documentation changes
+
+          Keep descriptions brief (one line each). Skip merge commits and trivial changes.
+          Output ONLY the markdown changelog, no preamble or explanation."
+
+          # Run Claude Code CLI with --print to get output directly
+          CHANGELOG=$(claude --model sonnet --print "$PROMPT" 2>/dev/null || echo "")
+
+          # Save to output
+          echo "response<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # Delete today's tag/release if this is a same-day rebuild
+      - name: Delete existing same-day release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          gh release delete "${TAG}" --yes 2>/dev/null || true
+          git tag -d "${TAG}" 2>/dev/null || true
+          git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+
+      - name: Create CalVer release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ steps.changelog.outputs.response }}
+          CALVER: ${{ needs.version.outputs.calver }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA_SHORT: ${{ needs.version.outputs.sha_short }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > release_notes.md << EOF
+          ## What's Changed
+          EOF
+
+          if [ -n "$CHANGELOG" ]; then
+            echo "$CHANGELOG" >> release_notes.md
+          else
+            echo "_No changelog generated_" >> release_notes.md
+          fi
+
+          cat >> release_notes.md << EOF
+
+          ## Downloads
+          - **Linux / WSL:** [grans-linux-x86_64](https://github.com/${REPO}/releases/download/${TAG}/grans-linux-x86_64)
+          - **macOS (Apple Silicon):** [grans-macos-aarch64](https://github.com/${REPO}/releases/download/${TAG}/grans-macos-aarch64)
+          - **Windows:** [grans-windows-x86_64.exe](https://github.com/${REPO}/releases/download/${TAG}/grans-windows-x86_64.exe)
+          EOF
+
+          gh release create "${TAG}" \
+            --title "${CALVER} (${SHA_SHORT})" \
+            --notes-file release_notes.md \
+            release/grans-linux-x86_64 \
+            release/grans-macos-aarch64 \
+            release/grans-windows-x86_64.exe
+
+      # Maintain a "latest" release so old binaries (pre-CalVer) can still
+      # find updates via /releases/tags/latest. Marked as prerelease so the
+      # new code's /releases/latest endpoint returns the CalVer release instead.
+      - name: Update latest release for backward compatibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CALVER: ${{ needs.version.outputs.calver }}
+          SHA_SHORT: ${{ needs.version.outputs.sha_short }}
+          TAG: ${{ needs.version.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          git tag -d latest 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
+
+          gh release create latest \
+            --title "${CALVER} (${SHA_SHORT})" \
+            --notes "See [${TAG}](https://github.com/${REPO}/releases/tag/${TAG}) for full release notes." \
+            --prerelease \
+            release/grans-linux-x86_64 \
+            release/grans-macos-aarch64 \
+            release/grans-windows-x86_64.exe

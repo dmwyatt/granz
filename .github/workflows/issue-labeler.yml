@@ -1,0 +1,68 @@
+name: Issue Labeler
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  label-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Label Issue with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--allowed-tools Bash(gh issue edit*)'
+          prompt: |
+            Analyze the following GitHub issue and apply appropriate labels using `gh issue edit`.
+
+            Issue #${{ github.event.issue.number }}
+            Title: ${{ github.event.issue.title }}
+            Body:
+            ${{ github.event.issue.body }}
+
+            ## Label Schema
+
+            Apply ONE label from each applicable category:
+
+            **Type (required - pick exactly one):**
+            - `type: bug` - Something isn't working
+            - `type: feature` - New functionality
+            - `type: chore` - Maintenance, refactoring, dependencies
+            - `type: docs` - Documentation only
+
+            **Status (required - pick exactly one):**
+            - `status: triage` - Use if unclear or needs discussion
+            - `status: ready` - Use if the issue is clear and actionable
+            - `status: needs info` - Use if the issue is missing critical details
+
+            **Priority (required - pick exactly one):**
+            - `prio: p0` - Critical, drop everything (security issues, data loss, complete breakage)
+            - `prio: p1` - High priority (significant bugs, blocking issues)
+            - `prio: p2` - Medium priority (normal bugs, useful features)
+            - `prio: p3` - Low priority (nice-to-have, minor improvements)
+
+            **Size (optional - only if estimable):**
+            - `size: s` - Small, quick fix
+            - `size: m` - Medium effort
+            - `size: l` - Large, multiple days
+
+            **Workflow (optional):**
+            - `good first issue` - Only if simple and well-documented, good for newcomers
+
+            ## Instructions
+
+            1. Analyze the issue title and body to understand what it's about
+            2. Select appropriate labels from each category
+            3. Apply labels using: `gh issue edit ${{ github.event.issue.number }} --add-label "label1" --add-label "label2" ...`
+            4. Do NOT comment on the issue - just apply the labels silently

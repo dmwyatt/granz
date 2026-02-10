@@ -1,0 +1,15 @@
+/target
+cache-v3.json
+!tests/fixtures/cache-v3.json
+.fastembed_cache/
+grans_index_*.db
+
+# Personal benchmark data (contains meeting titles)
+tests/semantic_search_benchmark.json
+
+# Decompiled Granola Electron app
+granola-electron/
+granola-electron.zip
+
+# Investigation docs with real API response data
+docs/granola-investigation/
