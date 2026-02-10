@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{UpdateError, UpdateResult};
 
-const RELEASE_URL: &str = "https://api.github.com/repos/dmwyatt/grans/releases/latest";
+const RELEASE_URL: &str = "https://api.github.com/repos/dmwyatt/granz/releases/latest";
 
 /// Trait for GitHub API operations, allowing for mocking in tests.
 pub trait GitHubApi {
@@ -132,7 +132,7 @@ pub enum BuildStatus {
 }
 
 const WORKFLOW_RUNS_URL: &str =
-    "https://api.github.com/repos/dmwyatt/grans/actions/runs?branch=main&per_page=5";
+    "https://api.github.com/repos/dmwyatt/granz/actions/runs?branch=main&per_page=5";
 const RELEASE_WORKFLOW_NAME: &str = "Release";
 
 /// Fetch recent workflow runs from GitHub Actions.
@@ -272,7 +272,7 @@ mod tests {
             "name": "Release",
             "status": "in_progress",
             "conclusion": null,
-            "html_url": "https://github.com/dmwyatt/grans/actions/runs/12345",
+            "html_url": "https://github.com/dmwyatt/granz/actions/runs/12345",
             "created_at": "2025-01-30T14:23:00Z"
         }"#;
 
@@ -293,7 +293,7 @@ mod tests {
                     "name": "Release",
                     "status": "completed",
                     "conclusion": "success",
-                    "html_url": "https://github.com/dmwyatt/grans/actions/runs/12345",
+                    "html_url": "https://github.com/dmwyatt/granz/actions/runs/12345",
                     "created_at": "2025-01-30T14:23:00Z"
                 },
                 {
@@ -301,7 +301,7 @@ mod tests {
                     "name": "CI",
                     "status": "completed",
                     "conclusion": "success",
-                    "html_url": "https://github.com/dmwyatt/grans/actions/runs/12344",
+                    "html_url": "https://github.com/dmwyatt/granz/actions/runs/12344",
                     "created_at": "2025-01-30T14:00:00Z"
                 }
             ]
