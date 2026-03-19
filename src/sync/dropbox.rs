@@ -1,15 +1,29 @@
 //! Dropbox API client for file operations.
 //!
 //! Implements upload, download, and metadata operations using the Dropbox HTTP API.
+//! Files under 150 MB use single-request uploads; larger files use chunked upload sessions.
 
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::Path;
 
 use super::{SyncError, SyncResult};
 
 const UPLOAD_URL: &str = "https://content.dropboxapi.com/2/files/upload";
+const UPLOAD_SESSION_START_URL: &str =
+    "https://content.dropboxapi.com/2/files/upload_session/start";
+const UPLOAD_SESSION_APPEND_URL: &str =
+    "https://content.dropboxapi.com/2/files/upload_session/append_v2";
+const UPLOAD_SESSION_FINISH_URL: &str =
+    "https://content.dropboxapi.com/2/files/upload_session/finish";
 const DOWNLOAD_URL: &str = "https://content.dropboxapi.com/2/files/download";
 const METADATA_URL: &str = "https://api.dropboxapi.com/2/files/get_metadata";
+
+/// Dropbox's single-request upload limit is 150 MB.
+const UPLOAD_SINGLE_LIMIT: u64 = 150 * 1024 * 1024;
+
+/// Chunk size for upload sessions (8 MB — must be a multiple of 4 MB per Dropbox docs).
+const UPLOAD_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 /// File metadata from Dropbox.
 #[derive(Deserialize, Debug, Clone)]
@@ -31,6 +45,22 @@ struct DropboxError {
     error: Option<serde_json::Value>,
 }
 
+/// Upload commit parameters shared by single and session uploads.
+#[derive(Serialize)]
+struct UploadArg {
+    path: String,
+    mode: String,
+    autorename: bool,
+    mute: bool,
+}
+
+/// Cursor for tracking position within an upload session.
+#[derive(Serialize)]
+struct SessionCursor {
+    session_id: String,
+    offset: u64,
+}
+
 /// Dropbox API client with automatic token refresh.
 pub struct DropboxClient {
     access_token: String,
@@ -49,16 +79,20 @@ impl DropboxClient {
     /// Upload a file to Dropbox.
     ///
     /// The `dropbox_path` should be like `/index.db` (within the app folder).
+    /// Files over 150 MB are automatically uploaded using chunked upload sessions.
     pub fn upload(&self, local_path: &Path, dropbox_path: &str) -> SyncResult<FileMetadata> {
-        let content = std::fs::read(local_path)?;
+        let file_size = std::fs::metadata(local_path)?.len();
 
-        #[derive(Serialize)]
-        struct UploadArg {
-            path: String,
-            mode: String,
-            autorename: bool,
-            mute: bool,
+        if file_size <= UPLOAD_SINGLE_LIMIT {
+            self.upload_single(local_path, dropbox_path)
+        } else {
+            self.upload_chunked(local_path, dropbox_path, file_size)
         }
+    }
+
+    /// Upload a file in a single request (for files <= 150 MB).
+    fn upload_single(&self, local_path: &Path, dropbox_path: &str) -> SyncResult<FileMetadata> {
+        let content = std::fs::read(local_path)?;
 
         let arg = UploadArg {
             path: dropbox_path.to_string(),
@@ -77,6 +111,176 @@ impl DropboxClient {
             .header("Dropbox-API-Arg", arg_json)
             .header("Content-Type", "application/octet-stream")
             .body(content)
+            .send()?;
+
+        self.handle_response(response)
+    }
+
+    /// Upload a file using chunked upload sessions (for files > 150 MB).
+    fn upload_chunked(
+        &self,
+        local_path: &Path,
+        dropbox_path: &str,
+        file_size: u64,
+    ) -> SyncResult<FileMetadata> {
+        let mut file = std::fs::File::open(local_path)?;
+        let mut buf = vec![0u8; UPLOAD_CHUNK_SIZE];
+        let mut offset: u64 = 0;
+
+        // Start: send the first chunk
+        let bytes_read = file.read(&mut buf).map_err(SyncError::Io)?;
+        let session_id = self.upload_session_start(&buf[..bytes_read])?;
+        offset += bytes_read as u64;
+
+        // Append: send middle chunks
+        while offset < file_size {
+            let bytes_read = file.read(&mut buf).map_err(SyncError::Io)?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            let remaining = file_size - offset - bytes_read as u64;
+            if remaining > 0 {
+                // More data to come — append
+                self.upload_session_append(&session_id, offset, &buf[..bytes_read])?;
+                offset += bytes_read as u64;
+                eprint!(
+                    "\r  Uploaded {:.0} / {:.0} MB",
+                    offset as f64 / 1_048_576.0,
+                    file_size as f64 / 1_048_576.0,
+                );
+            } else {
+                // Last chunk — finish
+                eprint!(
+                    "\r  Uploaded {:.0} / {:.0} MB\n",
+                    file_size as f64 / 1_048_576.0,
+                    file_size as f64 / 1_048_576.0,
+                );
+                return self.upload_session_finish(
+                    &session_id,
+                    offset,
+                    &buf[..bytes_read],
+                    dropbox_path,
+                );
+            }
+        }
+
+        // Edge case: file size was an exact multiple of chunk size, finish with empty body
+        eprint!(
+            "\r  Uploaded {:.0} / {:.0} MB\n",
+            file_size as f64 / 1_048_576.0,
+            file_size as f64 / 1_048_576.0,
+        );
+        self.upload_session_finish(&session_id, offset, &[], dropbox_path)
+    }
+
+    /// Start an upload session and return the session ID.
+    fn upload_session_start(&self, data: &[u8]) -> SyncResult<String> {
+        #[derive(Serialize)]
+        struct StartArg {
+            close: bool,
+        }
+
+        let arg_json = serde_json::to_string(&StartArg { close: false })
+            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+
+        let response = self
+            .http
+            .post(UPLOAD_SESSION_START_URL)
+            .header("Authorization", format!("Bearer {}", self.access_token))
+            .header("Dropbox-API-Arg", &arg_json)
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
+            .send()?;
+
+        #[derive(Deserialize)]
+        struct StartResult {
+            session_id: String,
+        }
+
+        let result: StartResult = self.handle_response(response)?;
+        Ok(result.session_id)
+    }
+
+    /// Append data to an upload session.
+    fn upload_session_append(
+        &self,
+        session_id: &str,
+        offset: u64,
+        data: &[u8],
+    ) -> SyncResult<()> {
+        #[derive(Serialize)]
+        struct AppendArg {
+            cursor: SessionCursor,
+            close: bool,
+        }
+
+        let arg = AppendArg {
+            cursor: SessionCursor {
+                session_id: session_id.to_string(),
+                offset,
+            },
+            close: false,
+        };
+
+        let arg_json = serde_json::to_string(&arg)
+            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+
+        let response = self
+            .http
+            .post(UPLOAD_SESSION_APPEND_URL)
+            .header("Authorization", format!("Bearer {}", self.access_token))
+            .header("Dropbox-API-Arg", &arg_json)
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
+            .send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(self.parse_error(status, &body));
+        }
+
+        Ok(())
+    }
+
+    /// Finish an upload session and commit the file.
+    fn upload_session_finish(
+        &self,
+        session_id: &str,
+        offset: u64,
+        data: &[u8],
+        dropbox_path: &str,
+    ) -> SyncResult<FileMetadata> {
+        #[derive(Serialize)]
+        struct FinishArg {
+            cursor: SessionCursor,
+            commit: UploadArg,
+        }
+
+        let arg = FinishArg {
+            cursor: SessionCursor {
+                session_id: session_id.to_string(),
+                offset,
+            },
+            commit: UploadArg {
+                path: dropbox_path.to_string(),
+                mode: "overwrite".to_string(),
+                autorename: false,
+                mute: true,
+            },
+        };
+
+        let arg_json = serde_json::to_string(&arg)
+            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+
+        let response = self
+            .http
+            .post(UPLOAD_SESSION_FINISH_URL)
+            .header("Authorization", format!("Bearer {}", self.access_token))
+            .header("Dropbox-API-Arg", &arg_json)
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
             .send()?;
 
         self.handle_response(response)
