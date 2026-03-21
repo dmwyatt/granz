@@ -154,7 +154,7 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
         ];
 
         // Check if document exists and its updated_at
-        let existing_updated_at: Option<String> = check_stmt
+        let existing_updated_at: Option<Option<String>> = check_stmt
             .query_row([doc_id], |row| row.get(0))
             .ok();
 
@@ -174,7 +174,7 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
             Some(existing) => {
                 // Document exists, check if it needs updating
                 let needs_update = match (&existing, &doc.updated_at) {
-                    (_, Some(new)) if new != &existing => true,
+                    (_, Some(new)) if existing.as_ref() != Some(new) => true,
                     _ => false,
                 };
 
@@ -441,7 +441,7 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
             &json.raw_json,
         ];
 
-        let existing_updated_at: Option<String> = check_stmt
+        let existing_updated_at: Option<Option<String>> = check_stmt
             .query_row([template_id], |row| row.get(0))
             .ok();
 
@@ -452,7 +452,7 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
             }
             Some(existing) => {
                 let needs_update = match (&existing, &template.updated_at) {
-                    (_, Some(new)) if new != &existing => true,
+                    (_, Some(new)) if existing.as_ref() != Some(new) => true,
                     _ => false,
                 };
 
@@ -520,7 +520,7 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
                 &json.raw_json,
             ];
 
-            let existing_updated_at: Option<String> = check_stmt
+            let existing_updated_at: Option<Option<String>> = check_stmt
                 .query_row([recipe_id], |row| row.get(0))
                 .ok();
 
@@ -531,7 +531,7 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
                 }
                 Some(existing) => {
                     let needs_update = match (&existing, &recipe.updated_at) {
-                        (_, Some(new)) if new != &existing => true,
+                        (_, Some(new)) if existing.as_ref() != Some(new) => true,
                         _ => false,
                     };
 
@@ -1605,5 +1605,74 @@ mod tests {
         let json = serialize_recipe_json(&recipe);
         assert!(json.config_json.is_none());
         assert!(json.extra_json.is_none());
+    }
+
+    // Regression tests: upsert with NULL updated_at must not fail on re-sync.
+    // Previously, the existence check used `row.get::<_, String>(0)` which
+    // returned Err on NULL, making .ok() return None ("not found"), causing
+    // a duplicate INSERT and UNIQUE constraint failure.
+
+    #[test]
+    fn test_upsert_templates_null_updated_at_resync() {
+        let conn = build_test_db(&empty_state());
+
+        let templates = vec![PanelTemplate {
+            id: Some("t-null".to_string()),
+            title: Some("Summary".to_string()),
+            updated_at: None,
+            ..Default::default()
+        }];
+
+        let stats = upsert_templates(&conn, &templates).unwrap();
+        assert_eq!(stats.inserted, 1);
+
+        // Re-sync the same template — this must not fail
+        let stats = upsert_templates(&conn, &templates).unwrap();
+        assert_eq!(stats.inserted, 0);
+        assert_eq!(stats.unchanged, 1);
+    }
+
+    #[test]
+    fn test_upsert_documents_null_updated_at_resync() {
+        let conn = build_test_db(&empty_state());
+
+        let docs = vec![Document {
+            id: Some("doc-null".to_string()),
+            title: Some("No Timestamp".to_string()),
+            updated_at: None,
+            ..Default::default()
+        }];
+
+        let stats = upsert_documents(&conn, &docs).unwrap();
+        assert_eq!(stats.inserted, 1);
+
+        let stats = upsert_documents(&conn, &docs).unwrap();
+        assert_eq!(stats.inserted, 0);
+        assert_eq!(stats.unchanged, 1);
+    }
+
+    #[test]
+    fn test_upsert_recipes_null_updated_at_resync() {
+        let conn = build_test_db(&empty_state());
+
+        let response = GetRecipesResponse {
+            default_recipes: vec![],
+            public_recipes: vec![Recipe {
+                id: Some("r-null".to_string()),
+                slug: Some("no-timestamp".to_string()),
+                updated_at: None,
+                ..Default::default()
+            }],
+            user_recipes: vec![],
+            shared_recipes: vec![],
+            unlisted_recipes: vec![],
+        };
+
+        let stats = upsert_recipes(&conn, &response).unwrap();
+        assert_eq!(stats.inserted, 1);
+
+        let stats = upsert_recipes(&conn, &response).unwrap();
+        assert_eq!(stats.inserted, 0);
+        assert_eq!(stats.unchanged, 1);
     }
 }
