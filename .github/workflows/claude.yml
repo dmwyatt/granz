@@ -35,15 +35,11 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          use_commit_signing: "true"
 
-          # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
             actions: read
 
-          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
-          # prompt: 'Update the pull request description to include a summary of changes.'
-
-          # Instructions for issue label management
           system_prompt: |
             When working on GitHub issues:
             - When you start implementing a feature or fix, update the issue to `status: in progress`
@@ -52,8 +48,5 @@ jobs:
 
             Example: gh issue edit <number> --remove-label "status: ready" --remove-label "status: triage" --remove-label "status: in progress" --remove-label "status: code review" --add-label "status: <new>"
 
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: '--allowedTools "Bash(cargo test:*)" "Bash(cargo build:*)" "Bash(cargo check:*)" "Bash(cargo fmt:*)" "Bash(cargo clippy:*)" "Bash(gh pr view:*)" "Bash(gh issue view:*)" "Bash(gh issue edit:*)" "Bash(gh api:*)"'
 

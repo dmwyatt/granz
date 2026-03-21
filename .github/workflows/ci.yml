@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +45,158 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  code-review:
+    name: Code Review
+    needs: test
+    if: >-
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are a code reviewer. Review this pull request for bugs and code quality issues.
+            Do NOT review for security — a separate security review handles that.
+
+            This is a Rust CLI tool that queries Granola meeting data via a local SQLite database.
+            Calibrate accordingly — it's a personal productivity tool, not production SaaS.
+
+            The PR branch is already checked out in the current working directory.
+
+            ## Review process
+
+            1. Read the PR diff and changed files.
+            2. Check any CLAUDE.md files in the repo root and in directories touched by the PR.
+            3. For each potential issue you find, score your confidence (0-100):
+               - 0: False positive that doesn't stand up to scrutiny, or a pre-existing issue.
+               - 25: Might be real, but you couldn't verify it.
+               - 50: Real but a nitpick, or unlikely to matter in practice.
+               - 75: Very likely real and will be hit in practice. Important to fix.
+               - 100: Definitely real, confirmed by evidence in the code.
+            4. Discard any issue scoring below 80.
+            5. Post at most 5 inline comments. If fewer than 5 issues qualify, that's fine.
+            6. If zero issues qualify, post a single PR comment:
+               "Code review: no issues found."
+
+            ## What NOT to flag
+
+            - Pedantic nitpicks a senior engineer wouldn't call out
+            - Things a linter, typechecker, or test suite would catch
+            - General code quality suggestions (test coverage, docs, style) unless CLAUDE.md explicitly requires them
+            - Pre-existing issues on lines not modified in this PR
+            - Theoretical problems you immediately want to caveat with "not a bug" or "nice-to-have"
+            - Intentional changes in functionality that align with the PR's purpose
+
+            ## Comment format
+
+            Keep each comment to 1-3 sentences: what the problem is and how to fix it.
+            Provide a code suggestion when possible. Do not explain alternatives, caveats,
+            or edge cases unless they are critical to understanding the fix.
+
+            Use `mcp__github_inline_comment__create_inline_comment` for inline comments.
+            Use `gh pr comment` only if you need a top-level summary.
+            Only post GitHub comments — don't submit review text as messages.
+
+  security-review:
+    name: Security Review
+    needs: test
+    if: >-
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Security Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are a security reviewer. Analyze this PR exclusively for security issues.
+            Do NOT review code style, performance, or general best practices — only security.
+
+            This is a Rust CLI tool that reads auth tokens from local config files, queries
+            the Granola API, and stores meeting data in a local SQLite database with FTS5
+            full-text search. It runs locally for a single user.
+
+            The PR branch is already checked out in the current working directory.
+
+            ## Focus areas
+
+            - Auth token handling: reading from Granola's `supabase.json`, token exposure in logs or error messages
+            - SQL injection in SQLite queries, especially FTS5 search inputs
+            - Command injection via user-supplied arguments passed to shell commands
+            - Unsafe Rust code (`unsafe` blocks) and soundness issues
+            - Path traversal in file operations (database paths, config file resolution)
+            - Sensitive data in error messages, debug output, or panic messages
+            - Dependency vulnerabilities (new or changed Cargo dependencies)
+            - Secrets or tokens leaking into stdout/stderr output
+
+            ## Review process
+
+            1. Read the PR diff and changed files.
+            2. For each potential finding, score your confidence (0-100):
+               - 0: Theoretical risk requiring an unlikely attack scenario (e.g., attacker controls the local machine or config files).
+               - 25: Possible issue, but you couldn't construct a concrete attack scenario.
+               - 50: Real issue but low impact or requires unlikely preconditions.
+               - 75: Real issue with a concrete attack scenario that could be hit in practice.
+               - 100: Confirmed vulnerability with clear exploit path.
+            3. Discard any finding scoring below 75.
+            4. Post at most 3 inline comments. Prioritize by severity.
+            5. If zero findings qualify, post a single PR comment:
+               "Security review: no issues found in this PR."
+
+            ## What NOT to flag
+
+            - Theoretical attacks requiring compromise of the user's machine or local config files
+            - Missing input validation on developer-controlled local data
+            - Defense-in-depth suggestions for values that never come from untrusted sources
+            - Issues on lines not modified in this PR
+
+            ## Comment format
+
+            For each finding: state the vulnerability, the attack scenario in 1 sentence,
+            and suggest a fix with a code suggestion. Keep it concise.
+
+            Use `mcp__github_inline_comment__create_inline_comment` for inline comments.
+            Use `gh pr comment` only if you need a top-level summary.
+            Only post GitHub comments — don't submit review text as messages.
 
   ci-status:
     name: CI Status
