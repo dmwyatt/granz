@@ -1,15 +1,30 @@
 //! Update command implementation.
 
 use std::io::{self, Write};
+use std::time::Duration;
 
 use anyhow::Result;
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::update::download::{current_binary_hash, download_asset, replace_binary, verify_checksum};
 use crate::update::github::{find_asset, BuildStatus, Release};
 use crate::update::platform::asset_name;
 use crate::update::wait::{display_build_info, wait_for_build, WaitConfig};
 use crate::update::{get_github_token_from_env, get_github_token_from_gh_cli, UpdateError};
+
+/// Create a spinner with a consistent style for the update command.
+fn create_spinner(message: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("[grans] {spinner} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+    );
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb.set_message(message.to_string());
+    pb
+}
 
 /// Run the update command.
 pub fn run(check_only: bool, use_gh_auth: bool, wait_for_build_flag: bool, timeout_secs: u64) -> Result<()> {
@@ -20,8 +35,12 @@ pub fn run(check_only: bool, use_gh_auth: bool, wait_for_build_flag: bool, timeo
     // Get token from environment if available, or from --use-gh-auth flag
     let mut token = get_initial_token(use_gh_auth);
 
+    let spinner = create_spinner("Checking build status...");
+
     // Try to check build status and fetch release, prompting for auth if needed
-    let (release, token) = fetch_with_auth_fallback(&mut token, check_only, wait_for_build_flag, timeout_secs)?;
+    let (release, token) = fetch_with_auth_fallback(&mut token, check_only, wait_for_build_flag, timeout_secs, &spinner)?;
+
+    spinner.finish_and_clear();
 
     // Find asset for this platform
     let expected_asset = asset_name()?;
@@ -125,6 +144,7 @@ fn fetch_with_auth_fallback(
     check_only: bool,
     wait_for_build_flag: bool,
     timeout_secs: u64,
+    spinner: &ProgressBar,
 ) -> Result<(Release, Option<String>)> {
     use crate::update::github::RealGitHubApi;
     fetch_with_auth_fallback_impl(
@@ -135,6 +155,7 @@ fn fetch_with_auth_fallback(
         check_only,
         wait_for_build_flag,
         timeout_secs,
+        spinner,
     )
 }
 
@@ -315,6 +336,7 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
     check_only: bool,
     wait_for_build_flag: bool,
     timeout_secs: u64,
+    spinner: &ProgressBar,
 ) -> Result<(Release, Option<String>)> {
     // Try build status check first
     let build_status_result = github.check_build_status(token.as_deref());
@@ -323,34 +345,47 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
     let needs_auth = matches!(&build_status_result, Err(UpdateError::GitHubApi(msg)) if msg.contains("404"));
 
     if needs_auth && token.is_none() {
-        // Try to get auth from gh CLI
-        if let Some(new_token) = prompt_for_gh_auth_impl(auth_provider, prompt_provider)? {
+        // Suspend spinner for interactive auth prompt
+        let new_token = spinner.suspend(|| {
+            prompt_for_gh_auth_impl(auth_provider, prompt_provider)
+        })?;
+        if let Some(new_token) = new_token {
             *token = Some(new_token);
             // Retry build status with auth
             let retry_result = github.check_build_status(token.as_deref());
-            handle_build_status_result(retry_result, token.as_deref(), check_only, wait_for_build_flag, timeout_secs)?;
+            // Suspend spinner for build status handling (may prompt to wait)
+            spinner.suspend(|| {
+                handle_build_status_result(retry_result, token.as_deref(), check_only, wait_for_build_flag, timeout_secs)
+            })?;
         } else {
             // User declined auth, continue without (will likely fail on release fetch)
             if wait_for_build_flag {
-                println!(
-                    "{}: Could not check build status without authentication.",
-                    "Warning".yellow()
-                );
-                println!("The --wait flag may not work.");
+                spinner.suspend(|| {
+                    println!(
+                        "{}: Could not check build status without authentication.",
+                        "Warning".yellow()
+                    );
+                    println!("The --wait flag may not work.");
+                });
             }
         }
     } else {
         // No auth needed or we already have a token - handle the result
-        handle_build_status_result(build_status_result, token.as_deref(), check_only, wait_for_build_flag, timeout_secs)?;
+        spinner.suspend(|| {
+            handle_build_status_result(build_status_result, token.as_deref(), check_only, wait_for_build_flag, timeout_secs)
+        })?;
     }
 
     // Now fetch release
-    println!("Checking for updates...");
+    spinner.set_message("Checking for updates...");
     match github.fetch_latest_release(token.as_deref()) {
         Ok(release) => Ok((release, token.clone())),
         Err(UpdateError::NotFound { has_token: false }) if token.is_none() => {
-            // Try to get auth from gh CLI (if we haven't already)
-            if let Some(new_token) = prompt_for_gh_auth_impl(auth_provider, prompt_provider)? {
+            // Suspend spinner for interactive auth prompt
+            let new_token = spinner.suspend(|| {
+                prompt_for_gh_auth_impl(auth_provider, prompt_provider)
+            })?;
+            if let Some(new_token) = new_token {
                 *token = Some(new_token);
                 let release = github.fetch_latest_release(token.as_deref())?;
                 Ok((release, token.clone()))
@@ -388,6 +423,7 @@ fn prompt_for_gh_auth_impl<A: AuthProvider, P: PromptProvider>(
 mod tests {
     use super::*;
     use crate::update::github::{Asset, BuildStatus, GitHubApi, Release, WorkflowRun};
+    use indicatif::ProgressBar;
     use std::cell::{Cell, RefCell};
 
     #[test]
@@ -527,6 +563,7 @@ mod tests {
         let result = fetch_with_auth_fallback_impl(
             &github, &auth, &prompt,
             &mut token, true, false, 600,
+            &ProgressBar::hidden(),
         );
 
         assert!(result.is_ok());
@@ -552,6 +589,7 @@ mod tests {
         let result = fetch_with_auth_fallback_impl(
             &github, &auth, &prompt,
             &mut token, true, false, 600,
+            &ProgressBar::hidden(),
         );
 
         assert!(result.is_ok());
@@ -574,6 +612,7 @@ mod tests {
         let result = fetch_with_auth_fallback_impl(
             &github, &auth, &prompt,
             &mut token, true, false, 600,
+            &ProgressBar::hidden(),
         );
 
         assert!(result.is_err()); // Should fail
@@ -594,6 +633,7 @@ mod tests {
         let result = fetch_with_auth_fallback_impl(
             &github, &auth, &prompt,
             &mut token, true, false, 600,
+            &ProgressBar::hidden(),
         );
 
         assert!(result.is_ok());
@@ -620,6 +660,7 @@ mod tests {
         let result = fetch_with_auth_fallback_impl(
             &github, &auth, &prompt,
             &mut token, true, true, 600,
+            &ProgressBar::hidden(),
         );
 
         assert!(result.is_ok());
@@ -644,6 +685,7 @@ mod tests {
         let result = fetch_with_auth_fallback_impl(
             &github, &auth, &prompt,
             &mut token, true, false, 600,
+            &ProgressBar::hidden(),
         );
 
         assert!(result.is_ok());
