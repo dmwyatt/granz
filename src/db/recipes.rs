@@ -41,12 +41,13 @@ pub fn list_recipes(conn: &Connection, visibility: Option<&str>) -> Result<Vec<R
 
 pub fn show_recipe(conn: &Connection, query: &str) -> Result<Option<Recipe>> {
     let mut stmt = conn.prepare(
-        "SELECT id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id, extra_json FROM recipes WHERE id = ?1 OR slug = ?1 OR slug LIKE ?2 LIMIT 1",
+        "SELECT id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id, extra_json FROM recipes WHERE id = ?1 OR id LIKE ?2 OR slug = ?1 OR slug LIKE ?3 LIMIT 1",
     )?;
 
     let pattern = format!("%{}%", query);
+    let prefix_pattern = format!("{}%", query);
     let result = stmt
-        .query_row(rusqlite::params![query, pattern], |row| {
+        .query_row(rusqlite::params![query, prefix_pattern, pattern], |row| {
             Ok(RecipeRow {
                 id: row.get(0)?,
                 slug: row.get(1)?,

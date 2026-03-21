@@ -389,7 +389,7 @@ pub enum PeopleAction {
     },
     /// Show person details
     Show {
-        /// Name or email fragment
+        /// Person ID, name, or email fragment
         query: String,
     },
 }
@@ -443,7 +443,7 @@ pub enum RecipesAction {
     },
     /// Show recipe details
     Show {
-        /// Recipe ID or slug
+        /// Recipe ID or name substring
         query: String,
     },
 }
