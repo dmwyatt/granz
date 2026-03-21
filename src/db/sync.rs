@@ -103,31 +103,27 @@ fn serialize_recipe_json(recipe: &Recipe) -> RecipeJsonFields {
 pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    // Check existing documents and their updated_at timestamps
-    let mut check_stmt = conn.prepare(
-        "SELECT updated_at FROM documents WHERE id = ?1",
+    let initial_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM documents", [], |r| r.get(0),
     )?;
 
-    let mut insert_stmt = conn.prepare(
+    let mut upsert_stmt = conn.prepare(
         "INSERT INTO documents (id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-    )?;
-
-    let mut update_stmt = conn.prepare(
-        "UPDATE documents SET
-            title = ?2,
-            created_at = ?3,
-            updated_at = ?4,
-            deleted_at = ?5,
-            doc_type = ?6,
-            notes_plain = ?7,
-            notes_markdown = ?8,
-            summary = ?9,
-            people_json = ?10,
-            google_calendar_event_json = ?11,
-            extra_json = ?12,
-            raw_json = ?13
-         WHERE id = ?1",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            deleted_at = excluded.deleted_at,
+            doc_type = excluded.doc_type,
+            notes_plain = excluded.notes_plain,
+            notes_markdown = excluded.notes_markdown,
+            summary = excluded.summary,
+            people_json = excluded.people_json,
+            google_calendar_event_json = excluded.google_calendar_event_json,
+            extra_json = excluded.extra_json,
+            raw_json = excluded.raw_json
+         WHERE excluded.updated_at IS NOT documents.updated_at",
     )?;
 
     for doc in documents {
@@ -137,7 +133,7 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
         };
         let json = serialize_document_json(doc);
 
-        let params = rusqlite::params![
+        upsert_stmt.execute(rusqlite::params![
             doc_id,
             &doc.title,
             &doc.created_at,
@@ -151,49 +147,26 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
             &json.event_json,
             &json.extra_json,
             &json.raw_json,
-        ];
+        ])?;
 
-        // Check if document exists and its updated_at
-        let existing_updated_at: Option<Option<String>> = check_stmt
-            .query_row([doc_id], |row| row.get(0))
-            .ok();
-
-        match existing_updated_at {
-            None => {
-                // Document doesn't exist, insert it
-                insert_stmt.execute(params)?;
-                stats.inserted += 1;
-
-                // Insert document_people entries
-                if let Some(people) = &doc.people {
-                    if let Err(e) = upsert_document_people(conn, doc_id, people) {
-                        eprintln!("[grans] Warning: Failed to insert people for {}: {}", doc_id, e);
-                    }
+        if conn.changes() > 0 {
+            // Upsert document_people on insert or update
+            if let Some(people) = &doc.people {
+                if let Err(e) = upsert_document_people(conn, doc_id, people) {
+                    eprintln!("[grans] Warning: Failed to upsert people for {}: {}", doc_id, e);
                 }
             }
-            Some(existing) => {
-                // Document exists, check if it needs updating
-                let needs_update = match (&existing, &doc.updated_at) {
-                    (_, Some(new)) if existing.as_ref() != Some(new) => true,
-                    _ => false,
-                };
-
-                if needs_update {
-                    update_stmt.execute(params)?;
-                    stats.updated += 1;
-
-                    // Update document_people entries
-                    if let Some(people) = &doc.people {
-                        if let Err(e) = upsert_document_people(conn, doc_id, people) {
-                            eprintln!("[grans] Warning: Failed to update people for {}: {}", doc_id, e);
-                        }
-                    }
-                } else {
-                    stats.unchanged += 1;
-                }
-            }
+        } else {
+            stats.unchanged += 1;
         }
     }
+
+    let final_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM documents", [], |r| r.get(0),
+    )?;
+    stats.inserted = (final_count - initial_count) as usize;
+    stats.updated = documents.len() - stats.unchanged - stats.inserted
+        - documents.iter().filter(|d| d.id.is_none()).count();
 
     Ok(stats)
 }
@@ -246,15 +219,19 @@ fn upsert_document_people(conn: &Connection, document_id: &str, people: &Documen
 pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let mut check_stmt = conn.prepare("SELECT 1 FROM people WHERE id = ?1")?;
-
-    let mut insert_stmt = conn.prepare(
-        "INSERT INTO people (id, name, email, company_name, job_title, extra_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    let initial_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM people", [], |r| r.get(0),
     )?;
 
-    let mut update_stmt = conn.prepare(
-        "UPDATE people SET name = ?2, email = ?3, company_name = ?4, job_title = ?5, extra_json = ?6 WHERE id = ?1",
+    let mut upsert_stmt = conn.prepare(
+        "INSERT INTO people (id, name, email, company_name, job_title, extra_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            email = excluded.email,
+            company_name = excluded.company_name,
+            job_title = excluded.job_title,
+            extra_json = excluded.extra_json",
     )?;
 
     for person in people {
@@ -264,25 +241,22 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
         };
         let extra_json = if person.extra.is_empty() { None } else { serde_json::to_string(&person.extra).ok() };
 
-        let params = rusqlite::params![
+        upsert_stmt.execute(rusqlite::params![
             person_id,
             &person.name,
             &person.email,
             &person.company_name,
             &person.job_title,
             &extra_json,
-        ];
-
-        let exists: bool = check_stmt.query_row([person_id], |_| Ok(true)).unwrap_or(false);
-
-        if exists {
-            update_stmt.execute(params)?;
-            stats.updated += 1;
-        } else {
-            insert_stmt.execute(params)?;
-            stats.inserted += 1;
-        }
+        ])?;
     }
+
+    let final_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM people", [], |r| r.get(0),
+    )?;
+    stats.inserted = (final_count - initial_count) as usize;
+    stats.updated = people.len() - stats.inserted
+        - people.iter().filter(|p| p.id.is_none()).count();
 
     Ok(stats)
 }
@@ -295,15 +269,23 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
 pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let mut check_stmt = conn.prepare("SELECT 1 FROM events WHERE id = ?1")?;
-
-    let mut insert_stmt = conn.prepare(
-        "INSERT INTO events (id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    let initial_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events", [], |r| r.get(0),
     )?;
 
-    let mut update_stmt = conn.prepare(
-        "UPDATE events SET summary = ?2, start_time = ?3, end_time = ?4, calendar_id = ?5, attendees_json = ?6, conference_data_json = ?7, description = ?8, extra_json = ?9, raw_json = ?10 WHERE id = ?1",
+    let mut upsert_stmt = conn.prepare(
+        "INSERT INTO events (id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json, raw_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO UPDATE SET
+            summary = excluded.summary,
+            start_time = excluded.start_time,
+            end_time = excluded.end_time,
+            calendar_id = excluded.calendar_id,
+            attendees_json = excluded.attendees_json,
+            conference_data_json = excluded.conference_data_json,
+            description = excluded.description,
+            extra_json = excluded.extra_json,
+            raw_json = excluded.raw_json",
     )?;
 
     for event in events {
@@ -313,7 +295,7 @@ pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Re
         };
         let json = serialize_event_json(event);
 
-        let params = rusqlite::params![
+        upsert_stmt.execute(rusqlite::params![
             event_id,
             &event.summary,
             &json.start_time,
@@ -324,18 +306,15 @@ pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Re
             &event.description,
             &json.extra_json,
             &json.raw_json,
-        ];
-
-        let exists: bool = check_stmt.query_row([event_id], |_| Ok(true)).unwrap_or(false);
-
-        if exists {
-            update_stmt.execute(params)?;
-            stats.updated += 1;
-        } else {
-            insert_stmt.execute(params)?;
-            stats.inserted += 1;
-        }
+        ])?;
     }
+
+    let final_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events", [], |r| r.get(0),
+    )?;
+    stats.inserted = (final_count - initial_count) as usize;
+    stats.updated = events.len() - stats.inserted
+        - events.iter().filter(|e| e.id.is_none()).count();
 
     Ok(stats)
 }
@@ -354,6 +333,10 @@ pub fn upsert_calendars_from_selection(
 ) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
+    let initial_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM calendars", [], |r| r.get(0),
+    )?;
+
     // For calendars, we store the selection state. The full calendar info comes from events.
     for (calendar_id, selected) in calendars_selected {
         let provider = if enabled_calendars.contains(&"google".to_string()) {
@@ -364,29 +347,27 @@ pub fn upsert_calendars_from_selection(
             "unknown"
         };
 
-        let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM calendars WHERE id = ?1",
-                [calendar_id],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-
-        if exists {
+        if *selected {
+            conn.execute(
+                "INSERT INTO calendars (id, provider, \"primary\", access_role, summary, background_color)
+                 VALUES (?1, ?2, 0, NULL, ?1, NULL)
+                 ON CONFLICT(id) DO UPDATE SET provider = excluded.provider",
+                rusqlite::params![calendar_id, provider],
+            )?;
+        } else {
+            // Unselected calendar: update provider if it exists, don't insert
             conn.execute(
                 "UPDATE calendars SET provider = ?2 WHERE id = ?1",
                 rusqlite::params![calendar_id, provider],
             )?;
-            stats.updated += 1;
-        } else if *selected {
-            conn.execute(
-                "INSERT INTO calendars (id, provider, \"primary\", access_role, summary, background_color)
-                 VALUES (?1, ?2, 0, NULL, ?1, NULL)",
-                rusqlite::params![calendar_id, provider],
-            )?;
-            stats.inserted += 1;
         }
     }
+
+    let final_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM calendars", [], |r| r.get(0),
+    )?;
+    stats.inserted = (final_count - initial_count) as usize;
+    stats.updated = calendars_selected.len() - stats.inserted;
 
     Ok(stats)
 }
@@ -399,20 +380,29 @@ pub fn upsert_calendars_from_selection(
 pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let mut check_stmt = conn.prepare("SELECT updated_at FROM templates WHERE id = ?1")?;
-
-    let mut insert_stmt = conn.prepare(
-        "INSERT INTO templates (id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+    let initial_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM templates", [], |r| r.get(0),
     )?;
 
-    let mut update_stmt = conn.prepare(
-        "UPDATE templates SET
-            title = ?2, category = ?3, symbol = ?4, color = ?5, description = ?6,
-            is_granola = ?7, owner_id = ?8, sections_json = ?9, created_at = ?10,
-            updated_at = ?11, deleted_at = ?12, chat_suggestions_json = ?13, extra_json = ?14,
-            raw_json = ?15
-         WHERE id = ?1",
+    let mut upsert_stmt = conn.prepare(
+        "INSERT INTO templates (id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json, raw_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            category = excluded.category,
+            symbol = excluded.symbol,
+            color = excluded.color,
+            description = excluded.description,
+            is_granola = excluded.is_granola,
+            owner_id = excluded.owner_id,
+            sections_json = excluded.sections_json,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            deleted_at = excluded.deleted_at,
+            chat_suggestions_json = excluded.chat_suggestions_json,
+            extra_json = excluded.extra_json,
+            raw_json = excluded.raw_json
+         WHERE excluded.updated_at IS NOT templates.updated_at",
     )?;
 
     for template in templates {
@@ -423,7 +413,7 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
         let json = serialize_template_json(template);
         let is_granola = template.is_granola.map(|b| if b { 1 } else { 0 });
 
-        let params = rusqlite::params![
+        upsert_stmt.execute(rusqlite::params![
             template_id,
             &template.title,
             &template.category,
@@ -439,32 +429,19 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
             &json.chat_suggestions_json,
             &json.extra_json,
             &json.raw_json,
-        ];
+        ])?;
 
-        let existing_updated_at: Option<Option<String>> = check_stmt
-            .query_row([template_id], |row| row.get(0))
-            .ok();
-
-        match existing_updated_at {
-            None => {
-                insert_stmt.execute(params)?;
-                stats.inserted += 1;
-            }
-            Some(existing) => {
-                let needs_update = match (&existing, &template.updated_at) {
-                    (_, Some(new)) if existing.as_ref() != Some(new) => true,
-                    _ => false,
-                };
-
-                if needs_update {
-                    update_stmt.execute(params)?;
-                    stats.updated += 1;
-                } else {
-                    stats.unchanged += 1;
-                }
-            }
+        if conn.changes() == 0 {
+            stats.unchanged += 1;
         }
     }
+
+    let final_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM templates", [], |r| r.get(0),
+    )?;
+    stats.inserted = (final_count - initial_count) as usize;
+    stats.updated = templates.len() - stats.unchanged - stats.inserted
+        - templates.iter().filter(|t| t.id.is_none()).count();
 
     Ok(stats)
 }
@@ -477,26 +454,37 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
 pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let mut check_stmt = conn.prepare("SELECT updated_at FROM recipes WHERE id = ?1")?;
+    let initial_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recipes", [], |r| r.get(0),
+    )?;
 
-    let mut insert_stmt = conn.prepare(
+    let mut upsert_stmt = conn.prepare(
         "INSERT INTO recipes (id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(id) DO UPDATE SET
+            slug = excluded.slug,
+            visibility = excluded.visibility,
+            publisher_slug = excluded.publisher_slug,
+            creator_name = excluded.creator_name,
+            config_json = excluded.config_json,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            deleted_at = excluded.deleted_at,
+            user_id = excluded.user_id,
+            workspace_id = excluded.workspace_id,
+            extra_json = excluded.extra_json,
+            raw_json = excluded.raw_json
+         WHERE excluded.updated_at IS NOT recipes.updated_at",
     )?;
 
-    let mut update_stmt = conn.prepare(
-        "UPDATE recipes SET
-            slug = ?2, visibility = ?3, publisher_slug = ?4, creator_name = ?5,
-            config_json = ?6, created_at = ?7, updated_at = ?8, deleted_at = ?9,
-            user_id = ?10, workspace_id = ?11, extra_json = ?12, raw_json = ?13
-         WHERE id = ?1",
-    )?;
+    let mut skipped = 0usize;
 
     // Process all recipes from the response
-    let mut process_recipes = |recipes: &[Recipe], visibility: &str, stats: &mut SyncStats| -> Result<()> {
+    let mut process_recipes = |recipes: &[Recipe], visibility: &str, stats: &mut SyncStats, skipped: &mut usize| -> Result<()> {
         for recipe in recipes {
             let Some(recipe_id) = recipe.id.as_deref() else {
                 eprintln!("Warning: skipping recipe without ID");
+                *skipped += 1;
                 continue;
             };
             let json = serialize_recipe_json(recipe);
@@ -504,7 +492,7 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
             // Use the visibility from the response category if recipe.visibility is None
             let vis = recipe.visibility.as_deref().unwrap_or(visibility);
 
-            let params = rusqlite::params![
+            upsert_stmt.execute(rusqlite::params![
                 recipe_id,
                 &recipe.slug,
                 vis,
@@ -518,40 +506,31 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
                 &recipe.workspace_id,
                 &json.extra_json,
                 &json.raw_json,
-            ];
+            ])?;
 
-            let existing_updated_at: Option<Option<String>> = check_stmt
-                .query_row([recipe_id], |row| row.get(0))
-                .ok();
-
-            match existing_updated_at {
-                None => {
-                    insert_stmt.execute(params)?;
-                    stats.inserted += 1;
-                }
-                Some(existing) => {
-                    let needs_update = match (&existing, &recipe.updated_at) {
-                        (_, Some(new)) if existing.as_ref() != Some(new) => true,
-                        _ => false,
-                    };
-
-                    if needs_update {
-                        update_stmt.execute(params)?;
-                        stats.updated += 1;
-                    } else {
-                        stats.unchanged += 1;
-                    }
-                }
+            if conn.changes() == 0 {
+                stats.unchanged += 1;
             }
         }
         Ok(())
     };
 
-    process_recipes(&response.default_recipes, "default", &mut stats)?;
-    process_recipes(&response.public_recipes, "public", &mut stats)?;
-    process_recipes(&response.user_recipes, "user", &mut stats)?;
-    process_recipes(&response.shared_recipes, "shared", &mut stats)?;
-    process_recipes(&response.unlisted_recipes, "unlisted", &mut stats)?;
+    process_recipes(&response.default_recipes, "default", &mut stats, &mut skipped)?;
+    process_recipes(&response.public_recipes, "public", &mut stats, &mut skipped)?;
+    process_recipes(&response.user_recipes, "user", &mut stats, &mut skipped)?;
+    process_recipes(&response.shared_recipes, "shared", &mut stats, &mut skipped)?;
+    process_recipes(&response.unlisted_recipes, "unlisted", &mut stats, &mut skipped)?;
+
+    let final_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recipes", [], |r| r.get(0),
+    )?;
+    let total_recipes = response.default_recipes.len()
+        + response.public_recipes.len()
+        + response.user_recipes.len()
+        + response.shared_recipes.len()
+        + response.unlisted_recipes.len();
+    stats.inserted = (final_count - initial_count) as usize;
+    stats.updated = total_recipes - stats.unchanged - stats.inserted - skipped;
 
     Ok(stats)
 }
