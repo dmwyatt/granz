@@ -62,11 +62,12 @@ pub fn list_people(conn: &Connection, company: Option<&str>) -> Result<Vec<Perso
 
 pub fn find_person(conn: &Connection, query: &str) -> Result<Vec<Person>> {
     let pattern = format!("%{}%", query);
+    let prefix_pattern = format!("{}%", query);
     let mut stmt = conn.prepare(
-        "SELECT id, name, email, company_name, job_title, extra_json FROM people WHERE name LIKE ?1 OR email LIKE ?1",
+        "SELECT id, name, email, company_name, job_title, extra_json FROM people WHERE id = ?1 OR id LIKE ?2 OR name LIKE ?3 OR email LIKE ?3",
     )?;
 
-    let rows = stmt.query_map([&pattern], |row| {
+    let rows = stmt.query_map(rusqlite::params![query, prefix_pattern, pattern], |row| {
         Ok(PersonRow {
             id: row.get(0)?,
             name: row.get(1)?,

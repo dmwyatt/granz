@@ -43,12 +43,13 @@ pub fn list_templates(conn: &Connection, category: Option<&str>) -> Result<Vec<P
 
 pub fn show_template(conn: &Connection, query: &str) -> Result<Option<PanelTemplate>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json FROM templates WHERE id = ?1 OR title LIKE ?2 LIMIT 1",
+        "SELECT id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json FROM templates WHERE id = ?1 OR id LIKE ?2 OR title LIKE ?3 LIMIT 1",
     )?;
 
     let pattern = format!("%{}%", query);
+    let prefix_pattern = format!("{}%", query);
     let result = stmt
-        .query_row(rusqlite::params![query, pattern], |row| {
+        .query_row(rusqlite::params![query, prefix_pattern, pattern], |row| {
             Ok(TemplateRow {
                 id: row.get(0)?,
                 title: row.get(1)?,

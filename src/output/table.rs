@@ -133,6 +133,15 @@ pub fn format_utterance(utt: &TranscriptUtterance, highlight: bool, tz: &FixedOf
 
 /// Format a person for TTY list display.
 pub fn format_person_row(person: &Person) -> String {
+    let id = person
+        .id
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .dimmed()
+        .to_string();
     let name = person
         .name
         .as_deref()
@@ -153,18 +162,27 @@ pub fn format_person_row(person: &Person) -> String {
         .dimmed()
         .to_string();
 
-    format!("{} {}{}", name, email, company)
+    format!("{} {} {}{}", id, name, email, company)
 }
 
 /// Format a calendar for TTY list display.
 pub fn format_calendar_row(cal: &Calendar) -> String {
+    let id = cal
+        .id
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .dimmed()
+        .to_string();
     let summary = cal.summary.as_deref().unwrap_or("(unnamed)");
     let primary = if cal.primary == Some(true) {
         " ★".yellow().to_string()
     } else {
         String::new()
     };
-    format!("{}{}", summary, primary)
+    format!("{} {}{}", id, summary, primary)
 }
 
 /// Format an event for TTY display.
@@ -189,6 +207,15 @@ pub fn format_event_row(event: &CalendarEvent, tz: &FixedOffset) -> String {
 
 /// Format a template for TTY list display.
 pub fn format_template_row(tmpl: &PanelTemplate) -> String {
+    let id = tmpl
+        .id
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .dimmed()
+        .to_string();
     let title = tmpl
         .title
         .as_deref()
@@ -204,11 +231,20 @@ pub fn format_template_row(tmpl: &PanelTemplate) -> String {
         .to_string();
     let symbol = tmpl.symbol.as_deref().unwrap_or("");
 
-    format!("{} {}{}", symbol, title, category)
+    format!("{} {} {}{}", id, symbol, title, category)
 }
 
 /// Format a recipe for TTY list display.
 pub fn format_recipe_row(recipe: &Recipe) -> String {
+    let id = recipe
+        .id
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .dimmed()
+        .to_string();
     let name = recipe
         .config
         .as_ref()
@@ -225,7 +261,7 @@ pub fn format_recipe_row(recipe: &Recipe) -> String {
         .dimmed()
         .to_string();
 
-    format!("{}{}", name, visibility)
+    format!("{} {}{}", id, name, visibility)
 }
 
 /// Fixed content width for search separator dash-fill calculation.
