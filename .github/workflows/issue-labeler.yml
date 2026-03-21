@@ -3,6 +3,12 @@ name: Issue Labeler
 on:
   issues:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to label'
+        required: true
+        type: number
 
 jobs:
   label-issue:
@@ -18,6 +24,23 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Resolve issue number
+        id: issue
+        run: echo "number=${{ github.event.issue.number || inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch issue details
+        id: details
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue view ${{ steps.issue.outputs.number }} --json title,body --jq '{title, body}' > /tmp/issue.json
+          echo "title=$(jq -r .title /tmp/issue.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<ISSUE_BODY_EOF"
+            jq -r .body /tmp/issue.json
+            echo "ISSUE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Label Issue with Claude
         uses: anthropics/claude-code-action@v1
         with:
@@ -26,10 +49,10 @@ jobs:
           prompt: |
             Analyze the following GitHub issue and apply appropriate labels using `gh issue edit`.
 
-            Issue #${{ github.event.issue.number }}
-            Title: ${{ github.event.issue.title }}
+            Issue #${{ steps.issue.outputs.number }}
+            Title: ${{ steps.details.outputs.title }}
             Body:
-            ${{ github.event.issue.body }}
+            ${{ steps.details.outputs.body }}
 
             ## Label Schema
 
@@ -64,5 +87,5 @@ jobs:
 
             1. Analyze the issue title and body to understand what it's about
             2. Select appropriate labels from each category
-            3. Apply labels using: `gh issue edit ${{ github.event.issue.number }} --add-label "label1" --add-label "label2" ...`
+            3. Apply labels using: `gh issue edit ${{ steps.issue.outputs.number }} --add-label "label1" --add-label "label2" ...`
             4. Do NOT comment on the issue - just apply the labels silently
