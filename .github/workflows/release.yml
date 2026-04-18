@@ -64,6 +64,7 @@ jobs:
         with:
           name: grans-linux-x86_64
           path: target/ci-release/grans
+          retention-days: 1
 
   build-macos:
     name: Build macOS
@@ -89,6 +90,7 @@ jobs:
         with:
           name: grans-macos-aarch64
           path: target/aarch64-apple-darwin/ci-release/grans
+          retention-days: 1
 
   build-windows:
     name: Build Windows
@@ -114,6 +116,7 @@ jobs:
         with:
           name: grans-windows-x86_64.exe
           path: target/x86_64-pc-windows-msvc/ci-release/grans.exe
+          retention-days: 1
 
   release:
     name: Create Release
