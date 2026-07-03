@@ -281,7 +281,7 @@ flowchart LR
 ```
 
 The `grans sync` command:
-1. Authenticates using the token from Granola's `supabase.json` config
+1. Authenticates using the token from Granola's local config (the encrypted `supabase.json.enc` store on recent versions, or the legacy plaintext `supabase.json`)
 2. Fetches data from Granola API endpoints (`get-documents`, `get-people`, etc.)
 3. Upserts records into the local SQLite database
 4. Tracks last sync time per entity type in the `metadata` table

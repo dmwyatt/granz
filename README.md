@@ -115,7 +115,7 @@ grans sync panels --limit 10          # Fetch panels for up to 10 documents
 grans sync panels --retry             # Retry previously failed panel fetches
 ```
 
-**Note:** Sync requires a Granola auth token. By default, it reads the token from Granola's local config file. You can also provide a token explicitly with `--token`:
+**Note:** Sync requires a Granola auth token. By default, it reads the token from Granola's local config, transparently decrypting the `supabase.json.enc` store that recent Granola versions use (falling back to the legacy plaintext `supabase.json`). You can also provide a token explicitly with `--token`:
 
 ```bash
 grans --token <TOKEN> sync
