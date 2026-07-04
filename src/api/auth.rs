@@ -1,9 +1,11 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use log::debug;
 use serde::Deserialize;
+
+use super::token_store;
 
 /// Structure representing the relevant parts of Granola's supabase.json
 #[derive(Debug, Deserialize)]
@@ -62,40 +64,65 @@ pub fn resolve_token(override_token: Option<&str>) -> Result<String> {
     }
 }
 
-/// Get the authentication token from Granola's supabase.json file
+/// Get the authentication token from Granola's local config.
+///
+/// Prefers the encrypted `supabase.json.enc` store used by recent Granola
+/// versions, falling back to the legacy plaintext `supabase.json`.
 pub fn get_auth_token() -> Result<String> {
-    let config_path = find_supabase_json()?;
+    let dir = find_granola_dir()?;
+    let json = read_token_json(&dir)?;
+    extract_access_token(&json, &dir)
+}
 
-    let content = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+/// Read the raw token JSON from a Granola config directory, preferring the
+/// encrypted store and falling back to the legacy plaintext file.
+fn read_token_json(dir: &Path) -> Result<String> {
+    let encrypted = dir.join("supabase.json.enc");
+    if encrypted.exists() {
+        debug!("Reading encrypted token store at {}", encrypted.display());
+        return token_store::decrypt_token_json(dir).with_context(|| {
+            format!("Failed to read encrypted Granola token store in {}", dir.display())
+        });
+    }
 
-    let config: SupabaseConfig = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+    let plaintext = dir.join("supabase.json");
+    debug!("Reading plaintext token store at {}", plaintext.display());
+    std::fs::read_to_string(&plaintext)
+        .with_context(|| format!("Failed to read {}", plaintext.display()))
+}
+
+/// Parse the token JSON and extract a non-empty access token.
+fn extract_access_token(json: &str, dir: &Path) -> Result<String> {
+    let config: SupabaseConfig = serde_json::from_str(json)
+        .with_context(|| format!("Failed to parse Granola token JSON from {}", dir.display()))?;
 
     let token = config
         .workos_tokens
         .and_then(|t| t.access_token)
         .ok_or_else(|| anyhow::anyhow!(
-            "No access token found in {}. Please ensure you are logged into Granola.",
-            config_path.display()
+            "No access token found in Granola config at {}. Please ensure you are logged into Granola.",
+            dir.display()
         ))?;
 
     if token.is_empty() {
-        bail!("Access token is empty in {}. Please re-login to Granola.", config_path.display());
+        bail!("Access token is empty in Granola config at {}. Please re-login to Granola.", dir.display());
     }
 
-    debug!("Loaded auth token from {} ({} chars)", config_path.display(), token.len());
+    debug!("Loaded auth token ({} chars)", token.len());
     Ok(token)
 }
 
-/// Find the supabase.json file in platform-specific locations
-fn find_supabase_json() -> Result<PathBuf> {
-    let candidates = supabase_json_candidates();
-    debug!("Searching for supabase.json in {} locations", candidates.len());
+/// Find the Granola config directory in platform-specific locations. A
+/// directory qualifies if it contains either token store file.
+fn find_granola_dir() -> Result<PathBuf> {
+    let candidates = granola_dir_candidates();
+    debug!("Searching for Granola config in {} locations", candidates.len());
 
     for candidate in &candidates {
         debug!("  checking: {}", candidate.display());
-        if candidate.exists() {
+        if candidate.join("supabase.json.enc").exists()
+            || candidate.join("supabase.json").exists()
+        {
             debug!("  found: {}", candidate.display());
             return Ok(candidate.clone());
         }
@@ -146,57 +173,44 @@ fn wsl_windows_username() -> Option<String> {
     None
 }
 
-/// Get Windows-side supabase.json path candidates when running on WSL
-fn wsl_windows_supabase_candidates() -> Option<Vec<PathBuf>> {
+/// Get Windows-side Granola config directory candidates when running on WSL
+fn wsl_windows_granola_dirs() -> Option<Vec<PathBuf>> {
     let username = wsl_windows_username()?;
 
-    let mut candidates = Vec::new();
-
-    // Windows AppData Roaming path via WSL mount
-    let roaming_path = PathBuf::from(format!(
-        "/mnt/c/Users/{}/AppData/Roaming/Granola/supabase.json",
-        username
-    ));
-    candidates.push(roaming_path);
-
-    // Also check Local AppData as a fallback
-    let local_path = PathBuf::from(format!(
-        "/mnt/c/Users/{}/AppData/Local/Granola/supabase.json",
-        username
-    ));
-    candidates.push(local_path);
-
-    Some(candidates)
+    Some(vec![
+        // Windows AppData Roaming path via WSL mount
+        PathBuf::from(format!("/mnt/c/Users/{}/AppData/Roaming/Granola", username)),
+        // Also check Local AppData as a fallback
+        PathBuf::from(format!("/mnt/c/Users/{}/AppData/Local/Granola", username)),
+    ])
 }
 
-fn supabase_json_candidates() -> Vec<PathBuf> {
+fn granola_dir_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     // WSL: Check Windows paths first (higher priority)
     if is_wsl() {
-        if let Some(windows_paths) = wsl_windows_supabase_candidates() {
+        if let Some(windows_paths) = wsl_windows_granola_dirs() {
             candidates.extend(windows_paths);
         }
     }
 
     if let Some(home) = dirs_home() {
         // macOS
-        candidates.push(
-            home.join("Library/Application Support/Granola/supabase.json"),
-        );
+        candidates.push(home.join("Library/Application Support/Granola"));
 
         // Linux / WSL fallback
-        candidates.push(home.join(".config/Granola/supabase.json"));
+        candidates.push(home.join(".config/Granola"));
 
         // XDG
         if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
-            candidates.push(PathBuf::from(xdg).join("Granola/supabase.json"));
+            candidates.push(PathBuf::from(xdg).join("Granola"));
         }
     }
 
     // Windows (native)
     if let Ok(appdata) = env::var("APPDATA") {
-        candidates.push(PathBuf::from(appdata).join("Granola/supabase.json"));
+        candidates.push(PathBuf::from(appdata).join("Granola"));
     }
 
     candidates
@@ -277,15 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn test_wsl_windows_supabase_candidates() {
+    fn test_wsl_windows_granola_dirs() {
         // Test that the function returns paths in the expected format
         // Even if we can't determine the username, it should not panic
-        if let Some(candidates) = wsl_windows_supabase_candidates() {
+        if let Some(candidates) = wsl_windows_granola_dirs() {
             for path in &candidates {
                 let path_str = path.to_string_lossy();
                 assert!(
-                    path_str.contains("/mnt/c/Users/")
-                        && path_str.contains("Granola/supabase.json")
+                    path_str.contains("/mnt/c/Users/") && path_str.ends_with("Granola")
                 );
             }
         }
@@ -312,9 +325,9 @@ mod tests {
     }
 
     #[test]
-    fn test_supabase_json_candidates_no_panic() {
-        // Ensure supabase_json_candidates doesn't panic
-        let candidates = supabase_json_candidates();
+    fn test_granola_dir_candidates_no_panic() {
+        // Ensure granola_dir_candidates doesn't panic
+        let candidates = granola_dir_candidates();
         // Should return at least some candidates
         assert!(!candidates.is_empty() || cfg!(target_os = "unknown"));
     }
