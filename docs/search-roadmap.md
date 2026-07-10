@@ -39,7 +39,7 @@ Every phase below ships with a before/after run of the quality benchmark, and th
 
 ## Golden set
 
-Golden-set files live in the `benchmarks/` subdirectory of the grans data directory (the same directory `platform::data_dir()` resolves for the database, e.g. `~/.local/share/grans/benchmarks/`). They contain real meeting titles and MUST NEVER be committed to this repo or quoted in issues/PRs; this repo is public. The results ledger lives in the same directory.
+Golden-set files live in the `benchmarks/` subdirectory of the grans data directory (the same directory `platform::data_dir()` resolves for the database, e.g. `~/.local/share/grans/benchmarks/`). They contain real meeting titles and MUST NEVER be committed to this repo or quoted in issues/PRs; this repo is public. The results ledger (`ledger.jsonl`, one JSON object per benchmark run: date, binary commit, mode, matching method, metrics with per-stratum breakdown, notes) lives in the same directory, with full per-query outputs saved under `runs/` for later win/loss comparison between runs.
 
 - `search_benchmark_v2.json` (2026-07-10, primary): 93 queries. Built by agent generation over transcripts plus a verification pass that pooled hits from both retrievers, judged each hit, and completed the labels.
 - `semantic_search_benchmark.json` (v1): the original 11 title-labeled queries, kept unchanged for longitudinal comparison.
