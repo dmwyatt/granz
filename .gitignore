@@ -13,3 +13,6 @@ granola-electron.zip
 
 # Investigation docs with real API response data
 docs/granola-investigation/
+
+# IDE config
+.idea/
