@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::models::SpeakerFilter;
 
@@ -235,6 +235,25 @@ pub enum Commands {
 }
 
 // === Benchmark Subcommands ===
+
+/// Search mode measured by the quality benchmark. New modes appear here as
+/// the hybrid pipeline phases land.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityMode {
+    /// FTS5 keyword search (current production behavior)
+    Fts,
+    /// Semantic search over embeddings
+    Semantic,
+}
+
+impl QualityMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QualityMode::Fts => "fts",
+            QualityMode::Semantic => "semantic",
+        }
+    }
+}
 
 #[derive(Subcommand, Debug)]
 pub enum BenchmarkAction {

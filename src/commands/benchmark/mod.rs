@@ -3,6 +3,7 @@
 mod metrics;
 mod perf;
 mod quality;
+mod retriever;
 
 use anyhow::Result;
 use rusqlite::Connection;
