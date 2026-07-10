@@ -555,21 +555,36 @@ grans update --check
 
 ### Benchmark Quality
 
-Measure semantic search quality against a test suite of queries with known expected results.
+Measure semantic search quality against a suite of queries with known expected results. The suite is a JSON file you author, since the expected results are the exact titles of meetings in your own database:
+
+```json
+{
+  "description": "My semantic search suite",
+  "queries": [
+    {
+      "query": "what did we decide about the API redesign",
+      "relevant_meetings": ["Architecture Sync", "API v2 Planning"],
+      "rationale": "Paraphrase query; both meetings covered the decision"
+    }
+  ]
+}
+```
+
+Each query lists the meeting titles that should appear in the results (`relevant_meetings` are matched exactly against titles); `rationale` is a free-text note for your own reference.
 
 ```bash
 # Run benchmark with default settings (precision@10)
-grans benchmark quality --file tests/semantic_search_benchmark.json
+grans benchmark quality --file my-benchmark.json
 
 # Check top 5 results (precision@5)
-grans benchmark quality --file tests/semantic_search_benchmark.json --k 5
+grans benchmark quality --file my-benchmark.json --k 5
 
 # Show detailed results for each query
-grans benchmark quality --file tests/semantic_search_benchmark.json --detail
+grans benchmark quality --file my-benchmark.json --detail
 ```
 
 The benchmark reports:
-- **Precision@k**: Percentage of queries where the expected meeting appears in the top k results
+- **Precision@k**: Percentage of queries where an expected meeting appears in the top k results
 - **Mean Reciprocal Rank (MRR)**: Average of 1/rank for found matches (measures how high expected results appear)
 
 This is useful for:
@@ -577,10 +592,10 @@ This is useful for:
 - Evaluating embedding model updates
 - Comparing semantic search performance across database versions
 
-Use the `--db` flag to benchmark against different database files without affecting your main database:
+Use the `--db` flag to benchmark against a different database file without affecting your main database:
 
 ```bash
-grans --db /path/to/test.db benchmark quality --file tests/semantic_search_benchmark.json
+grans --db /path/to/test.db benchmark quality --file my-benchmark.json
 ```
 
 ## Date Filters
