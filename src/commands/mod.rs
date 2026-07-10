@@ -13,5 +13,4 @@ pub mod sync_granola;
 mod sync_panels;
 mod sync_transcripts;
 pub mod templates;
-pub mod transcripts;
 pub mod update;
