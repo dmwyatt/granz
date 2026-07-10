@@ -33,9 +33,9 @@ After making changes, sync data and run queries to verify things work end-to-end
 
 ```bash
 cargo run -- sync              # Fetch latest data from Granola API
-cargo run -- meetings list
-cargo run -- meetings search "test" --in titles
-cargo run -- people list
+cargo run -- list
+cargo run -- search "test" --in titles
+cargo run -- browse people list
 ```
 
 ## Documentation
