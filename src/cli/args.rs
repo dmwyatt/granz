@@ -188,7 +188,7 @@ pub enum Commands {
         action: BrowseAction,
     },
 
-    /// Administrative commands (db, transcripts)
+    /// Administrative commands (db, token)
     Admin {
         #[command(subcommand)]
         action: AdminAction,
@@ -300,6 +300,10 @@ pub enum SyncAction {
 
     /// Sync transcripts for documents
     Transcripts {
+        /// Fetch the transcript for a single document (full ID or unique prefix), replacing any existing transcript
+        #[arg(value_name = "DOCUMENT_ID", conflicts_with_all = ["limit", "since", "delay_ms", "retry"])]
+        document_id: Option<String>,
+
         /// Maximum number of documents to fetch transcripts for
         #[arg(long)]
         limit: Option<usize>,
@@ -457,11 +461,6 @@ pub enum AdminAction {
         #[command(subcommand)]
         action: DbAction,
     },
-    /// Transcript management (fetch, sync, status)
-    Transcripts {
-        #[command(subcommand)]
-        action: AdminTranscriptsAction,
-    },
     /// Print the current Granola API token
     Token {
         /// Copy to clipboard instead of printing
@@ -506,37 +505,60 @@ pub enum DropboxAction {
     Logout,
 }
 
-#[derive(Subcommand, Debug)]
-pub enum AdminTranscriptsAction {
-    /// Fetch transcript for a single document from Granola API
-    Fetch {
-        /// Document ID (UUID)
-        document_id: String,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
 
-        /// Show what would be done without making changes
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Sync transcripts for documents missing them from Granola API
-    Sync {
-        /// Maximum number of documents to fetch
-        #[arg(long)]
-        limit: Option<usize>,
+    #[test]
+    fn verify_cli() {
+        Cli::command().debug_assert();
+    }
 
-        /// Only sync documents created on or after this date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
-        #[arg(long)]
-        since: Option<String>,
+    fn transcripts_action(cli: &Cli) -> &SyncAction {
+        match &cli.command {
+            Commands::Sync { action: Some(action), .. } => action,
+            _ => panic!("expected sync subcommand"),
+        }
+    }
 
-        /// Delay between API requests in milliseconds
-        #[arg(long, default_value = "1500")]
-        delay_ms: u64,
+    #[test]
+    fn sync_transcripts_accepts_positional_document_id() {
+        let cli = Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1"]).unwrap();
+        match transcripts_action(&cli) {
+            SyncAction::Transcripts { document_id, .. } => {
+                assert_eq!(document_id.as_deref(), Some("doc-1"));
+            }
+            _ => panic!("expected transcripts action"),
+        }
+    }
 
-        /// Show what would be done without making changes
-        #[arg(long)]
-        dry_run: bool,
+    #[test]
+    fn sync_transcripts_positional_conflicts_with_limit() {
+        let result = Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--limit", "5"]);
+        assert!(result.is_err());
+    }
 
-        /// Retry documents that previously failed or had no transcript
-        #[arg(long)]
-        retry: bool,
-    },
+    #[test]
+    fn sync_transcripts_positional_allows_embed() {
+        let cli =
+            Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--embed"]).unwrap();
+        match transcripts_action(&cli) {
+            SyncAction::Transcripts { document_id, embed, .. } => {
+                assert_eq!(document_id.as_deref(), Some("doc-1"));
+                assert!(*embed);
+            }
+            _ => panic!("expected transcripts action"),
+        }
+    }
+
+    #[test]
+    fn sync_transcripts_positional_allows_dry_run() {
+        let cli =
+            Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--dry-run"]).unwrap();
+        match &cli.command {
+            Commands::Sync { dry_run, .. } => assert!(*dry_run),
+            _ => panic!("expected sync subcommand"),
+        }
+    }
 }

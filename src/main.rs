@@ -197,9 +197,6 @@ fn main() -> Result<()> {
         // === Admin Commands ===
         Commands::Admin { action } => match action {
             AdminAction::Db { .. } => unreachable!(), // Handled above
-            AdminAction::Transcripts { action } => {
-                commands::transcripts::run_admin(&conn, action, cli.token.as_deref(), ctx.output_mode)?;
-            }
             AdminAction::Token { clipboard } => {
                 let token = api::get_auth_token()?;
                 if *clipboard {

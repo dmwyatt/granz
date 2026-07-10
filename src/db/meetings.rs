@@ -150,6 +150,56 @@ pub fn show_meeting(conn: &Connection, query: &str) -> Result<Option<Document>> 
     Ok(result.map(row_to_document))
 }
 
+/// Escape SQL LIKE wildcards so a caller-supplied string matches literally
+/// under `ESCAPE '\'`.
+fn escape_like(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Resolve a full document ID or unique ID prefix to its `(id, title)`.
+///
+/// Unlike [`show_meeting`], this matches on ID only (no title fallback) and
+/// bails when a prefix matches more than one document, because callers use it
+/// to gate a write (replacing a transcript) where guessing is unsafe. An exact
+/// ID match always wins, even when it is also a prefix of a longer ID. `%` and
+/// `_` in `query` are treated literally via `ESCAPE '\'`.
+pub fn resolve_document_id(
+    conn: &Connection,
+    query: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    let prefix_pattern = format!("{}%", escape_like(query));
+
+    let mut stmt = conn.prepare(
+        "SELECT id, title
+         FROM documents
+         WHERE deleted_at IS NULL
+           AND (id = ?1 OR id LIKE ?2 ESCAPE '\\')
+         ORDER BY (id = ?1) DESC
+         LIMIT 2",
+    )?;
+
+    let mut rows = stmt
+        .query_map(rusqlite::params![query, prefix_pattern], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    match rows.len() {
+        0 => Ok(None),
+        1 => Ok(Some(rows.remove(0))),
+        // Two matches: an exact ID (sorted first) wins over any longer-ID
+        // prefix sibling; otherwise the prefix is genuinely ambiguous.
+        _ if rows[0].0 == query => Ok(Some(rows.remove(0))),
+        _ => anyhow::bail!(
+            "Document ID prefix \"{}\" matches multiple documents; use more characters",
+            query
+        ),
+    }
+}
+
 pub fn get_transcript(conn: &Connection, document_id: &str) -> Result<Vec<TranscriptUtterance>> {
     let mut stmt = conn.prepare(
         "SELECT id, document_id, start_timestamp, end_timestamp, text, source, is_final FROM transcript_utterances WHERE document_id = ?1 ORDER BY start_timestamp",
@@ -294,7 +344,7 @@ fn sanitize_fts_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_fixtures::{build_test_db, meetings_state};
+    use crate::db::test_fixtures::{build_test_db, meetings_state, transcripts_state};
     use chrono::{TimeZone, Utc};
 
     #[test]
@@ -366,6 +416,65 @@ mod tests {
         let conn = build_test_db(&meetings_state());
         let doc = show_meeting(&conn, "doc-deleted").unwrap();
         assert!(doc.is_none());
+    }
+
+    #[test]
+    fn test_resolve_document_id_exact() {
+        let conn = build_test_db(&transcripts_state());
+        let (id, title) = resolve_document_id(&conn, "doc-1").unwrap().unwrap();
+        assert_eq!(id, "doc-1");
+        assert_eq!(title.as_deref(), Some("AI Meeting"));
+    }
+
+    #[test]
+    fn test_resolve_document_id_unique_prefix() {
+        let conn = build_test_db(&transcripts_state());
+        // A distinct, longer id so a partial prefix is unambiguous.
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at) VALUES ('abc12345', 'Distinct', '2026-01-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let (id, _) = resolve_document_id(&conn, "abc1").unwrap().unwrap();
+        assert_eq!(id, "abc12345");
+    }
+
+    #[test]
+    fn test_resolve_document_id_exact_wins_over_longer_prefix() {
+        let conn = build_test_db(&transcripts_state());
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at) VALUES ('doc-12', 'Longer', '2026-01-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // "doc-1" is an exact id AND a prefix of "doc-12"; exact wins, no bail.
+        let (id, _) = resolve_document_id(&conn, "doc-1").unwrap().unwrap();
+        assert_eq!(id, "doc-1");
+    }
+
+    #[test]
+    fn test_resolve_document_id_ambiguous_prefix() {
+        let conn = build_test_db(&transcripts_state());
+        // Both doc-1 and doc-2 share the "doc-" prefix.
+        let err = resolve_document_id(&conn, "doc-").unwrap_err();
+        assert!(err.to_string().contains("multiple documents"));
+    }
+
+    #[test]
+    fn test_resolve_document_id_not_found() {
+        let conn = build_test_db(&transcripts_state());
+        assert!(resolve_document_id(&conn, "nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_resolve_document_id_excludes_deleted() {
+        let conn = build_test_db(&transcripts_state());
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at, deleted_at) VALUES ('gone-1', 'Gone', '2026-01-23T10:00:00Z', '2026-01-24T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(resolve_document_id(&conn, "gone-1").unwrap().is_none());
     }
 
     #[test]
