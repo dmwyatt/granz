@@ -29,7 +29,7 @@ pub fn run(
 
 /// Show embedding status without triggering embedding.
 fn show_status(conn: &Connection, mode: OutputMode) -> Result<()> {
-    let status = embed::get_embedding_status(conn)?;
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
 
     match mode {
         OutputMode::Json => print_status_json(&status),
@@ -63,6 +63,7 @@ fn print_status_json(status: &EmbeddingStatus) {
         "model": status.model_name,
         "max_length": status.max_length,
         "legacy_max_length_warning": status.legacy_max_length_warning,
+        "model_changed_warning": status.model_changed_warning,
     });
 
     if let Some(stats) = &status.chunk_size_stats {
@@ -239,6 +240,18 @@ fn print_status_tty(status: &EmbeddingStatus) {
         );
     }
 
+    if status.model_changed_warning {
+        println!();
+        println!("\x1b[1;33mWarning\x1b[0m");
+        println!("\x1b[2m───────\x1b[0m");
+        println!(
+            "  \x1b[33m⚠\x1b[0m Embeddings were created by a different embedding model."
+        );
+        println!(
+            "    Run `grans embed` to rebuild them."
+        );
+    }
+
     if status.pending_chunks > 0 {
         println!();
         println!("Run `grans embed` to build embeddings for pending chunks.");
@@ -252,7 +265,7 @@ fn clear_embeddings(
     yes: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    let status = embed::get_embedding_status(conn)?;
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
 
     if status.embedded_chunks == 0 && status.orphaned_chunks == 0 {
         match mode {
@@ -328,7 +341,7 @@ fn clear_embeddings(
 
 /// Embed with optional confirmation prompt.
 fn embed_with_prompt(conn: &Connection, yes: bool, batch_size: usize, mode: OutputMode) -> Result<()> {
-    let status = embed::get_embedding_status(conn)?;
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
 
     if status.total_chunks == 0 {
         match mode {
@@ -374,12 +387,17 @@ fn embed_with_prompt(conn: &Connection, yes: bool, batch_size: usize, mode: Outp
 
     // Prompt unless --yes or non-TTY
     if !yes && mode == OutputMode::Tty && (status.pending_chunks > 0 || status.orphaned_chunks > 0) {
-        let needs_full_reembed = status.orphaned_chunks > 0 || status.legacy_max_length_warning;
+        let needs_full_reembed = status.orphaned_chunks > 0
+            || status.legacy_max_length_warning
+            || status.model_changed_warning;
 
         if needs_full_reembed {
             eprintln!("\nEmbeddings need to be rebuilt:");
             if status.legacy_max_length_warning {
                 eprintln!("  - Existing embeddings use an outdated chunking strategy");
+            }
+            if status.model_changed_warning {
+                eprintln!("  - Existing embeddings were created by a different embedding model");
             }
             if status.orphaned_chunks > 0 {
                 eprintln!(
@@ -446,7 +464,7 @@ fn do_embed(conn: &Connection, batch_size: usize, mode: OutputMode) -> Result<()
 /// Run embedding after sync (called from sync_granola when --embed is set).
 /// Does not prompt since user explicitly requested embedding.
 pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
-    let status = embed::get_embedding_status(conn)?;
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
 
     if status.total_chunks == 0 {
         if mode != OutputMode::Json {

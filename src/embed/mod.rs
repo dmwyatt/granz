@@ -86,6 +86,9 @@ pub struct EmbeddingStatus {
     pub max_length: Option<usize>,
     /// Warning: embeddings were created with unknown max_length settings.
     pub legacy_max_length_warning: bool,
+    /// Warning: embeddings were created by a different model and must be
+    /// fully rebuilt.
+    pub model_changed_warning: bool,
 }
 
 /// Calculate a percentile value from a sorted slice.
@@ -163,7 +166,9 @@ pub fn calculate_chunk_size_stats(conn: &Connection) -> Result<Option<ChunkSizeS
 
 /// Get embedding status without triggering embedding.
 /// Returns counts of total, embedded, pending, and orphaned chunks from all sources.
-pub fn get_embedding_status(conn: &Connection) -> Result<EmbeddingStatus> {
+/// `current_model` identifies the embedder that will be used; stored embeddings
+/// from a different model are unusable and reported as pending.
+pub fn get_embedding_status(conn: &Connection, current_model: &str) -> Result<EmbeddingStatus> {
     use chunk::ChunkSourceType;
 
     // Get desired chunks from all sources using adaptive chunker with default config
@@ -212,6 +217,16 @@ pub fn get_embedding_status(conn: &Connection) -> Result<EmbeddingStatus> {
         }
     }
 
+    // Embeddings written by a different model are unusable: everything must
+    // be re-embedded, regardless of content hashes.
+    let model_name = store::get_model_name(conn);
+    let model_changed_warning =
+        model_name.is_some() && model_name.as_deref() != Some(current_model);
+    if model_changed_warning {
+        pending_count = desired_chunks.len();
+        pending_by_type = total_by_type.clone();
+    }
+
     // Calculate embedded by type (total - pending)
     let embedded_by_type = SourceTypeBreakdown {
         transcript_window: total_by_type.transcript_window - pending_by_type.transcript_window,
@@ -224,9 +239,6 @@ pub fn get_embedding_status(conn: &Connection) -> Result<EmbeddingStatus> {
         .iter()
         .filter(|s| !desired_keys.contains(&(s.source_type.clone(), s.source_id.clone())))
         .count();
-
-    // Get model name
-    let model_name = store::get_model_name(conn);
 
     // Get chunk size statistics
     let chunk_size_stats = calculate_chunk_size_stats(conn)?;
@@ -250,6 +262,7 @@ pub fn get_embedding_status(conn: &Connection) -> Result<EmbeddingStatus> {
         chunk_size_stats,
         max_length,
         legacy_max_length_warning,
+        model_changed_warning,
     })
 }
 
@@ -926,12 +939,13 @@ mod tests {
     #[test]
     fn test_embedding_status_includes_max_length() {
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &["some content that is long enough"]);
+        insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
 
         let embedder = MockEmbedder::default();
         ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
 
-        let status = get_embedding_status(&conn).unwrap();
+        let status =
+            get_embedding_status(&conn, embedder.model_name()).unwrap();
         assert_eq!(status.max_length, Some(512));
         assert!(!status.legacy_max_length_warning);
     }
@@ -948,7 +962,7 @@ mod tests {
         )
         .unwrap();
 
-        let status = get_embedding_status(&conn).unwrap();
+        let status = get_embedding_status(&conn, "mock-embedder").unwrap();
         assert_eq!(status.max_length, None);
         // Model exists but no max_length -> warning
         assert!(status.legacy_max_length_warning);
@@ -958,9 +972,39 @@ mod tests {
     fn test_embedding_status_no_warning_when_no_model() {
         let conn = setup_test_db();
         // No embeddings at all - no model name, no max_length
-        let status = get_embedding_status(&conn).unwrap();
+        let status = get_embedding_status(&conn, "mock-embedder").unwrap();
         assert_eq!(status.max_length, None);
         // No model means no warning (nothing to warn about)
         assert!(!status.legacy_max_length_warning);
+        // No model also means no mismatch to warn about
+        assert!(!status.model_changed_warning);
+    }
+
+    #[test]
+    fn test_embedding_status_matching_model_no_rebuild() {
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
+
+        let embedder = MockEmbedder::default();
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+
+        let status = get_embedding_status(&conn, embedder.model_name()).unwrap();
+        assert!(!status.model_changed_warning);
+        assert_eq!(status.pending_chunks, 0);
+    }
+
+    #[test]
+    fn test_embedding_status_model_change_marks_all_pending() {
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
+
+        let embedder = MockEmbedder::default();
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+
+        let status = get_embedding_status(&conn, "other-model").unwrap();
+        assert!(status.model_changed_warning);
+        assert_eq!(status.pending_chunks, status.total_chunks);
+        assert_eq!(status.embedded_chunks, 0);
+        assert_eq!(status.pending_by_type.total(), status.total_chunks);
     }
 }
