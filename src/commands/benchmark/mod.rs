@@ -1,5 +1,6 @@
 //! Benchmark commands: search performance and quality measurement.
 
+mod metrics;
 mod perf;
 mod quality;
 
