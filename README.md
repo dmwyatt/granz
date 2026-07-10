@@ -83,7 +83,6 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 
 **Admin Commands** (maintenance):
 - `admin db` - Database management (clear, info, list)
-- `admin transcripts` - Transcript management (fetch, status)
 - `admin token` - Print the current Granola API token
 - `benchmark quality` - Measure semantic search quality against a test suite
 
@@ -364,23 +363,6 @@ grans admin db info
 # List all database files
 grans admin db list
 ```
-
-### Transcript Management
-
-Fetch transcripts for specific documents from Granola's API.
-
-```bash
-# Fetch transcript for a specific document
-grans admin transcripts fetch <document-id>
-grans admin transcripts fetch <document-id> --dry-run
-
-# Show transcript status
-grans admin transcripts status
-```
-
-For bulk transcript syncing, use `grans sync transcripts` instead.
-
-**Note:** Requires a Granola auth token. Reads from Granola's local config file by default, or use `--token` to provide one explicitly.
 
 ### Dropbox Sync
 

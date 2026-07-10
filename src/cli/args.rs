@@ -188,7 +188,7 @@ pub enum Commands {
         action: BrowseAction,
     },
 
-    /// Administrative commands (db, transcripts)
+    /// Administrative commands (db, token)
     Admin {
         #[command(subcommand)]
         action: AdminAction,
@@ -461,11 +461,6 @@ pub enum AdminAction {
         #[command(subcommand)]
         action: DbAction,
     },
-    /// Transcript management (fetch, sync, status)
-    Transcripts {
-        #[command(subcommand)]
-        action: AdminTranscriptsAction,
-    },
     /// Print the current Granola API token
     Token {
         /// Copy to clipboard instead of printing
@@ -508,41 +503,6 @@ pub enum DropboxAction {
     Status,
     /// Remove Dropbox authentication
     Logout,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum AdminTranscriptsAction {
-    /// Fetch transcript for a single document from Granola API
-    Fetch {
-        /// Document ID (UUID)
-        document_id: String,
-
-        /// Show what would be done without making changes
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Sync transcripts for documents missing them from Granola API
-    Sync {
-        /// Maximum number of documents to fetch
-        #[arg(long)]
-        limit: Option<usize>,
-
-        /// Only sync documents created on or after this date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
-        #[arg(long)]
-        since: Option<String>,
-
-        /// Delay between API requests in milliseconds
-        #[arg(long, default_value = "1500")]
-        delay_ms: u64,
-
-        /// Show what would be done without making changes
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Retry documents that previously failed or had no transcript
-        #[arg(long)]
-        retry: bool,
-    },
 }
 
 #[cfg(test)]
