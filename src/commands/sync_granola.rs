@@ -17,7 +17,7 @@ use crate::output::format::OutputMode;
 use crate::output::progress::create_spinner;
 
 use super::sync_panels::sync_panels;
-use super::sync_transcripts::sync_transcripts;
+use super::sync_transcripts::{sync_single_transcript, sync_transcripts};
 
 /// Run the sync command
 pub fn run(
@@ -34,22 +34,26 @@ pub fn run(
         }
         Some(SyncAction::Documents) => sync_documents(conn, dry_run, token, mode),
         Some(SyncAction::Transcripts {
+            document_id,
             limit,
             since,
             delay_ms,
             retry,
             embed,
         }) => {
-            let result = sync_transcripts(
-                conn,
-                *limit,
-                since.as_deref(),
-                *delay_ms,
-                *retry,
-                dry_run,
-                token,
-                mode,
-            );
+            let result = match document_id {
+                Some(id) => sync_single_transcript(conn, id, dry_run, token, mode),
+                None => sync_transcripts(
+                    conn,
+                    *limit,
+                    since.as_deref(),
+                    *delay_ms,
+                    *retry,
+                    dry_run,
+                    token,
+                    mode,
+                ),
+            };
 
             // If sync succeeded and --embed was requested, build embeddings
             if result.is_ok() && *embed && !dry_run {

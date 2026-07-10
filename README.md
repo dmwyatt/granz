@@ -104,6 +104,11 @@ grans sync calendars              # Just calendar events
 grans sync templates              # Just templates
 grans sync recipes                # Just recipes
 
+# Fetch one document's transcript (full ID or unique prefix), replacing any existing transcript
+grans sync transcripts 504fe9f6
+grans sync transcripts 504fe9f6 --dry-run
+grans sync transcripts 504fe9f6 --embed   # Rebuild embeddings afterward
+
 # Options
 grans sync --dry-run              # Preview what would sync
 grans sync transcripts --embed    # Build embeddings after syncing transcripts

@@ -300,6 +300,10 @@ pub enum SyncAction {
 
     /// Sync transcripts for documents
     Transcripts {
+        /// Fetch the transcript for a single document (full ID or unique prefix), replacing any existing transcript
+        #[arg(value_name = "DOCUMENT_ID", conflicts_with_all = ["limit", "since", "delay_ms", "retry"])]
+        document_id: Option<String>,
+
         /// Maximum number of documents to fetch transcripts for
         #[arg(long)]
         limit: Option<usize>,
@@ -549,5 +553,52 @@ mod tests {
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert();
+    }
+
+    fn transcripts_action(cli: &Cli) -> &SyncAction {
+        match &cli.command {
+            Commands::Sync { action: Some(action), .. } => action,
+            _ => panic!("expected sync subcommand"),
+        }
+    }
+
+    #[test]
+    fn sync_transcripts_accepts_positional_document_id() {
+        let cli = Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1"]).unwrap();
+        match transcripts_action(&cli) {
+            SyncAction::Transcripts { document_id, .. } => {
+                assert_eq!(document_id.as_deref(), Some("doc-1"));
+            }
+            _ => panic!("expected transcripts action"),
+        }
+    }
+
+    #[test]
+    fn sync_transcripts_positional_conflicts_with_limit() {
+        let result = Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--limit", "5"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sync_transcripts_positional_allows_embed() {
+        let cli =
+            Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--embed"]).unwrap();
+        match transcripts_action(&cli) {
+            SyncAction::Transcripts { document_id, embed, .. } => {
+                assert_eq!(document_id.as_deref(), Some("doc-1"));
+                assert!(*embed);
+            }
+            _ => panic!("expected transcripts action"),
+        }
+    }
+
+    #[test]
+    fn sync_transcripts_positional_allows_dry_run() {
+        let cli =
+            Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--dry-run"]).unwrap();
+        match &cli.command {
+            Commands::Sync { dry_run, .. } => assert!(*dry_run),
+            _ => panic!("expected sync subcommand"),
+        }
     }
 }
