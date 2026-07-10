@@ -442,8 +442,10 @@ fn semantic_search(
     }
 
     // Check embedding status and prompt if many chunks need embedding
-    let status = crate::embed::get_embedding_status(conn)?;
-    let needs_full_reembed = status.orphaned_chunks > 0 || status.legacy_max_length_warning;
+    let status = crate::embed::get_embedding_status(conn, crate::embed::model::MODEL_NAME)?;
+    let needs_full_reembed = status.orphaned_chunks > 0
+        || status.legacy_max_length_warning
+        || status.model_changed_warning;
 
     if (status.pending_chunks > EMBED_WARN_THRESHOLD || needs_full_reembed) && !yes {
         if ctx.output_mode == OutputMode::Tty {
@@ -457,6 +459,9 @@ fn semantic_search(
                 }
                 if status.legacy_max_length_warning {
                     eprintln!("  - Existing embeddings use an outdated chunking strategy");
+                }
+                if status.model_changed_warning {
+                    eprintln!("  - Existing embeddings were created by a different embedding model");
                 }
                 eprintln!(
                     "  - {} new chunks need embedding",

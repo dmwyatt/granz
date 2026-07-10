@@ -15,6 +15,10 @@ pub trait Embedder {
     fn max_length(&self) -> usize;
 }
 
+/// Identity of the production embedder, exposed so status checks can compare
+/// stored metadata against it without loading the ONNX model.
+pub const MODEL_NAME: &str = "nomic-embed-text-v1.5";
+
 /// Production embedder using fastembed (nomic-embed-text-v1.5).
 pub struct FastEmbedModel {
     model: RefCell<fastembed::TextEmbedding>,
@@ -116,7 +120,7 @@ impl Embedder for FastEmbedModel {
     }
 
     fn model_name(&self) -> &str {
-        "nomic-embed-text-v1.5"
+        MODEL_NAME
     }
 
     fn max_length(&self) -> usize {
@@ -256,4 +260,5 @@ mod tests {
         let v2 = embedder.embed_query("goodbye").unwrap();
         assert_ne!(v1, v2);
     }
+
 }
