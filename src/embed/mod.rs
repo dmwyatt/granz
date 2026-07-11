@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod chunker;
+pub mod headers;
 pub mod model;
 pub mod progress;
 pub mod rerank;
@@ -174,9 +175,9 @@ pub fn get_embedding_status(conn: &Connection, current_model: &str) -> Result<Em
 
     // Get desired chunks from all sources using adaptive chunker with default config
     let config = chunker::ChunkingConfig::default();
-    let mut desired_chunks = chunker::transcript_window_chunker_adaptive(conn, &config)?;
-    desired_chunks.extend(chunker::panel_section_chunker(conn, &config)?);
-    desired_chunks.extend(chunker::notes_paragraph_chunker(conn, 20)?);
+    let mut desired_chunks = chunker::transcript_window_chunker_adaptive(conn, &config, None)?;
+    desired_chunks.extend(chunker::panel_section_chunker(conn, &config, None)?);
+    desired_chunks.extend(chunker::notes_paragraph_chunker(conn, 20, None)?);
 
     // Get stored chunks
     let stored = store::get_stored_chunks(conn)?;
@@ -322,9 +323,10 @@ pub fn ensure_embeddings(
     let chunking_config = chunker::ChunkingConfig::from_max_length(embedder.max_length());
 
     // Run all chunkers to get desired chunks
-    let mut desired_chunks = chunker::transcript_window_chunker_adaptive(conn, &chunking_config)?;
-    desired_chunks.extend(chunker::panel_section_chunker(conn, &chunking_config)?);
-    desired_chunks.extend(chunker::notes_paragraph_chunker(conn, 20)?);
+    let mut desired_chunks =
+        chunker::transcript_window_chunker_adaptive(conn, &chunking_config, None)?;
+    desired_chunks.extend(chunker::panel_section_chunker(conn, &chunking_config, None)?);
+    desired_chunks.extend(chunker::notes_paragraph_chunker(conn, 20, None)?);
 
     if desired_chunks.is_empty() {
         if !model_consistent {

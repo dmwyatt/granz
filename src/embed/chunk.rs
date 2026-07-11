@@ -70,6 +70,15 @@ pub fn hash_content(text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Hash the full embed input (header + text when a header is present), so
+/// chunks re-embed when either part changes.
+pub fn hash_embed_input(header: Option<&str>, text: &str) -> String {
+    match header {
+        Some(h) => hash_content(&format!("{}{}", h, text)),
+        None => hash_content(text),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

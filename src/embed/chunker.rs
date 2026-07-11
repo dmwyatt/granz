@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
-use super::chunk::{hash_content, Chunk, ChunkSourceType};
+use super::chunk::{hash_embed_input, Chunk, ChunkSourceType};
 
 /// Configuration for adaptive token-based chunking.
 #[derive(Debug, Clone)]
@@ -57,9 +59,14 @@ impl ChunkingConfig {
 
 /// Generate transcript window chunks using adaptive token-based chunking.
 /// This normalizes chunk sizes to be within the model's token limits.
+/// When `headers` is provided, each document's contextual header is
+/// attached to its chunks (embed input only) and the per-document char
+/// budgets shrink by the header length so header + chunk stays within the
+/// model limit.
 pub fn transcript_window_chunker_adaptive(
     index_conn: &Connection,
     config: &ChunkingConfig,
+    headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = index_conn.prepare(
         "SELECT document_id, id, text, start_timestamp, end_timestamp, source
@@ -94,14 +101,19 @@ pub fn transcript_window_chunker_adaptive(
     }
 
     let mut chunks = Vec::new();
-    let target_chars = config.target_chars();
-    let max_chars = config.max_chars();
+    let base_target_chars = config.target_chars();
+    let base_max_chars = config.max_chars();
     let overlap_chars = config.overlap_chars();
 
     for (doc_id, utterances) in &docs {
         if utterances.is_empty() {
             continue;
         }
+
+        let header = headers.and_then(|h| h.get(doc_id.as_str()));
+        let header_len = header.map_or(0, |h| h.len());
+        let target_chars = base_target_chars.saturating_sub(header_len);
+        let max_chars = base_max_chars.saturating_sub(header_len);
 
         let mut buffer = String::new();
         let mut buffer_start_idx = 0;
@@ -143,8 +155,8 @@ pub fn transcript_window_chunker_adaptive(
                         source_id: format!("{}:c{}", doc_id, chunk_idx),
                         document_id: doc_id.clone(),
                         text: buffer.clone(),
-                        content_hash: hash_content(&buffer),
-                        header: None,
+                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                        header: header.cloned(),
                         metadata: Some(serde_json::json!({
                             "window_start_idx": buffer_start_idx,
                             "window_end_idx": buffer_end_idx,
@@ -186,8 +198,8 @@ pub fn transcript_window_chunker_adaptive(
                         source_id: format!("{}:c{}", doc_id, chunk_idx),
                         document_id: doc_id.clone(),
                         text: buffer.clone(),
-                        content_hash: hash_content(&buffer),
-                        header: None,
+                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                        header: header.cloned(),
                         metadata: Some(serde_json::json!({
                             "window_start_idx": buffer_start_idx,
                             "window_end_idx": buffer_end_idx,
@@ -224,8 +236,8 @@ pub fn transcript_window_chunker_adaptive(
                             source_id: format!("{}:c{}", doc_id, chunk_idx),
                             document_id: doc_id.clone(),
                             text: buffer.clone(),
-                            content_hash: hash_content(&buffer),
-                            header: None,
+                            content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                            header: header.cloned(),
                             metadata: Some(serde_json::json!({
                                 "window_start_idx": buffer_start_idx,
                                 "window_end_idx": buffer_end_idx,
@@ -272,8 +284,8 @@ pub fn transcript_window_chunker_adaptive(
                 source_id: format!("{}:c{}", doc_id, chunk_idx),
                 document_id: doc_id.clone(),
                 text: buffer.clone(),
-                content_hash: hash_content(&buffer),
-                header: None,
+                content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                header: header.cloned(),
                 metadata: Some(serde_json::json!({
                     "window_start_idx": buffer_start_idx,
                     "window_end_idx": buffer_end_idx,
@@ -361,6 +373,7 @@ use crate::query::text::{split_markdown_sections, strip_panel_footer};
 pub fn panel_section_chunker(
     conn: &Connection,
     config: &ChunkingConfig,
+    headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.document_id, p.content_markdown
@@ -406,7 +419,8 @@ pub fn panel_section_chunker(
                 continue;
             }
 
-            let content_hash = hash_content(&text);
+            let header = headers.and_then(|h| h.get(panel.document_id.as_str()));
+            let content_hash = hash_embed_input(header.map(String::as_str), &text);
 
             chunks.push(Chunk {
                 source_type: ChunkSourceType::PanelSection,
@@ -414,7 +428,7 @@ pub fn panel_section_chunker(
                 document_id: panel.document_id.clone(),
                 text,
                 content_hash,
-                header: None,
+                header: header.cloned(),
                 metadata: Some(serde_json::json!({
                     "panel_id": panel.id,
                     "section_heading": heading,
@@ -431,6 +445,7 @@ pub fn panel_section_chunker(
 pub fn notes_paragraph_chunker(
     conn: &Connection,
     min_chars: usize,
+    headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
         "SELECT id, notes_plain
@@ -463,9 +478,10 @@ pub fn notes_paragraph_chunker(
             .filter(|p| p.len() >= min_chars)
             .collect();
 
+        let header = headers.and_then(|h| h.get(doc.id.as_str()));
         for (para_idx, para) in paragraphs.iter().enumerate() {
             let text = para.to_string();
-            let content_hash = hash_content(&text);
+            let content_hash = hash_embed_input(header.map(String::as_str), &text);
 
             chunks.push(Chunk {
                 source_type: ChunkSourceType::NotesParagraph,
@@ -473,7 +489,7 @@ pub fn notes_paragraph_chunker(
                 document_id: doc.id.clone(),
                 text,
                 content_hash,
-                header: None,
+                header: header.cloned(),
                 metadata: Some(serde_json::json!({
                     "paragraph_idx": para_idx,
                 })),
@@ -631,7 +647,7 @@ mod tests {
     fn test_adaptive_empty_db() {
         let conn = setup_test_db(&[]);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -641,7 +657,7 @@ mod tests {
         let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
         let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].document_id, "doc1");
         assert!(chunks[0].text.contains("Hello world"));
@@ -664,7 +680,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("Short one"));
         assert!(chunks[0].text.contains("Short three"));
@@ -688,7 +704,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // Should have multiple chunks
         assert!(chunks.len() >= 2, "Expected multiple chunks, got {}", chunks.len());
     }
@@ -706,7 +722,7 @@ mod tests {
             min_chars: 20,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The huge text should result in multiple chunks
         assert!(chunks.len() > 1, "Expected split chunks, got {}", chunks.len());
         // Each chunk should not exceed max_chars
@@ -734,7 +750,7 @@ mod tests {
             min_chars: 20,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The "ok" text alone would be too small, but combined they're fine
         assert!(!chunks.is_empty());
         for chunk in &chunks {
@@ -750,7 +766,7 @@ mod tests {
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         let doc_ids: Vec<&str> = chunks.iter().map(|c| c.document_id.as_str()).collect();
@@ -773,7 +789,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         let meta = chunks[0].metadata.as_ref().unwrap();
@@ -789,7 +805,7 @@ mod tests {
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["start_timestamp"], "2025-01-01T10:00:00Z");
@@ -800,7 +816,7 @@ mod tests {
     fn test_adaptive_source_id_format() {
         let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", "Content here that is long enough to meet minimum chunk size requirements for the test.", None)]);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert!(chunks[0].source_id.starts_with("doc1:"));
     }
@@ -827,7 +843,7 @@ mod tests {
     fn test_panel_section_chunker_empty_db() {
         let conn = setup_panel_test_db();
         let config = ChunkingConfig::default();
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -838,7 +854,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].source_type, ChunkSourceType::PanelSection);
@@ -855,7 +871,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].text.contains("Chat with"));
@@ -868,7 +884,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 50, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         // "Ok." section is too short, only "Key Decisions" should remain
         assert_eq!(chunks.len(), 1);
@@ -889,7 +905,7 @@ mod tests {
         ).unwrap();
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -900,7 +916,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["panel_id"], "panel1");
@@ -912,7 +928,7 @@ mod tests {
     #[test]
     fn test_notes_paragraph_chunker_empty_db() {
         let conn = setup_panel_test_db();
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -924,7 +940,7 @@ mod tests {
             ["First paragraph with enough content.\n\nSecond paragraph also with enough content."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].source_type, ChunkSourceType::NotesParagraph);
@@ -940,7 +956,7 @@ mod tests {
             ["ok\n\nThis paragraph is long enough to be included in the embedding."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
 
         // "ok" is too short
         assert_eq!(chunks.len(), 1);
@@ -955,7 +971,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -967,7 +983,7 @@ mod tests {
             ["A paragraph that is long enough to be embedded."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["paragraph_idx"], 0);
@@ -980,7 +996,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].source_type, ChunkSourceType::PanelSection);
@@ -997,6 +1013,128 @@ mod tests {
         let meta2 = chunks[2].metadata.as_ref().unwrap();
         assert_eq!(meta2["section_heading"], "Action Items");
         assert!(chunks[2].text.contains("welcome email"));
+    }
+
+    // Tests for contextual headers threading through the chunkers
+    fn headers_for(doc_id: &str, header: &str) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(doc_id.to_string(), header.to_string());
+        map
+    }
+
+    #[test]
+    fn test_adaptive_header_on_chunk_not_in_text() {
+        let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
+        let config = ChunkingConfig::default();
+        let headers = headers_for("doc1", "Meeting: Sync\n\n");
+
+        let chunks =
+            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
+        assert!(!chunks[0].text.contains("Meeting:"));
+        assert!(chunks[0].embed_input().starts_with("Meeting: Sync\n\n"));
+    }
+
+    #[test]
+    fn test_adaptive_header_changes_content_hash() {
+        let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
+        let config = ChunkingConfig::default();
+
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
+        let without =
+            transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+        let with_a = transcript_window_chunker_adaptive(
+            &conn,
+            &config,
+            Some(&headers_for("doc1", "Meeting: A\n\n")),
+        )
+        .unwrap();
+        let with_b = transcript_window_chunker_adaptive(
+            &conn,
+            &config,
+            Some(&headers_for("doc1", "Meeting: B\n\n")),
+        )
+        .unwrap();
+
+        assert_ne!(without[0].content_hash, with_a[0].content_hash);
+        assert_ne!(with_a[0].content_hash, with_b[0].content_hash);
+        // Text itself is identical in all three.
+        assert_eq!(without[0].text, with_a[0].text);
+    }
+
+    #[test]
+    fn test_adaptive_header_shrinks_chunk_budget() {
+        // With a header, header + text must stay within max_chars.
+        let long_text = "This is a fairly long sentence that keeps going with more words. ".repeat(10);
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", &long_text, None)]);
+        let config = ChunkingConfig {
+            target_tokens: 30,
+            max_tokens: 50,
+            overlap_tokens: 10,
+            min_chars: 20,
+            chars_per_token: 4.0,
+        };
+        let header = "Meeting: Budget Review Session\nDate: 2026-02-01\n\n";
+        let headers = headers_for("doc1", header);
+
+        let chunks =
+            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(
+                chunk.embed_input().len() <= config.max_chars() + 50,
+                "embed input too large: {} bytes vs max {}",
+                chunk.embed_input().len(),
+                config.max_chars()
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaptive_no_header_entry_means_no_header() {
+        let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
+        let config = ChunkingConfig::default();
+        let headers = headers_for("other-doc", "Meeting: Other\n\n");
+
+        let chunks =
+            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+
+        assert_eq!(chunks[0].header, None);
+    }
+
+    #[test]
+    fn test_panel_chunker_carries_header() {
+        let conn = setup_panel_test_db();
+        let markdown = "### Action Items\n\nComplete the deployment process for the entire team.";
+        insert_test_panel(&conn, "panel1", "doc1", markdown);
+        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let headers = headers_for("doc1", "Meeting: Sync\n\n");
+
+        let chunks = panel_section_chunker(&conn, &config, Some(&headers)).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
+        assert!(!chunks[0].text.contains("Meeting: Sync"));
+    }
+
+    #[test]
+    fn test_notes_chunker_carries_header() {
+        let conn = setup_panel_test_db();
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at, notes_plain) VALUES ('doc1', 'Test', '2025-01-01T00:00:00Z', ?1)",
+            ["A paragraph that is long enough to be embedded."],
+        ).unwrap();
+        let headers = headers_for("doc1", "Meeting: Sync\n\n");
+
+        let chunks = notes_paragraph_chunker(&conn, 20, Some(&headers)).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
     }
 
     // Regression tests: transcripts contain multi-byte UTF-8 (curly
@@ -1030,7 +1168,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(!chunks.is_empty());
     }
 
@@ -1051,7 +1189,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(!chunks.is_empty());
     }
 
@@ -1069,7 +1207,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.len() > 1);
     }
 
@@ -1120,7 +1258,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.is_empty(), "Empty text with source should produce no chunks, got {}", chunks.len());
     }
 
@@ -1140,7 +1278,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("[You] I think we should proceed"));
@@ -1162,7 +1300,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].text.contains("[You]"));
@@ -1186,7 +1324,7 @@ mod tests {
             min_chars: 10,
             chars_per_token: 4.0,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("[You] Labeled utterance from the user."));
@@ -1212,13 +1350,13 @@ mod tests {
         let config = ChunkingConfig::default();
 
         let conn_mic = setup_test_db(&utts_mic);
-        let chunks_mic = transcript_window_chunker_adaptive(&conn_mic, &config).unwrap();
+        let chunks_mic = transcript_window_chunker_adaptive(&conn_mic, &config, None).unwrap();
 
         let conn_sys = setup_test_db(&utts_sys);
-        let chunks_sys = transcript_window_chunker_adaptive(&conn_sys, &config).unwrap();
+        let chunks_sys = transcript_window_chunker_adaptive(&conn_sys, &config, None).unwrap();
 
         let conn_none = setup_test_db(&utts_none);
-        let chunks_none = transcript_window_chunker_adaptive(&conn_none, &config).unwrap();
+        let chunks_none = transcript_window_chunker_adaptive(&conn_none, &config, None).unwrap();
 
         // All three should produce different hashes
         assert_ne!(chunks_mic[0].content_hash, chunks_sys[0].content_hash);
