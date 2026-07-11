@@ -6,6 +6,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 
 - **Keyword search** (Phase 1, #39): FTS5 `MATCH` with implicit-AND semantics (each term quoted individually; user-supplied quotes force phrase matching), ranked by `bm25()` with recency as tiebreak. Title substring matches rank as a tier above content matches; weighting them properly is Phase 5. Applies to the combined search and the standalone transcript/notes/panel searches.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
+- **Embedding spec** (Phase 4, #42): the chunking scheme (target/overlap tokens, overlap mode, contextual-headers toggle) is persisted in `embedding_metadata` and resolved stored-first by every search/benchmark/sync path (`embed/config.rs`), so a database embedded with a variant scheme is never silently re-chunked to the binary's defaults. `grans embed` has hidden experiment flags (`--chunk-target-tokens`, `--chunk-overlap-tokens`, `--overlap-mode`, `--contextual-headers[=bool]`) that override the stored scheme, and `embed status` reports the resolved scheme. Phase 4 tested header and chunking variants through this machinery; none beat the current defaults end-to-end (results below), so the defaults stand.
 - **Hybrid search** (Phase 2, #40, opt-in `--hybrid`): runs both retrievers, truncates each ranked list to a 100-document candidate pool, and fuses by reciprocal rank fusion (k=60) in `query/fusion.rs` + `query/hybrid.rs`. Output is the fused meeting list; keyword and semantic remain the forcing modes.
 - **Reranking** (Phase 3, #41 + follow-up, part of `--hybrid` by default): a cross-encoder (fastembed `TextRerank`, jina-reranker-v1-turbo-en) scores the top 50 fused candidates as title + best-chunk passages, and the final order blends that score with the fusion prior (`rerank_score + 30 × RRF score`, `embed/rerank.rs` + `query/rerank.rs`). The sigmoid relevance probability is the user-facing score; `--min-score` filters on it; `--fast` skips the stage for fusion-only ordering (~63 ms instead of ~2 s per query).
 - The modes are mutually exclusive; `commands/search.rs` dispatches on a `SearchMode` enum.
@@ -100,6 +101,20 @@ Phase 3 follow-up (2026-07-11, same snapshot): the three dropouts shared one cau
 
 The blend beats both plain fusion and unblended reranking on every aggregate and every stratum: exact-term returns to hit 1.00 / MRR 1.000 (fixing the two slips), mixed reaches 0.92 / 0.768, paraphrase 0.92 / 0.754. Against hybrid at k=10 it goes 22W / 9L / 62T with no fusion-top-3 document leaving the top 10. With the quality objection gone, reranking became the `--hybrid` default; the remaining cost is latency, so `--fast` skips the stage for fusion-only ordering (~63 ms vs ~2 s per query).
 
+Phase 4 results (2026-07-11, same snapshot, semantic mode, k=10, ID matching): embedding-side variants were each embedded into a copy of the snapshot via the hidden `grans embed` experiment flags and benchmarked as-is (the chunking scheme is persisted in `embedding_metadata` and resolved stored-first, so a variant database is never silently re-chunked back to the binary's defaults):
+
+| Variant | hit-rate@10 | recall@10 | MRR@10 |
+|---|---|---|---|
+| baseline (348 target / 102 overlap, chars) | 0.86 | 0.76 | 0.721 |
+| contextual headers (title/date/attendees) | 0.87 | 0.71 | 0.696 |
+| small chunks (192/48) | 0.88 | 0.71 | 0.732 |
+| large overlap (348/204) | 0.89 | 0.74 | 0.727 |
+| big chunks (460/102) | 0.87 | 0.71 | 0.728 |
+| utterance-boundary overlap | 0.85 | 0.70 | 0.702 |
+| combo (192/114) | 0.87 | 0.73 | 0.723 |
+
+No variant was adopted. The semantic-mode MRR gains (small chunks, large overlap) were rank shuffles rather than uniform lifts (both go 14W / 16L / 63T per query against baseline, with individual collapses like rank 19 → 318), and every variant loses recall. The decisive check was end-to-end: rerank-jina on the two survivors' databases regressed the production pipeline (baseline 0.94 / 0.80 / 0.804; large overlap 0.94 / 0.77 / 0.765; small chunks 0.93 / 0.77 / 0.751). Two mechanisms explain it: recall losses remove documents from the fused candidate pool where no reranker can recover them, and smaller/denser chunks shorten the passages the cross-encoder judges. Contextual headers traded a small hit-rate gain for broad dilution (every chunk of a meeting becomes more like its siblings, and recurring meetings share titles); a title-only header variant is untested and remains a possible follow-up. The current chunking (348 target / 102 overlap / 512 max, character-boundary overlap) stands as a validated local optimum for the full pipeline, and the strict no-regression standard for the daily-driver mode (rule 2) is what rejected the variants.
+
 (v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55, title matching.)
 
 Caveats a maintainer must know:
@@ -120,7 +135,7 @@ Implementation is tracked on GitHub: parent issue #37 with one sub-issue per pha
 - Phase 4 (#42): embedding-side experiments (contextual chunk headers, chunking variants)
 - Phase 5 (#43): ranking polish (recency tiebreak, title boost, per-meeting grouping)
 
-One experiment result worth keeping here because it contradicts the model card's guidance: nomic task prefixes (`search_query:`/`search_document:`) were tested 2026-07 on the current chunking and made no measurable difference. Re-test only if chunking changes materially (tracked in #42).
+One experiment result worth keeping here because it contradicts the model card's guidance: nomic task prefixes (`search_query:`/`search_document:`) were tested 2026-07 on the current chunking and made no measurable difference. Re-test only if chunking changes materially; Phase 4 kept the chunking unchanged, so the result stands.
 
 ## Deliberately out of scope
 
