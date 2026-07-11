@@ -5,6 +5,33 @@ use rusqlite::Connection;
 
 use super::chunk::{hash_embed_input, Chunk, ChunkSourceType};
 
+/// How consecutive transcript chunks overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapMode {
+    /// Carry the trailing overlap-budget characters of the previous chunk.
+    Chars,
+    /// Carry the trailing whole utterances that fit the overlap budget, so
+    /// chunks always start at an utterance boundary.
+    Utterances,
+}
+
+impl OverlapMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OverlapMode::Chars => "chars",
+            OverlapMode::Utterances => "utterances",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "chars" => Some(OverlapMode::Chars),
+            "utterances" => Some(OverlapMode::Utterances),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for adaptive token-based chunking.
 #[derive(Debug, Clone)]
 pub struct ChunkingConfig {
@@ -18,6 +45,8 @@ pub struct ChunkingConfig {
     pub min_chars: usize,
     /// Approximate characters per token for the model.
     pub chars_per_token: f64,
+    /// How consecutive transcript chunks overlap.
+    pub overlap_mode: OverlapMode,
 }
 
 impl Default for ChunkingConfig {
@@ -38,6 +67,7 @@ impl ChunkingConfig {
             overlap_tokens: (max_length as f64 * 0.20) as usize,
             min_chars: 50,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         }
     }
 
@@ -116,6 +146,10 @@ pub fn transcript_window_chunker_adaptive(
         let max_chars = base_max_chars.saturating_sub(header_len);
 
         let mut buffer = String::new();
+        // Whole utterances currently in the buffer, tracked for
+        // utterance-boundary overlap. Oversized-split fragments are not
+        // utterances and are deliberately never tracked.
+        let mut buffer_utts: Vec<String> = Vec::new();
         let mut buffer_start_idx = 0;
         let mut buffer_end_idx = 0;
         let mut buffer_start_ts: Option<&str> = None;
@@ -168,9 +202,7 @@ pub fn transcript_window_chunker_adaptive(
                 }
 
                 // Start new buffer with overlap
-                let overlap_start =
-                    floor_char_boundary(&buffer, buffer.len().saturating_sub(overlap_chars));
-                buffer = buffer[overlap_start..].to_string();
+                buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
                 buffer_start_idx = i;
             }
 
@@ -210,10 +242,10 @@ pub fn transcript_window_chunker_adaptive(
                     chunk_idx += 1;
                 }
 
-                // Start fresh buffer with overlap
-                let overlap_start =
-                    floor_char_boundary(&buffer, buffer.len().saturating_sub(overlap_chars));
-                buffer = buffer[overlap_start..].to_string();
+                // Start fresh buffer with overlap. The buffer ends in a
+                // split fragment here, so utterance mode carries nothing.
+                buffer_utts.clear();
+                buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
                 buffer_start_idx = i;
                 buffer_start_ts = None;
                 remaining = rest.to_string();
@@ -249,14 +281,13 @@ pub fn transcript_window_chunker_adaptive(
                     }
 
                     // Start new buffer with overlap
-                    let overlap_start =
-                    floor_char_boundary(&buffer, buffer.len().saturating_sub(overlap_chars));
-                    buffer = buffer[overlap_start..].to_string();
+                    buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
                     buffer_start_idx = i;
                     buffer_start_ts = None;
                 }
 
                 // Add to buffer
+                buffer_utts.push(remaining.clone());
                 if buffer.is_empty() {
                     buffer = remaining;
                     buffer_start_idx = i;
@@ -318,6 +349,40 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
         }
     }
     i
+}
+
+/// Build the carryover that seeds the next chunk after a finalize.
+/// Chars mode slices the trailing overlap budget off the old buffer;
+/// Utterances mode carries the trailing whole utterances that fit the
+/// budget (`buffer_utts` is trimmed to exactly the carried utterances).
+fn overlap_carryover(
+    mode: OverlapMode,
+    buffer: &str,
+    buffer_utts: &mut Vec<String>,
+    overlap_chars: usize,
+) -> String {
+    match mode {
+        OverlapMode::Chars => {
+            buffer_utts.clear();
+            let overlap_start =
+                floor_char_boundary(buffer, buffer.len().saturating_sub(overlap_chars));
+            buffer[overlap_start..].to_string()
+        }
+        OverlapMode::Utterances => {
+            let mut total = 0;
+            let mut keep = 0;
+            for utt in buffer_utts.iter().rev() {
+                let addition = utt.len() + if keep == 0 { 0 } else { 1 }; // +1 newline
+                if total + addition > overlap_chars {
+                    break;
+                }
+                total += addition;
+                keep += 1;
+            }
+            buffer_utts.drain(..buffer_utts.len() - keep);
+            buffer_utts.join("\n")
+        }
+    }
 }
 
 /// Split text to fit within max_chars, returning (fits, remainder).
@@ -679,6 +744,7 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert_eq!(chunks.len(), 1);
@@ -703,6 +769,7 @@ mod tests {
             overlap_tokens: 5,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // Should have multiple chunks
@@ -721,6 +788,7 @@ mod tests {
             overlap_tokens: 10,
             min_chars: 20,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The huge text should result in multiple chunks
@@ -749,6 +817,7 @@ mod tests {
             overlap_tokens: 10,
             min_chars: 20,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The "ok" text alone would be too small, but combined they're fine
@@ -788,6 +857,7 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
@@ -1015,6 +1085,93 @@ mod tests {
         assert!(chunks[2].text.contains("welcome email"));
     }
 
+    // Tests for utterance-boundary overlap mode
+    #[test]
+    fn test_utterance_overlap_carries_whole_utterances() {
+        // Three ~50-char utterances; target forces a split after the
+        // second. In utterance mode the next chunk starts with the full
+        // second utterance, not a mid-utterance character slice.
+        let utt_a = "Utterance alpha talks about the quarterly budget.";
+        let utt_b = "Utterance bravo covers the deployment timeline ok.";
+        let utt_c = "Utterance charlie wraps up with the action items.";
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt_a, None),
+            ("doc1", "2025-01-01T10:01:00Z", utt_b, None),
+            ("doc1", "2025-01-01T10:02:00Z", utt_c, None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 25,
+            max_tokens: 100,
+            overlap_tokens: 15,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert!(chunks.len() >= 2, "expected a split, got {} chunks", chunks.len());
+        for chunk in &chunks {
+            assert!(
+                [utt_a, utt_b, utt_c].iter().any(|u| chunk.text.starts_with(u)),
+                "chunk must start at an utterance boundary, got: {:?}",
+                &chunk.text[..chunk.text.len().min(60)]
+            );
+        }
+        // The overlap actually carries content: some chunk beyond the first
+        // repeats an utterance already emitted.
+        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(all_text.matches(utt_b).count() >= 2 || all_text.matches(utt_a).count() >= 2);
+
+        // Contrast: chars mode slices mid-utterance under the same config.
+        let chars_config = ChunkingConfig { overlap_mode: OverlapMode::Chars, ..config };
+        let chars_chunks = transcript_window_chunker_adaptive(&conn, &chars_config, None).unwrap();
+        assert!(
+            chars_chunks
+                .iter()
+                .any(|c| ![utt_a, utt_b, utt_c].iter().any(|u| c.text.starts_with(u))),
+            "chars mode should produce at least one mid-utterance chunk here"
+        );
+    }
+
+    #[test]
+    fn test_utterance_overlap_skips_oversized_tail() {
+        // The trailing utterance is bigger than the overlap budget, so
+        // nothing is carried: the next chunk starts with the new utterance.
+        let utt_a = "Utterance alpha talks about the quarterly budget and it keeps going for a while longer.";
+        let utt_b = "Utterance bravo is the next one and stands alone with plenty of content of its own.";
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt_a, None),
+            ("doc1", "2025-01-01T10:01:00Z", utt_b, None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 20,
+            max_tokens: 100,
+            overlap_tokens: 5, // 20 chars: smaller than either utterance
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, utt_a);
+        assert_eq!(chunks[1].text, utt_b);
+    }
+
+    #[test]
+    fn test_overlap_mode_roundtrip() {
+        assert_eq!(OverlapMode::parse(OverlapMode::Chars.as_str()), Some(OverlapMode::Chars));
+        assert_eq!(
+            OverlapMode::parse(OverlapMode::Utterances.as_str()),
+            Some(OverlapMode::Utterances)
+        );
+        assert_eq!(OverlapMode::parse("bogus"), None);
+    }
+
     // Tests for contextual headers threading through the chunkers
     fn headers_for(doc_id: &str, header: &str) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
@@ -1076,6 +1233,7 @@ mod tests {
             overlap_tokens: 10,
             min_chars: 20,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let header = "Meeting: Budget Review Session\nDate: 2026-02-01\n\n";
         let headers = headers_for("doc1", header);
@@ -1167,6 +1325,7 @@ mod tests {
             overlap_tokens: 5,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(!chunks.is_empty());
@@ -1188,6 +1347,7 @@ mod tests {
             overlap_tokens: 5,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(!chunks.is_empty());
@@ -1206,6 +1366,7 @@ mod tests {
             overlap_tokens: 5,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.len() > 1);
@@ -1257,6 +1418,7 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.is_empty(), "Empty text with source should produce no chunks, got {}", chunks.len());
@@ -1277,6 +1439,7 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
@@ -1299,6 +1462,7 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
@@ -1323,6 +1487,7 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
