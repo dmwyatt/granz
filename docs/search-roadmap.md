@@ -4,7 +4,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 
 ## Current state (2026-07)
 
-- **Keyword search**: FTS5 `MATCH` used as a boolean filter; results ordered by `created_at DESC`. No relevance ranking. Additionally, `sanitize_fts_query` wraps the whole query in double quotes, which FTS5 interprets as a phrase query: multi-word searches only match the words adjacent and in order, not AND semantics.
+- **Keyword search** (Phase 1, #39): FTS5 `MATCH` with implicit-AND semantics (each term quoted individually; user-supplied quotes force phrase matching), ranked by `bm25()` with recency as tiebreak. Title substring matches rank as a tier above content matches; weighting them properly is Phase 5. Applies to the combined search and the standalone transcript/notes/panel searches.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
 - The two modes are mutually exclusive; `commands/search.rs` dispatches to one or the other.
 - **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. Implemented in `commands/benchmark/`.
@@ -55,14 +55,24 @@ Phase 0 baselines on v2 (2026-07-10, k=10, **ID matching**, commit 046d6d6):
 | fts | 0.05 | 0.03 | 0.04 | ~5 ms |
 | semantic | 0.86 | 0.76 | 0.72 | ~58 ms |
 
-Semantic per stratum (hit-rate / MRR): exact-term 0.92 / 0.81, mixed 0.86 / 0.77, paraphrase 0.84 / 0.64. FTS beats semantic on best rank for 1 of 93 queries (90 losses, 2 ties); its collapse outside exact-term is the phrase-quoting bug plus recency-only ordering, which Phase 1 addresses. Full per-stratum metrics for both modes are in the ledger.
+Semantic per stratum (hit-rate / MRR): exact-term 0.92 / 0.81, mixed 0.86 / 0.77, paraphrase 0.84 / 0.64. FTS beats semantic on best rank for 1 of 93 queries (90 losses, 2 ties); its collapse outside exact-term was the phrase-quoting bug plus recency-only ordering, which Phase 1 fixed. Full per-stratum metrics for both modes are in the ledger.
+
+Phase 1 results (2026-07-10, k=10, ID matching, same snapshot):
+
+| Mode | hit-rate@10 | recall@10 | MRR@10 | avg latency |
+|---|---|---|---|---|
+| fts (Phase 0) | 0.05 | 0.03 | 0.04 | ~5 ms |
+| fts (Phase 1) | 0.17 | 0.09 | 0.14 | ~5 ms |
+| semantic (unchanged) | 0.86 | 0.76 | 0.72 | ~58 ms |
+
+Per query, 11 flipped miss-to-hit, none hit-to-miss, worst rank change 7 to 9; FTS vs semantic on best rank moved from 1/90/2 to 2/82/9 (W/L/T). Under the re-audited strata (below), FTS scores hit-rate 0.94 / MRR 0.76 on exact-term (n=17) and zero on mixed and paraphrase; semantic scores 1.00 / 0.92 on exact-term. Note the implicit-AND granularity: all terms must co-occur within one FTS row (a single utterance, panel, or notes document), so multi-term queries whose terms are scattered across a transcript still miss.
 
 (v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55, title matching.)
 
 Caveats a maintainer must know:
 
 - Ledger entries recorded before 2026-07-10 used title matching, which over-credits recurring-title meetings; do not compare them against ID-matched numbers.
-- `query_type` labels were assigned relative to the current phrase-matching keyword behavior: several queries were demoted from exact-term to mixed only because the full query fails as a phrase. After Phase 1 lands implicit-AND semantics, re-audit the strata; the exact-term stratum (n=12) is currently thin and noisy.
+- `query_type` strata were re-audited on 2026-07-10 after Phase 1 landed: 9 queries demoted to mixed only for the old phrase-match failure were promoted back to exact-term, and 4 exact-term labels that fail the operational test (all terms verbatim within one utterance/panel/notes row of a labeled doc) were demoted to mixed. Exact-term is now n=17, mixed n=38, paraphrase n=38. Ledger entries recorded before the re-audit used the old strata; their per-stratum numbers are not comparable to later entries (overall metrics are unaffected).
 - For stable numbers across syncs, benchmark against the frozen snapshot rather than the live database: `grans --db <benchmarks-dir>/grans-snapshot-2026-07-09.db benchmark quality ...`. The snapshot is byte-identical to the state the Phase 0 baselines were recorded against (872 docs, 33,510 chunks); the live database drifts with every `grans sync`, which invalidates per-query comparison against earlier ledger entries.
 - Open review items: the 11 v1 queries' `query_type` values were hand-assigned and unreviewed, and two v1 queries ("AI phone agent...", "changing an intermittent caregiving leave...") had their ID labels expanded across recurring-title instances that may over-include.
 

@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::models::TranscriptUtterance;
 use crate::query::dates::DateRange;
+use crate::query::fts::{matches_all_tokens, parse_query, sanitize_fts_query};
 use crate::query::search::ContextWindow;
 
 /// Raw SQLite row for a transcript utterance.
@@ -70,8 +71,12 @@ fn find_matching_documents(
     let fts_query = sanitize_fts_query(query);
     let deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
 
+    // MATERIALIZED stops the query flattener from pulling bm25() into the
+    // aggregate context, where FTS5 auxiliary functions cannot run.
     let mut sql = format!(
-        "SELECT DISTINCT tu.document_id, COALESCE(d.title, '(untitled)')
+        "WITH hits AS MATERIALIZED (
+         SELECT tu.document_id AS doc_id, COALESCE(d.title, '(untitled)') AS title,
+                d.created_at AS created_at, bm25(transcript_fts) AS score
          FROM transcript_fts
          JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid
          JOIN documents d ON tu.document_id = d.id
@@ -98,7 +103,11 @@ fn find_matching_documents(
         }
     }
 
-    sql.push_str(" ORDER BY d.created_at DESC");
+    // A document's rank is its best-matching utterance; bm25 is
+    // lower-is-better, recency breaks ties.
+    sql.push_str(
+        ") SELECT doc_id, title FROM hits GROUP BY doc_id ORDER BY MIN(score) ASC, created_at DESC",
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -107,7 +116,7 @@ fn find_matching_documents(
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Load all transcript utterances for a document, ordered by timestamp.
@@ -140,8 +149,7 @@ fn build_context_windows(
     query: &str,
     context_size: usize,
 ) -> Vec<ContextWindow> {
-    use crate::query::search::contains_ignore_case;
-
+    let tokens = parse_query(query);
     let mut results = Vec::new();
 
     for (i, utt) in utterances.iter().enumerate() {
@@ -150,7 +158,7 @@ fn build_context_windows(
             None => continue,
         };
 
-        if !contains_ignore_case(text, query) {
+        if !matches_all_tokens(text, &tokens) {
             continue;
         }
 
@@ -175,10 +183,6 @@ fn build_context_windows(
     }
 
     results
-}
-
-fn sanitize_fts_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
 }
 
 /// Build a context window from semantic search result indices.
@@ -479,6 +483,48 @@ mod tests {
         );
         assert_eq!(windows[0].after.len(), 1);
         assert_eq!(windows[0].after[0].text.as_deref(), Some("Great idea"));
+    }
+
+    #[test]
+    fn test_search_transcripts_orders_by_relevance_then_recency() {
+        // Regression: matches were ordered by created_at DESC, so a passing
+        // mention in a newer meeting outranked the meeting about the topic.
+        // Filler rows keep the term under half the corpus so BM25 IDF stays
+        // positive.
+        let conn = build_test_db(&serde_json::json!({
+            "documents": {
+                "doc-relevant": {"id": "doc-relevant", "title": "Relevant Meeting", "created_at": "2026-01-10T10:00:00Z"},
+                "doc-mention": {"id": "doc-mention", "title": "Passing Mention", "created_at": "2026-01-20T10:00:00Z"}
+            },
+            "transcripts": {
+                "doc-relevant": [
+                    {"id": "r1", "document_id": "doc-relevant", "text": "kubernetes migration steps kubernetes cluster upgrades and kubernetes networking"}
+                ],
+                "doc-mention": [
+                    {"id": "m1", "document_id": "doc-mention", "text": "someone mentioned kubernetes briefly while we mostly discussed the quarterly budget review"},
+                    {"id": "m2", "document_id": "doc-mention", "text": "budget planning discussion continued"},
+                    {"id": "m3", "document_id": "doc-mention", "text": "then we walked through the offsite agenda"}
+                ]
+            }
+        }));
+        let results = search_transcripts(&conn, "kubernetes", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "Relevant Meeting");
+        assert_eq!(results[1].0, "Passing Mention");
+    }
+
+    #[test]
+    fn test_search_transcripts_multi_word_matches_any_order() {
+        // Regression: phrase-quoting meant reversed word order never matched,
+        // and the context-window filter required the full query as a substring.
+        let conn = build_test_db(&transcripts_state());
+        let results = search_transcripts(&conn, "networks neural", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "AI Meeting");
+        assert_eq!(
+            results[0].1[0].matched.text.as_deref(),
+            Some("Let's talk about neural networks today")
+        );
     }
 
     #[test]

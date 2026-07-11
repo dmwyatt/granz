@@ -53,7 +53,7 @@ impl<'a> Retriever<'a> {
 
 /// FTS keyword search over the same targets `grans search` uses by default
 /// (titles, transcripts, notes, panels), in production result order
-/// (created_at DESC).
+/// (bm25 relevance, recency tiebreak).
 fn retrieve_fts(conn: &Connection, query: &str) -> Result<Vec<RankedDoc>> {
     let docs =
         crate::db::meetings::search_meetings(conn, query, true, true, true, true, None, false)?;

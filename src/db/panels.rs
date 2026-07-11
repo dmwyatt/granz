@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::api::ApiPanel;
 use crate::models::Panel;
 use crate::query::dates::DateRange;
+use crate::query::fts::sanitize_fts_query;
 use crate::tiptap::{extract_chat_url, tiptap_to_markdown};
 
 // ============================================================================
@@ -214,8 +215,12 @@ fn find_matching_panel_documents(
     let fts_query = sanitize_fts_query(query);
     let d_deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
 
+    // MATERIALIZED stops the query flattener from pulling bm25() into the
+    // aggregate context, where FTS5 auxiliary functions cannot run.
     let mut sql = format!(
-        "SELECT DISTINCT p.document_id, COALESCE(d.title, '(untitled)')
+        "WITH hits AS MATERIALIZED (
+         SELECT p.document_id AS doc_id, COALESCE(d.title, '(untitled)') AS title,
+                d.created_at AS created_at, bm25(panels_fts) AS score
          FROM panels_fts
          JOIN panels p ON panels_fts.rowid = p.rowid
          JOIN documents d ON p.document_id = d.id
@@ -242,7 +247,11 @@ fn find_matching_panel_documents(
         }
     }
 
-    sql.push_str(" ORDER BY d.created_at DESC");
+    // A document's rank is its best-matching panel; bm25 is lower-is-better,
+    // recency breaks ties.
+    sql.push_str(
+        ") SELECT doc_id, title FROM hits GROUP BY doc_id ORDER BY MIN(score) ASC, created_at DESC",
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -251,11 +260,7 @@ fn find_matching_panel_documents(
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).collect())
-}
-
-fn sanitize_fts_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 // ============================================================================
@@ -900,6 +905,52 @@ mod tests {
         let window = &results[0].2[0];
         // "deployment" is in "Action Items" section
         assert_eq!(window.matched.label.as_deref(), Some("Action Items"));
+    }
+
+    #[test]
+    fn test_search_panels_orders_by_relevance_then_recency() {
+        // Regression: matches were ordered by created_at DESC, so a passing
+        // mention in a newer meeting outranked the meeting about the topic.
+        // Filler panels keep the term under half the corpus so BM25 IDF stays
+        // positive.
+        let conn = build_test_db(&serde_json::json!({
+            "documents": {
+                "doc-relevant": {"id": "doc-relevant", "title": "Relevant", "created_at": "2026-01-10T10:00:00Z"},
+                "doc-mention": {"id": "doc-mention", "title": "Mention", "created_at": "2026-01-20T10:00:00Z"},
+                "doc-f1": {"id": "doc-f1", "title": "Filler 1", "created_at": "2026-01-11T10:00:00Z"}
+            },
+            "panels": {
+                "doc-relevant": [
+                    {"id": "p-rel", "document_id": "doc-relevant",
+                     "content_markdown": "terraform modules terraform state management and terraform providers"}
+                ],
+                "doc-mention": [
+                    {"id": "p-men", "document_id": "doc-mention",
+                     "content_markdown": "brief mention of terraform in passing during the standup recap"}
+                ],
+                "doc-f1": [
+                    {"id": "p-f1", "document_id": "doc-f1", "content_markdown": "offsite agenda planning notes"},
+                    {"id": "p-f2", "document_id": "doc-f1", "content_markdown": "quarterly budget review discussion"},
+                    {"id": "p-f3", "document_id": "doc-f1", "content_markdown": "team retro action items"}
+                ]
+            }
+        }));
+        let results =
+            search_panels_with_context(&conn, "terraform", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "doc-relevant");
+        assert_eq!(results[1].0, "doc-mention");
+    }
+
+    #[test]
+    fn test_search_panels_multi_word_matches_any_order() {
+        // Regression: phrase-quoting meant reversed word order never matched.
+        let conn = build_test_db(&panels_state());
+        let results =
+            search_panels_with_context(&conn, "priorities roadmap", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "doc-1");
+        assert!(results[0].2[0].matched.text.contains("roadmap and priorities"));
     }
 
     #[test]
