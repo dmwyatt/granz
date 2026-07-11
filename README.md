@@ -160,6 +160,10 @@ grans search "budget" --semantic --in notes,panels    # Notes + AI notes
 # Hybrid search: run keyword and semantic together, fuse the rankings
 grans search "quarterly budget review" --hybrid
 
+# Rerank the top hybrid candidates with a cross-encoder (slower, higher quality)
+grans search "quarterly budget review" --hybrid --rerank
+grans search "quarterly budget review" --hybrid --rerank --min-score 0.5
+
 # Limit results (default 10, use 0 for no limit)
 # Works with keyword, context window, and semantic search
 grans search "budget" --limit 5
@@ -187,6 +191,8 @@ grans search "old project" --semantic --include-deleted
 Keyword search matches every word in the query, in any order: `grans search "budget review"` finds meetings that mention both words. To require an exact phrase, quote it inside the query (e.g. `grans search '"budget review"'`). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties.
 
 Hybrid search (`--hybrid`) runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either mode surfaces, and one ranked well by both rises to the top. It needs embeddings (like `--semantic`, it will prompt if many chunks are unembedded; `--yes` skips the prompt) and supports `--in`, `--meeting`, date filters, and `--limit`. It cannot be combined with `--semantic` or `--context`.
+
+Adding `--rerank` scores the top 50 fused candidates with a cross-encoder reranker (`jina-reranker-v1-turbo-en`, downloaded automatically on first use, ~150MB) and reorders them by how well each meeting actually answers the query. Reranked results show a relevance score between 0 and 1, and `--min-score` drops results below a threshold. Reranking adds a couple of seconds per query on CPU, which is why it is opt-in.
 
 Semantic search uses a local embedding model (`nomic-embed-text-v1.5`) to find meetings by meaning rather than exact keywords. On first use, the model is downloaded automatically (~270MB). Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database. Use `--in` to restrict which sources are searched (e.g. `--in panels` to only search AI notes).
 
