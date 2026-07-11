@@ -4,7 +4,8 @@
 //! scoring (metrics.rs) applies k. Lists reflect current production
 //! behavior for the mode: FTS is ranked by bm25 with a recency tiebreak,
 //! semantic by best-chunk cosine score, hybrid by RRF over both, and the
-//! rerank modes by cross-encoder score over the top of the fused pool.
+//! rerank modes by cross-encoder score blended with the fusion prior over
+//! the top of the fused pool.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -152,7 +153,7 @@ fn retrieve_hybrid_rerank_detailed(
 }
 
 /// Reranked hybrid retrieval in production result shape (the
-/// `grans search --hybrid --rerank` path).
+/// `grans search --hybrid` default path).
 fn retrieve_hybrid_rerank(
     conn: &Connection,
     embedder: &dyn Embedder,

@@ -54,17 +54,18 @@ pub enum Commands {
         #[arg(long)]
         semantic: bool,
 
-        /// Combine keyword and semantic search, fusing both rankings
+        /// Combine keyword and semantic search: fuse both rankings and
+        /// rerank the top candidates with a cross-encoder
         #[arg(long, conflicts_with_all = ["semantic", "context"])]
         hybrid: bool,
 
-        /// Rerank the top hybrid candidates with a cross-encoder
-        /// (slower, higher quality; shows relevance scores)
+        /// Skip the cross-encoder rerank stage of hybrid search
+        /// (fusion order only; faster, but no relevance scores)
         #[arg(long, requires = "hybrid")]
-        rerank: bool,
+        fast: bool,
 
         /// Minimum reranker relevance score (0-1) for hybrid results
-        #[arg(long, requires = "rerank")]
+        #[arg(long, requires = "hybrid", conflicts_with = "fast")]
         min_score: Option<f32>,
 
         /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled)
@@ -257,9 +258,10 @@ pub enum QualityMode {
     Fts,
     /// Semantic search over embeddings
     Semantic,
-    /// RRF fusion of FTS and semantic rankings (--hybrid)
+    /// RRF fusion of FTS and semantic rankings (--hybrid --fast)
     Hybrid,
-    /// Fusion + jina-reranker-v1-turbo-en cross-encoder (--hybrid --rerank)
+    /// Fusion + jina-reranker-v1-turbo-en cross-encoder blended with the
+    /// fusion prior (the --hybrid default)
     RerankJina,
     /// Fusion + bge-reranker-base cross-encoder
     RerankBge,
