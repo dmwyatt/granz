@@ -37,6 +37,8 @@ pub enum SearchMode {
     Hybrid {
         targets: Vec<SearchTarget>,
         meeting_filter: Option<String>,
+        rerank: bool,
+        min_score: Option<f32>,
         yes: bool,
         limit: usize,
     },
@@ -48,6 +50,8 @@ impl SearchMode {
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         hybrid: bool,
+        fast: bool,
+        min_score: Option<f32>,
         semantic: bool,
         context: usize,
         in_targets: &str,
@@ -60,6 +64,8 @@ impl SearchMode {
             SearchMode::Hybrid {
                 targets: SearchTarget::parse_list(in_targets),
                 meeting_filter: meeting_filter.map(String::from),
+                rerank: !fast,
+                min_score,
                 yes,
                 limit,
             }
@@ -142,6 +148,8 @@ pub fn search(
         SearchMode::Hybrid {
             targets,
             meeting_filter,
+            rerank,
+            min_score,
             yes,
             limit,
         } => hybrid_search(
@@ -149,6 +157,8 @@ pub fn search(
             query,
             &targets,
             meeting_filter.as_deref(),
+            rerank,
+            min_score,
             yes,
             limit,
             date_range,
@@ -217,14 +227,16 @@ fn keyword_search(
     Ok(())
 }
 
-/// Run keyword and semantic retrieval, fuse the rankings, and display the
-/// resulting meetings.
+/// Run keyword and semantic retrieval, fuse the rankings, rerank the top
+/// candidates (unless skipped), and display the resulting meetings.
 #[allow(clippy::too_many_arguments)]
 fn hybrid_search(
     conn: &Connection,
     query: &str,
     targets: &[SearchTarget],
     meeting_filter: Option<&str>,
+    rerank: bool,
+    min_score: Option<f32>,
     yes: bool,
     limit: usize,
     date_range: Option<DateRange>,
@@ -247,6 +259,32 @@ fn hybrid_search(
         date_range.as_ref(),
         include_deleted,
     )?;
+
+    if rerank {
+        let reranker =
+            crate::embed::rerank::FastEmbedReranker::new(crate::embed::rerank::DEFAULT_RERANK_MODEL)?;
+        let mut reranked = crate::query::rerank::rerank_hybrid(conn, &reranker, query, &ranking)?;
+        if let Some(min) = min_score {
+            reranked.retain(|d| d.score >= min);
+        }
+
+        let ids: Vec<String> = reranked.iter().map(|d| d.document_id.clone()).collect();
+        let docs = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;
+        let scores: std::collections::HashMap<String, f32> =
+            reranked.into_iter().map(|d| (d.document_id, d.score)).collect();
+        let results: Vec<(Document, f32)> = docs
+            .into_iter()
+            .filter_map(|doc| {
+                let score = doc.id.as_ref().and_then(|id| scores.get(id)).copied()?;
+                Some((doc, score))
+            })
+            .collect();
+
+        let results = filter_scored_by_meeting(results, meeting_filter);
+        render_scored_meeting_list(results, query, limit, ctx);
+        return Ok(());
+    }
+
     let ids: Vec<String> = ranking.fused.into_iter().map(|d| d.document_id).collect();
     let results = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;
 
@@ -256,6 +294,19 @@ fn hybrid_search(
     Ok(())
 }
 
+/// True when the document's title or id contains the lowercased filter.
+fn matches_meeting_filter(doc: &Document, filter_lower: &str) -> bool {
+    doc.title
+        .as_ref()
+        .map(|t| t.to_lowercase().contains(filter_lower))
+        .unwrap_or(false)
+        || doc
+            .id
+            .as_ref()
+            .map(|id| id.to_lowercase().contains(filter_lower))
+            .unwrap_or(false)
+}
+
 /// Keep only documents whose title or id contains `filter` (case-insensitive).
 /// No filter keeps everything.
 fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Vec<Document> {
@@ -263,20 +314,19 @@ fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Ve
         return results;
     };
     let filter_lower = filter.to_lowercase();
-    results
-        .into_iter()
-        .filter(|doc| {
-            doc.title
-                .as_ref()
-                .map(|t| t.to_lowercase().contains(&filter_lower))
-                .unwrap_or(false)
-                || doc
-                    .id
-                    .as_ref()
-                    .map(|id| id.to_lowercase().contains(&filter_lower))
-                    .unwrap_or(false)
-        })
-        .collect()
+    results.into_iter().filter(|doc| matches_meeting_filter(doc, &filter_lower)).collect()
+}
+
+/// [`filter_by_meeting`] for scored results.
+fn filter_scored_by_meeting(
+    results: Vec<(Document, f32)>,
+    meeting_filter: Option<&str>,
+) -> Vec<(Document, f32)> {
+    let Some(filter) = meeting_filter else {
+        return results;
+    };
+    let filter_lower = filter.to_lowercase();
+    results.into_iter().filter(|(doc, _)| matches_meeting_filter(doc, &filter_lower)).collect()
 }
 
 /// Print a ranked meeting list, honoring the output mode and result limit.
@@ -307,6 +357,49 @@ fn render_meeting_list(results: Vec<Document>, query: &str, limit: usize, ctx: &
             }
             for doc in &results {
                 println!("{}", crate::output::table::format_meeting_row(doc, &ctx.tz));
+            }
+            if total > results.len() {
+                println!("\nUse --limit 0 to show all {} results.", total);
+            }
+        }
+    }
+}
+
+/// Print a reranked meeting list with relevance scores, honoring the
+/// output mode and result limit.
+fn render_scored_meeting_list(
+    results: Vec<(Document, f32)>,
+    query: &str,
+    limit: usize,
+    ctx: &RunContext,
+) {
+    let total = results.len();
+    let results = apply_limit(results, limit);
+
+    match ctx.output_mode {
+        OutputMode::Json => {
+            println!("{}", crate::output::json::format_scored_meetings(&results));
+        }
+        OutputMode::Tty => {
+            if results.is_empty() {
+                println!("No meetings found matching \"{}\".", query);
+                return;
+            }
+            if total > results.len() {
+                println!(
+                    "Found {} meeting(s) matching \"{}\" (showing {}):\n",
+                    total,
+                    query,
+                    results.len()
+                );
+            } else {
+                println!("Found {} meeting(s) matching \"{}\":\n", results.len(), query);
+            }
+            for (doc, score) in &results {
+                println!(
+                    "{}",
+                    crate::output::table::format_scored_meeting_row(doc, *score, &ctx.tz)
+                );
             }
             if total > results.len() {
                 println!("\nUse --limit 0 to show all {} results.", total);
@@ -773,13 +866,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_cli_args_hybrid_takes_priority() {
-        let mode =
-            SearchMode::from_cli_args(true, true, 5, "titles,notes", Some("standup"), None, true, 10);
+    fn from_cli_args_hybrid_takes_priority_and_reranks_by_default() {
+        let mode = SearchMode::from_cli_args(
+            true, false, None, true, 5, "titles,notes", Some("standup"), None, true, 10,
+        );
         match mode {
             SearchMode::Hybrid {
                 targets,
                 meeting_filter,
+                rerank,
+                min_score,
                 yes,
                 limit,
             } => {
@@ -787,6 +883,8 @@ mod tests {
                 assert!(targets.contains(&SearchTarget::Titles));
                 assert!(targets.contains(&SearchTarget::Notes));
                 assert_eq!(meeting_filter.as_deref(), Some("standup"));
+                assert!(rerank);
+                assert_eq!(min_score, None);
                 assert!(yes);
                 assert_eq!(limit, 10);
             }
@@ -795,8 +893,29 @@ mod tests {
     }
 
     #[test]
+    fn from_cli_args_fast_skips_rerank() {
+        let mode =
+            SearchMode::from_cli_args(true, true, None, false, 0, "titles", None, None, false, 10);
+        match mode {
+            SearchMode::Hybrid { rerank, .. } => assert!(!rerank),
+            _ => panic!("Expected Hybrid variant"),
+        }
+    }
+
+    #[test]
+    fn from_cli_args_min_score_threads_to_hybrid() {
+        let mode = SearchMode::from_cli_args(
+            true, false, Some(0.4), false, 0, "titles", None, None, false, 10,
+        );
+        match mode {
+            SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),
+            _ => panic!("Expected Hybrid variant"),
+        }
+    }
+
+    #[test]
     fn from_cli_args_semantic_takes_priority() {
-        let mode = SearchMode::from_cli_args(false, true, 5, "titles", Some("standup"), None, true, 10);
+        let mode = SearchMode::from_cli_args(false, false, None, true, 5, "titles", Some("standup"), None, true, 10);
         match mode {
             SearchMode::Semantic {
                 targets,
@@ -816,7 +935,7 @@ mod tests {
 
     #[test]
     fn from_cli_args_context_takes_priority_over_keyword() {
-        let mode = SearchMode::from_cli_args(false, false, 3, "titles,notes", Some("standup"), None, false, 10);
+        let mode = SearchMode::from_cli_args(false, false, None, false, 3, "titles,notes", Some("standup"), None, false, 10);
         match mode {
             SearchMode::ContextWindow {
                 targets,
@@ -838,7 +957,7 @@ mod tests {
 
     #[test]
     fn from_cli_args_defaults_to_keyword() {
-        let mode = SearchMode::from_cli_args(false, false, 0, "titles,notes", None, None, false, 10);
+        let mode = SearchMode::from_cli_args(false, false, None, false, 0, "titles,notes", None, None, false, 10);
         match mode {
             SearchMode::Keyword {
                 targets,
@@ -858,7 +977,7 @@ mod tests {
     #[test]
     fn from_cli_args_meeting_filter_threads_to_keyword() {
         let mode =
-            SearchMode::from_cli_args(false, false, 0, "transcripts", Some("daily"), None, false, 10);
+            SearchMode::from_cli_args(false, false, None, false, 0, "transcripts", Some("daily"), None, false, 10);
         match mode {
             SearchMode::Keyword {
                 meeting_filter, ..
@@ -872,7 +991,7 @@ mod tests {
     #[test]
     fn from_cli_args_meeting_filter_threads_to_context_window() {
         let mode =
-            SearchMode::from_cli_args(false, false, 5, "titles", Some("retro"), None, false, 10);
+            SearchMode::from_cli_args(false, false, None, false, 5, "titles", Some("retro"), None, false, 10);
         match mode {
             SearchMode::ContextWindow {
                 meeting_filter, ..
@@ -886,7 +1005,7 @@ mod tests {
     #[test]
     fn from_cli_args_speaker_filter_threads_to_context_window() {
         let speaker = SpeakerFilter::Me;
-        let mode = SearchMode::from_cli_args(false, false, 3, "transcripts", None, Some(&speaker), false, 10);
+        let mode = SearchMode::from_cli_args(false, false, None, false, 3, "transcripts", None, Some(&speaker), false, 10);
         match mode {
             SearchMode::ContextWindow {
                 speaker_filter, ..
@@ -900,7 +1019,7 @@ mod tests {
     #[test]
     fn from_cli_args_speaker_filter_threads_to_semantic() {
         let speaker = SpeakerFilter::Other;
-        let mode = SearchMode::from_cli_args(false, true, 0, "transcripts", None, Some(&speaker), false, 10);
+        let mode = SearchMode::from_cli_args(false, false, None, true, 0, "transcripts", None, Some(&speaker), false, 10);
         match mode {
             SearchMode::Semantic {
                 speaker_filter, ..

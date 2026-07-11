@@ -54,9 +54,18 @@ pub enum Commands {
         #[arg(long)]
         semantic: bool,
 
-        /// Combine keyword and semantic search, fusing both rankings
+        /// Combine keyword and semantic search: fuse both rankings and
+        /// rerank the top candidates with a cross-encoder
         #[arg(long, conflicts_with_all = ["semantic", "context"])]
         hybrid: bool,
+
+        /// Skip the reranking stage of hybrid search
+        #[arg(long, requires = "hybrid")]
+        fast: bool,
+
+        /// Minimum reranker relevance score (0-1) for hybrid results
+        #[arg(long, requires = "hybrid", conflicts_with = "fast")]
+        min_score: Option<f32>,
 
         /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled)
         #[arg(long, default_value = "0")]
