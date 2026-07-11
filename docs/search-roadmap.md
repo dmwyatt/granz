@@ -39,7 +39,7 @@ Every phase below ships with a before/after run of the quality benchmark, and th
 
 ## Golden set
 
-Golden-set files live in the `benchmarks/` subdirectory of the grans data directory (the same directory `platform::data_dir()` resolves for the database, e.g. `~/.local/share/grans/benchmarks/`). They contain real meeting titles and MUST NEVER be committed to this repo or quoted in issues/PRs; this repo is public. The results ledger lives in the same directory.
+Golden-set files live in the `benchmarks/` subdirectory of the grans data directory (the same directory `platform::data_dir()` resolves for the database, e.g. `~/.local/share/grans/benchmarks/`). They contain real meeting titles and MUST NEVER be committed to this repo or quoted in issues/PRs; this repo is public. The results ledger (`ledger.jsonl`, one JSON object per benchmark run: date, binary commit, mode, matching method, metrics with per-stratum breakdown, notes) lives in the same directory, with full per-query outputs saved under `runs/` for later win/loss comparison between runs.
 
 - `search_benchmark_v2.json` (2026-07-10, primary): 93 queries. Built by agent generation over transcripts plus a verification pass that pooled hits from both retrievers, judged each hit, and completed the labels.
 - `semantic_search_benchmark.json` (v1): the original 11 title-labeled queries, kept unchanged for longitudinal comparison.
@@ -66,65 +66,18 @@ Caveats a maintainer must know:
 - For stable numbers across syncs, benchmark against the frozen snapshot rather than the live database: `grans --db <benchmarks-dir>/grans-snapshot-2026-07-09.db benchmark quality ...`. The snapshot is byte-identical to the state the Phase 0 baselines were recorded against (872 docs, 33,510 chunks); the live database drifts with every `grans sync`, which invalidates per-query comparison against earlier ledger entries.
 - Open review items: the 11 v1 queries' `query_type` values were hand-assigned and unreviewed, and two v1 queries ("AI phone agent...", "changing an intermittent caregiving leave...") had their ID labels expanded across recurring-title instances that may over-include.
 
-## Phases
+## Work tracking
 
-Each phase is one PR, independently shippable, gated by the benchmark.
+Implementation is tracked on GitHub: parent issue #37 with one sub-issue per phase. Each phase is one PR, independently shippable, gated by the benchmark as described above. Deliverables, implementation specifics, and gates live in the issues; this doc holds the methodology and reference material.
 
-### Phase 0: Evaluation harness
+- Phase 0 (#38): retriever-agnostic benchmark harness with ID-based matching
+- Phase 1 (#39): bm25 ranking and implicit-AND query semantics for keyword search
+- Phase 2 (#40): hybrid retrieval (RRF fusion) behind `--hybrid`
+- Phase 3 (#41): cross-encoder reranking
+- Phase 4 (#42): embedding-side experiments (contextual chunk headers, chunking variants)
+- Phase 5 (#43): ranking polish (recency tiebreak, title boost, per-meeting grouping)
 
-No search behavior changes. Everything else depends on this.
-
-- Make `benchmark quality` retriever-agnostic: `--mode fts|semantic|hybrid|hybrid-rerank` (modes appear as they are implemented).
-- Add `--compare <mode,mode,...>`: per-query rank table across modes with win/loss/tie summary.
-- Metrics: rename the current precision@k to hit-rate@k (that is what it computes); add recall@k over each query's full `relevant_meetings` list; keep MRR; record per-mode query latency.
-- Add `query_type` to the golden-set schema and label existing queries. Done 2026-07: see "Golden set" above.
-- Match benchmark results to labels by document ID instead of exact title. Titles are heavily duplicated across recurring meetings (only 329 unique titles across 872 documents), so title matching over-credits any query targeting a recurring series.
-- Keep growing the set with real queries captured from actual usage; every real-world search failure becomes a new labeled case.
-- Record the FTS baseline alongside the semantic baseline; start the results ledger.
-
-**Exit criteria:** FTS and semantic baselines recorded on the stratified set with ID-based matching.
-
-### Phase 1: BM25 ranking and query semantics for keyword search
-
-- Rank FTS matches by `bm25()` instead of `created_at DESC` (FTS5's bm25 is lower-is-better). Keep recency as a tiebreak.
-- Fix `sanitize_fts_query`: quote each term individually instead of the whole query, so multi-word searches get implicit-AND semantics rather than strict phrase matching. Keep user-supplied quotes as explicit phrase syntax.
-- Applies to transcripts, notes, and panels FTS queries.
-
-**Gate:** FTS-mode metrics improve on the exact-term stratum with no per-query catastrophic regressions. This is a standalone win even if nothing else ships.
-
-### Phase 2: Hybrid retrieval behind `--hybrid`
-
-- Run both retrievers, fuse with RRF (`score = Σ 1/(k + rank)`, k≈60). RRF is rank-based, which sidesteps the known problem that cosine scores are only ordinal within a query and cannot be calibrated against bm25 scores.
-- Dedupe chunk-level candidates to meetings before scoring (a meeting's score is its best chunk).
-- Opt-in flag only; existing modes untouched.
-
-**Gate:** the hybrid gate above (rule 2). Once passed, hybrid becomes the default for `grans search` in a follow-up PR, with `--keyword`/`--semantic` as forcing flags.
-
-### Phase 3: Cross-encoder reranking
-
-- Rerank the top 30-50 fused candidates with fastembed `TextRerank` (candidates: jina-reranker-v1-turbo-en, bge-reranker-base; pick by benchmark).
-- Reranker score becomes the user-facing score; `--min-score` moves to this scale, which is more threshold-stable than cosine.
-- `--fast` flag skips the reranker.
-
-**Gate:** quality gain must justify the latency cost; both columns come from the same benchmark run. If the lift is marginal, reranking stays opt-in instead of default.
-
-### Phase 4: Embedding-side experiments
-
-Each experiment requires a re-embed, so A/B against a copy of the database before committing to re-embedding the real one.
-
-- Contextual chunk headers: prepend meeting title/date/attendees to chunk text before embedding (the chunker already prefixes speaker labels; this extends the idea to meeting identity).
-- Chunking strategy variations (window size, overlap, boundaries).
-- Re-test nomic task prefixes (`search_query:`/`search_document:`) only if chunking changes materially. Tested 2026-07 on the current chunking: no measurable difference, so prefixes alone are not a win here despite the model card's guidance.
-
-**Gate:** semantic-mode before/after on the golden set; keep only variants that move recall@k or MRR.
-
-### Phase 5: Ranking polish
-
-- Recency prior as a post-rerank tiebreak (meetings decay in relevance; a mild boost, not a hard sort).
-- Title-match boost.
-- Result shaping: group results by meeting, show the best chunk with `highlight()`/`snippet()` for lexical hits.
-
-**Gate:** per-query comparison plus manual inspection; these changes are about presentation and tie-breaking, which binary relevance labels only partially capture. Add golden-set queries for cases these are meant to fix.
+One experiment result worth keeping here because it contradicts the model card's guidance: nomic task prefixes (`search_query:`/`search_document:`) were tested 2026-07 on the current chunking and made no measurable difference. Re-test only if chunking changes materially (tracked in #42).
 
 ## Deliberately out of scope
 
