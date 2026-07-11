@@ -381,7 +381,9 @@ pub fn ensure_embeddings(
         let start = Instant::now();
 
         for batch in to_embed.chunks(batch_size) {
-            let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
+            let inputs: Vec<std::borrow::Cow<'_, str>> =
+                batch.iter().map(|c| c.embed_input()).collect();
+            let texts: Vec<&str> = inputs.iter().map(|i| i.as_ref()).collect();
 
             match embedder.embed_batch(&texts) {
                 Ok(vectors) => {

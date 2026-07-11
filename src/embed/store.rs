@@ -361,6 +361,7 @@ mod tests {
             text: "hello world".to_string(),
             content_hash: hash_content("hello world"),
             metadata: None,
+            header: None,
         };
         let vec = vec![1.0_f32, 2.0, 3.0];
 
@@ -383,6 +384,7 @@ mod tests {
             text: "test".to_string(),
             content_hash: hash_content("test"),
             metadata: None,
+            header: None,
         };
         let id = insert_chunk_with_embedding(&conn, &chunk, &[0.5, 0.5]).unwrap();
         delete_chunks(&conn, &[id]).unwrap();
@@ -401,6 +403,7 @@ mod tests {
             text: "test".to_string(),
             content_hash: hash_content("test"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -436,6 +439,7 @@ mod tests {
             text: "test".to_string(),
             content_hash: hash_content("test"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -458,6 +462,7 @@ mod tests {
             text: "hello world".to_string(),
             content_hash: hash_content("hello world"),
             metadata: Some(metadata),
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0, 2.0]).unwrap();
 
@@ -481,6 +486,7 @@ mod tests {
             text: "no metadata".to_string(),
             content_hash: hash_content("no metadata"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -502,6 +508,7 @@ mod tests {
                 text: format!("chunk {}", i),
                 content_hash: hash_content(&format!("chunk {}", i)),
                 metadata: None,
+                header: None,
             };
             insert_chunk_with_embedding(&conn, &chunk, &[i as f32]).unwrap();
         }
@@ -528,6 +535,7 @@ mod tests {
             text: "only one".to_string(),
             content_hash: hash_content("only one"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -551,6 +559,7 @@ mod tests {
                 text: format!("chunk {}", i),
                 content_hash: hash_content(&format!("chunk {}", i)),
                 metadata: None,
+                header: None,
             })
             .collect();
 

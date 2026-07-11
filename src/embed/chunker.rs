@@ -144,6 +144,7 @@ pub fn transcript_window_chunker_adaptive(
                         document_id: doc_id.clone(),
                         text: buffer.clone(),
                         content_hash: hash_content(&buffer),
+                        header: None,
                         metadata: Some(serde_json::json!({
                             "window_start_idx": buffer_start_idx,
                             "window_end_idx": buffer_end_idx,
@@ -186,6 +187,7 @@ pub fn transcript_window_chunker_adaptive(
                         document_id: doc_id.clone(),
                         text: buffer.clone(),
                         content_hash: hash_content(&buffer),
+                        header: None,
                         metadata: Some(serde_json::json!({
                             "window_start_idx": buffer_start_idx,
                             "window_end_idx": buffer_end_idx,
@@ -223,6 +225,7 @@ pub fn transcript_window_chunker_adaptive(
                             document_id: doc_id.clone(),
                             text: buffer.clone(),
                             content_hash: hash_content(&buffer),
+                            header: None,
                             metadata: Some(serde_json::json!({
                                 "window_start_idx": buffer_start_idx,
                                 "window_end_idx": buffer_end_idx,
@@ -270,6 +273,7 @@ pub fn transcript_window_chunker_adaptive(
                 document_id: doc_id.clone(),
                 text: buffer.clone(),
                 content_hash: hash_content(&buffer),
+                header: None,
                 metadata: Some(serde_json::json!({
                     "window_start_idx": buffer_start_idx,
                     "window_end_idx": buffer_end_idx,
@@ -410,6 +414,7 @@ pub fn panel_section_chunker(
                 document_id: panel.document_id.clone(),
                 text,
                 content_hash,
+                header: None,
                 metadata: Some(serde_json::json!({
                     "panel_id": panel.id,
                     "section_heading": heading,
@@ -468,6 +473,7 @@ pub fn notes_paragraph_chunker(
                 document_id: doc.id.clone(),
                 text,
                 content_hash,
+                header: None,
                 metadata: Some(serde_json::json!({
                     "paragraph_idx": para_idx,
                 })),
