@@ -1,5 +1,7 @@
 pub mod chunk;
 pub mod chunker;
+pub mod config;
+pub mod headers;
 pub mod model;
 pub mod progress;
 pub mod rerank;
@@ -90,6 +92,10 @@ pub struct EmbeddingStatus {
     /// Warning: embeddings were created by a different model and must be
     /// fully rebuilt.
     pub model_changed_warning: bool,
+    /// Warning: the resolved spec differs from the chunking scheme the
+    /// database's embeddings were built with (re-embedding will migrate
+    /// them to the new scheme).
+    pub chunking_changed_warning: bool,
 }
 
 /// Calculate a percentile value from a sorted slice.
@@ -169,14 +175,15 @@ pub fn calculate_chunk_size_stats(conn: &Connection) -> Result<Option<ChunkSizeS
 /// Returns counts of total, embedded, pending, and orphaned chunks from all sources.
 /// `current_model` identifies the embedder that will be used; stored embeddings
 /// from a different model are unusable and reported as pending.
-pub fn get_embedding_status(conn: &Connection, current_model: &str) -> Result<EmbeddingStatus> {
+/// `spec` is the resolved embedding spec the caller intends to embed with.
+pub fn get_embedding_status(
+    conn: &Connection,
+    current_model: &str,
+    spec: &config::EmbedSpec,
+) -> Result<EmbeddingStatus> {
     use chunk::ChunkSourceType;
 
-    // Get desired chunks from all sources using adaptive chunker with default config
-    let config = chunker::ChunkingConfig::default();
-    let mut desired_chunks = chunker::transcript_window_chunker_adaptive(conn, &config)?;
-    desired_chunks.extend(chunker::panel_section_chunker(conn, &config)?);
-    desired_chunks.extend(chunker::notes_paragraph_chunker(conn, 20)?);
+    let desired_chunks = desired_chunks_for_spec(conn, spec)?;
 
     // Get stored chunks
     let stored = store::get_stored_chunks(conn)?;
@@ -251,6 +258,8 @@ pub fn get_embedding_status(conn: &Connection, current_model: &str) -> Result<Em
     // Model exists but max_length is missing (legacy embeddings)
     let legacy_max_length_warning = model_name.is_some() && max_length.is_none();
 
+    let chunking_changed_warning = spec.differs_from_stored(conn);
+
     Ok(EmbeddingStatus {
         total_chunks: desired_chunks.len(),
         embedded_chunks: desired_chunks.len() - pending_count,
@@ -264,7 +273,27 @@ pub fn get_embedding_status(conn: &Connection, current_model: &str) -> Result<Em
         max_length,
         legacy_max_length_warning,
         model_changed_warning,
+        chunking_changed_warning,
     })
+}
+
+/// Run all chunkers under `spec`, building contextual headers when the
+/// spec asks for them. This is the single definition of which chunks a
+/// database "should" contain; status and embedding both use it so their
+/// hashes always agree.
+fn desired_chunks_for_spec(conn: &Connection, spec: &config::EmbedSpec) -> Result<Vec<Chunk>> {
+    let doc_headers = if spec.contextual_headers {
+        Some(headers::build_doc_headers(conn)?)
+    } else {
+        None
+    };
+    let doc_headers = doc_headers.as_ref();
+
+    let mut chunks =
+        chunker::transcript_window_chunker_adaptive(conn, &spec.chunking, doc_headers)?;
+    chunks.extend(chunker::panel_section_chunker(conn, &spec.chunking, doc_headers)?);
+    chunks.extend(chunker::notes_paragraph_chunker(conn, 20, doc_headers)?);
+    Ok(chunks)
 }
 
 /// Wipe all embeddings from the database.
@@ -310,21 +339,19 @@ pub const DEFAULT_BATCH_SIZE: usize = 16;
 /// the transcript data and the embeddings tables.
 /// `batch_size` controls how many chunks are embedded per batch (higher values
 /// may be faster on GPU but use more memory).
+/// `spec` is the resolved embedding spec; callers on the search/benchmark
+/// path resolve it from stored metadata (never silently migrating a
+/// variant-embedded database), `grans embed` may apply explicit overrides.
 pub fn ensure_embeddings(
     conn: &Connection,
     embedder: &dyn Embedder,
     batch_size: usize,
+    spec: &config::EmbedSpec,
 ) -> Result<EmbeddingIndex> {
     // Check model consistency — if model changed, all embeddings are wiped
     let model_consistent = store::check_model_consistency(conn, embedder.model_name())?;
 
-    // Build chunking config from embedder's max_length
-    let chunking_config = chunker::ChunkingConfig::from_max_length(embedder.max_length());
-
-    // Run all chunkers to get desired chunks
-    let mut desired_chunks = chunker::transcript_window_chunker_adaptive(conn, &chunking_config)?;
-    desired_chunks.extend(chunker::panel_section_chunker(conn, &chunking_config)?);
-    desired_chunks.extend(chunker::notes_paragraph_chunker(conn, 20)?);
+    let desired_chunks = desired_chunks_for_spec(conn, spec)?;
 
     if desired_chunks.is_empty() {
         if !model_consistent {
@@ -381,7 +408,9 @@ pub fn ensure_embeddings(
         let start = Instant::now();
 
         for batch in to_embed.chunks(batch_size) {
-            let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
+            let inputs: Vec<std::borrow::Cow<'_, str>> =
+                batch.iter().map(|c| c.embed_input()).collect();
+            let texts: Vec<&str> = inputs.iter().map(|i| i.as_ref()).collect();
 
             match embedder.embed_batch(&texts) {
                 Ok(vectors) => {
@@ -435,8 +464,9 @@ pub fn ensure_embeddings(
         None
     };
 
-    // Store model metadata
+    // Store model metadata and the chunking scheme the chunks now reflect
     store::set_model_metadata(conn, embedder.model_name(), embedder.dimension(), embedder.max_length())?;
+    store::set_chunking_metadata(conn, spec)?;
 
     // Load all vectors for search
     let vectors = store::load_all_vectors(conn)?;
@@ -525,7 +555,8 @@ pub fn semantic_search(
     include_deleted: bool,
 ) -> Result<(Vec<SemanticSearchResult>, usize)> {
     let embedder = model::FastEmbedModel::new()?;
-    let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE)?;
+    let spec = config::EmbedSpec::resolve_stored(conn, embedder.max_length());
+    let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE, &spec)?;
     semantic_search_with_index(
         conn,
         &embedder,
@@ -595,7 +626,8 @@ pub fn semantic_search_with_embedder_and_limit(
     embedder: &dyn Embedder,
     limit: usize,
 ) -> Result<(Vec<SemanticSearchResult>, usize)> {
-    let index = ensure_embeddings(conn, embedder, DEFAULT_BATCH_SIZE)?;
+    let spec = config::EmbedSpec::resolve_stored(conn, embedder.max_length());
+    let index = ensure_embeddings(conn, embedder, DEFAULT_BATCH_SIZE, &spec)?;
     semantic_search_with_index(conn, embedder, &index, query, None, limit, None, false)
 }
 
@@ -642,7 +674,7 @@ mod tests {
         let conn = setup_test_db();
         let embedder = MockEmbedder::default();
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert!(index.is_empty());
     }
 
@@ -656,7 +688,7 @@ mod tests {
 
         let embedder = MockEmbedder::default();
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert!(!index.is_empty());
     }
 
@@ -671,12 +703,12 @@ mod tests {
         let embedder = MockEmbedder::default();
 
         // First run
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         let count1 = index.vectors.len();
         assert!(count1 > 0);
 
         // Second run with same data — should not re-embed
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert_eq!(index.vectors.len(), count1);
 
         // Add more data (with document first for foreign key)
@@ -692,7 +724,7 @@ mod tests {
         )
         .unwrap();
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert!(index.vectors.len() > count1);
     }
 
@@ -772,7 +804,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         let stats = index.stats.expect("stats should be present after embedding");
         assert!(stats.chunks_embedded > 0);
         assert!(stats.elapsed_secs >= 0.0);
@@ -792,10 +824,10 @@ mod tests {
         };
 
         // First run embeds everything
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
 
         // Second run — nothing to embed
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert!(index.stats.is_none(), "stats should be None when no new chunks embedded");
     }
 
@@ -807,7 +839,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert!(index.stats.is_none(), "stats should be None when no content exists");
     }
 
@@ -822,7 +854,7 @@ mod tests {
         let embedder = MockEmbedder::default();
 
         // First run creates embeddings for doc1
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert_eq!(index.vectors.len(), 1);
 
         // Remove doc1's utterances
@@ -830,8 +862,85 @@ mod tests {
             .unwrap();
 
         // Re-run — should clean up orphan
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
         assert!(index.is_empty());
+    }
+
+    #[test]
+    fn test_variant_spec_survives_search_path_resolution() {
+        // The core Phase 4 guarantee: a database embedded with a variant
+        // scheme (different chunking + headers) is NOT silently re-embedded
+        // back to defaults when a search/benchmark path opens it, because
+        // those paths resolve the spec from stored metadata.
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc1", &[
+            "First utterance about the deployment strategy with enough content to chunk.",
+            "Second utterance continuing the discussion with plenty of additional words here.",
+        ]);
+
+        let embedder = MockEmbedder::default();
+        let variant = config::EmbedSpec {
+            chunking: chunker::ChunkingConfig {
+                target_tokens: 100,
+                overlap_tokens: 20,
+                overlap_mode: chunker::OverlapMode::Utterances,
+                ..chunker::ChunkingConfig::from_max_length(512)
+            },
+            contextual_headers: true,
+        };
+
+        // Variant embed (what `grans embed --flags` will do).
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &variant).unwrap();
+        assert!(index.stats.is_some());
+        let variant_count = index.vectors.len();
+
+        // Search-path resolution under different binary defaults.
+        let resolved = config::EmbedSpec::resolve_stored(&conn, 512);
+        assert_eq!(resolved.persisted_fields(), variant.persisted_fields());
+
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &resolved).unwrap();
+        assert!(index.stats.is_none(), "variant db must not be re-embedded");
+        assert_eq!(index.vectors.len(), variant_count);
+
+        // And status agrees: nothing pending, no scheme-change warning.
+        let status =
+            get_embedding_status(&conn, embedder.model_name(), &resolved).unwrap();
+        assert_eq!(status.pending_chunks, 0);
+        assert!(!status.chunking_changed_warning);
+
+        // A default-spec embed WOULD be a scheme change, and status says so.
+        let default_spec = config::EmbedSpec::default_for(512);
+        let status =
+            get_embedding_status(&conn, embedder.model_name(), &default_spec).unwrap();
+        assert!(status.chunking_changed_warning);
+        assert!(status.pending_chunks > 0);
+    }
+
+    #[test]
+    fn test_contextual_headers_flow_into_embed_input() {
+        // With headers on, the text sent to the embedder carries the
+        // meeting context while the stored chunk text stays raw.
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc1", &[
+            "A single utterance long enough to form a chunk for the header test.",
+        ]);
+
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec {
+            contextual_headers: true,
+            ..config::EmbedSpec::default_for(512)
+        };
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+
+        let stored_text: String = conn
+            .query_row("SELECT text FROM chunks LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert!(!stored_text.contains("Meeting:"));
+
+        // Re-running with headers off is a real re-embed: hashes differ.
+        let spec_off = config::EmbedSpec::default_for(512);
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec_off).unwrap();
+        assert!(index.stats.is_some(), "toggling headers must re-embed");
     }
 
     #[test]
@@ -953,10 +1062,10 @@ mod tests {
         insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
 
         let embedder = MockEmbedder::default();
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
 
         let status =
-            get_embedding_status(&conn, embedder.model_name()).unwrap();
+            get_embedding_status(&conn, embedder.model_name(), &config::EmbedSpec::default_for(512)).unwrap();
         assert_eq!(status.max_length, Some(512));
         assert!(!status.legacy_max_length_warning);
     }
@@ -973,7 +1082,7 @@ mod tests {
         )
         .unwrap();
 
-        let status = get_embedding_status(&conn, "mock-embedder").unwrap();
+        let status = get_embedding_status(&conn, "mock-embedder", &config::EmbedSpec::default_for(512)).unwrap();
         assert_eq!(status.max_length, None);
         // Model exists but no max_length -> warning
         assert!(status.legacy_max_length_warning);
@@ -983,7 +1092,7 @@ mod tests {
     fn test_embedding_status_no_warning_when_no_model() {
         let conn = setup_test_db();
         // No embeddings at all - no model name, no max_length
-        let status = get_embedding_status(&conn, "mock-embedder").unwrap();
+        let status = get_embedding_status(&conn, "mock-embedder", &config::EmbedSpec::default_for(512)).unwrap();
         assert_eq!(status.max_length, None);
         // No model means no warning (nothing to warn about)
         assert!(!status.legacy_max_length_warning);
@@ -997,9 +1106,9 @@ mod tests {
         insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
 
         let embedder = MockEmbedder::default();
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
 
-        let status = get_embedding_status(&conn, embedder.model_name()).unwrap();
+        let status = get_embedding_status(&conn, embedder.model_name(), &config::EmbedSpec::default_for(512)).unwrap();
         assert!(!status.model_changed_warning);
         assert_eq!(status.pending_chunks, 0);
     }
@@ -1010,9 +1119,9 @@ mod tests {
         insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
 
         let embedder = MockEmbedder::default();
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE).unwrap();
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
 
-        let status = get_embedding_status(&conn, "other-model").unwrap();
+        let status = get_embedding_status(&conn, "other-model", &config::EmbedSpec::default_for(512)).unwrap();
         assert!(status.model_changed_warning);
         assert_eq!(status.pending_chunks, status.total_chunks);
         assert_eq!(status.embedded_chunks, 0);

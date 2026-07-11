@@ -1,7 +1,36 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
-use super::chunk::{hash_content, Chunk, ChunkSourceType};
+use super::chunk::{hash_embed_input, Chunk, ChunkSourceType};
+
+/// How consecutive transcript chunks overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapMode {
+    /// Carry the trailing overlap-budget characters of the previous chunk.
+    Chars,
+    /// Carry the trailing whole utterances that fit the overlap budget, so
+    /// chunks always start at an utterance boundary.
+    Utterances,
+}
+
+impl OverlapMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OverlapMode::Chars => "chars",
+            OverlapMode::Utterances => "utterances",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "chars" => Some(OverlapMode::Chars),
+            "utterances" => Some(OverlapMode::Utterances),
+            _ => None,
+        }
+    }
+}
 
 /// Configuration for adaptive token-based chunking.
 #[derive(Debug, Clone)]
@@ -16,6 +45,8 @@ pub struct ChunkingConfig {
     pub min_chars: usize,
     /// Approximate characters per token for the model.
     pub chars_per_token: f64,
+    /// How consecutive transcript chunks overlap.
+    pub overlap_mode: OverlapMode,
 }
 
 impl Default for ChunkingConfig {
@@ -36,6 +67,7 @@ impl ChunkingConfig {
             overlap_tokens: (max_length as f64 * 0.20) as usize,
             min_chars: 50,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         }
     }
 
@@ -57,9 +89,14 @@ impl ChunkingConfig {
 
 /// Generate transcript window chunks using adaptive token-based chunking.
 /// This normalizes chunk sizes to be within the model's token limits.
+/// When `headers` is provided, each document's contextual header is
+/// attached to its chunks (embed input only) and the per-document char
+/// budgets shrink by the header length so header + chunk stays within the
+/// model limit.
 pub fn transcript_window_chunker_adaptive(
     index_conn: &Connection,
     config: &ChunkingConfig,
+    headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = index_conn.prepare(
         "SELECT document_id, id, text, start_timestamp, end_timestamp, source
@@ -94,8 +131,8 @@ pub fn transcript_window_chunker_adaptive(
     }
 
     let mut chunks = Vec::new();
-    let target_chars = config.target_chars();
-    let max_chars = config.max_chars();
+    let base_target_chars = config.target_chars();
+    let base_max_chars = config.max_chars();
     let overlap_chars = config.overlap_chars();
 
     for (doc_id, utterances) in &docs {
@@ -103,7 +140,16 @@ pub fn transcript_window_chunker_adaptive(
             continue;
         }
 
+        let header = headers.and_then(|h| h.get(doc_id.as_str()));
+        let header_len = header.map_or(0, |h| h.len());
+        let target_chars = base_target_chars.saturating_sub(header_len);
+        let max_chars = base_max_chars.saturating_sub(header_len);
+
         let mut buffer = String::new();
+        // Whole utterances currently in the buffer, tracked for
+        // utterance-boundary overlap. Oversized-split fragments are not
+        // utterances and are deliberately never tracked.
+        let mut buffer_utts: Vec<String> = Vec::new();
         let mut buffer_start_idx = 0;
         let mut buffer_end_idx = 0;
         let mut buffer_start_ts: Option<&str> = None;
@@ -143,7 +189,8 @@ pub fn transcript_window_chunker_adaptive(
                         source_id: format!("{}:c{}", doc_id, chunk_idx),
                         document_id: doc_id.clone(),
                         text: buffer.clone(),
-                        content_hash: hash_content(&buffer),
+                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                        header: header.cloned(),
                         metadata: Some(serde_json::json!({
                             "window_start_idx": buffer_start_idx,
                             "window_end_idx": buffer_end_idx,
@@ -155,8 +202,7 @@ pub fn transcript_window_chunker_adaptive(
                 }
 
                 // Start new buffer with overlap
-                let overlap_start = buffer.len().saturating_sub(overlap_chars);
-                buffer = buffer[overlap_start..].to_string();
+                buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
                 buffer_start_idx = i;
             }
 
@@ -184,7 +230,8 @@ pub fn transcript_window_chunker_adaptive(
                         source_id: format!("{}:c{}", doc_id, chunk_idx),
                         document_id: doc_id.clone(),
                         text: buffer.clone(),
-                        content_hash: hash_content(&buffer),
+                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                        header: header.cloned(),
                         metadata: Some(serde_json::json!({
                             "window_start_idx": buffer_start_idx,
                             "window_end_idx": buffer_end_idx,
@@ -195,9 +242,10 @@ pub fn transcript_window_chunker_adaptive(
                     chunk_idx += 1;
                 }
 
-                // Start fresh buffer with overlap
-                let overlap_start = buffer.len().saturating_sub(overlap_chars);
-                buffer = buffer[overlap_start..].to_string();
+                // Start fresh buffer with overlap. The buffer ends in a
+                // split fragment here, so utterance mode carries nothing.
+                buffer_utts.clear();
+                buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
                 buffer_start_idx = i;
                 buffer_start_ts = None;
                 remaining = rest.to_string();
@@ -220,7 +268,8 @@ pub fn transcript_window_chunker_adaptive(
                             source_id: format!("{}:c{}", doc_id, chunk_idx),
                             document_id: doc_id.clone(),
                             text: buffer.clone(),
-                            content_hash: hash_content(&buffer),
+                            content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                            header: header.cloned(),
                             metadata: Some(serde_json::json!({
                                 "window_start_idx": buffer_start_idx,
                                 "window_end_idx": buffer_end_idx,
@@ -232,13 +281,13 @@ pub fn transcript_window_chunker_adaptive(
                     }
 
                     // Start new buffer with overlap
-                    let overlap_start = buffer.len().saturating_sub(overlap_chars);
-                    buffer = buffer[overlap_start..].to_string();
+                    buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
                     buffer_start_idx = i;
                     buffer_start_ts = None;
                 }
 
                 // Add to buffer
+                buffer_utts.push(remaining.clone());
                 if buffer.is_empty() {
                     buffer = remaining;
                     buffer_start_idx = i;
@@ -266,7 +315,8 @@ pub fn transcript_window_chunker_adaptive(
                 source_id: format!("{}:c{}", doc_id, chunk_idx),
                 document_id: doc_id.clone(),
                 text: buffer.clone(),
-                content_hash: hash_content(&buffer),
+                content_hash: hash_embed_input(header.map(String::as_str), &buffer),
+                header: header.cloned(),
                 metadata: Some(serde_json::json!({
                     "window_start_idx": buffer_start_idx,
                     "window_end_idx": buffer_end_idx,
@@ -280,6 +330,61 @@ pub fn transcript_window_chunker_adaptive(
     Ok(chunks)
 }
 
+/// Largest byte index <= `max` that lies on a char boundary of `s`.
+/// If that index is 0 (i.e. `max` falls inside the first character), the
+/// end of the first character is returned instead, so callers slicing at
+/// the result always make progress.
+pub(crate) fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    if i == 0 {
+        i = max;
+        while !s.is_char_boundary(i) {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// Build the carryover that seeds the next chunk after a finalize.
+/// Chars mode slices the trailing overlap budget off the old buffer;
+/// Utterances mode carries the trailing whole utterances that fit the
+/// budget (`buffer_utts` is trimmed to exactly the carried utterances).
+fn overlap_carryover(
+    mode: OverlapMode,
+    buffer: &str,
+    buffer_utts: &mut Vec<String>,
+    overlap_chars: usize,
+) -> String {
+    match mode {
+        OverlapMode::Chars => {
+            buffer_utts.clear();
+            let overlap_start =
+                floor_char_boundary(buffer, buffer.len().saturating_sub(overlap_chars));
+            buffer[overlap_start..].to_string()
+        }
+        OverlapMode::Utterances => {
+            let mut total = 0;
+            let mut keep = 0;
+            for utt in buffer_utts.iter().rev() {
+                let addition = utt.len() + if keep == 0 { 0 } else { 1 }; // +1 newline
+                if total + addition > overlap_chars {
+                    break;
+                }
+                total += addition;
+                keep += 1;
+            }
+            buffer_utts.drain(..buffer_utts.len() - keep);
+            buffer_utts.join("\n")
+        }
+    }
+}
+
 /// Split text to fit within max_chars, returning (fits, remainder).
 /// Strategy: prefer sentence boundaries, fall back to word boundaries.
 /// If text <= max_chars, returns (text, "").
@@ -288,8 +393,12 @@ fn split_text_at_limit(text: &str, max_chars: usize) -> (&str, &str) {
         return (text, "");
     }
 
-    // Find the last sentence boundary (., !, ?) within max_chars
-    let search_area = &text[..max_chars];
+    // Find the last sentence boundary (., !, ?) within max_chars.
+    // The budget is clamped to at least one character: a zero budget must
+    // still yield a non-empty fits, or the oversized-split loop that calls
+    // this in a `while remaining.len() > max_chars` never terminates.
+    let limit = floor_char_boundary(text, max_chars.max(1));
+    let search_area = &text[..limit];
     let sentence_end = search_area
         .rfind(|c| c == '.' || c == '!' || c == '?')
         .map(|pos| pos + 1); // Include the punctuation
@@ -308,8 +417,8 @@ fn split_text_at_limit(text: &str, max_chars: usize) -> (&str, &str) {
         }
     }
 
-    // No good boundary - hard split at max_chars
-    (&text[..max_chars], &text[max_chars..])
+    // No good boundary - hard split at the char boundary nearest max_chars
+    (&text[..limit], &text[limit..])
 }
 
 /// Format utterance text with a speaker label prefix based on source.
@@ -332,6 +441,7 @@ use crate::query::text::{split_markdown_sections, strip_panel_footer};
 pub fn panel_section_chunker(
     conn: &Connection,
     config: &ChunkingConfig,
+    headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.document_id, p.content_markdown
@@ -377,7 +487,8 @@ pub fn panel_section_chunker(
                 continue;
             }
 
-            let content_hash = hash_content(&text);
+            let header = headers.and_then(|h| h.get(panel.document_id.as_str()));
+            let content_hash = hash_embed_input(header.map(String::as_str), &text);
 
             chunks.push(Chunk {
                 source_type: ChunkSourceType::PanelSection,
@@ -385,6 +496,7 @@ pub fn panel_section_chunker(
                 document_id: panel.document_id.clone(),
                 text,
                 content_hash,
+                header: header.cloned(),
                 metadata: Some(serde_json::json!({
                     "panel_id": panel.id,
                     "section_heading": heading,
@@ -401,6 +513,7 @@ pub fn panel_section_chunker(
 pub fn notes_paragraph_chunker(
     conn: &Connection,
     min_chars: usize,
+    headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
         "SELECT id, notes_plain
@@ -433,9 +546,10 @@ pub fn notes_paragraph_chunker(
             .filter(|p| p.len() >= min_chars)
             .collect();
 
+        let header = headers.and_then(|h| h.get(doc.id.as_str()));
         for (para_idx, para) in paragraphs.iter().enumerate() {
             let text = para.to_string();
-            let content_hash = hash_content(&text);
+            let content_hash = hash_embed_input(header.map(String::as_str), &text);
 
             chunks.push(Chunk {
                 source_type: ChunkSourceType::NotesParagraph,
@@ -443,6 +557,7 @@ pub fn notes_paragraph_chunker(
                 document_id: doc.id.clone(),
                 text,
                 content_hash,
+                header: header.cloned(),
                 metadata: Some(serde_json::json!({
                     "paragraph_idx": para_idx,
                 })),
@@ -517,6 +632,21 @@ mod tests {
         let (fits, remainder) = split_text_at_limit("", 100);
         assert_eq!(fits, "");
         assert_eq!(remainder, "");
+    }
+
+    #[test]
+    fn test_split_text_zero_limit_still_makes_progress() {
+        // A zero budget must not return an empty fits for non-empty text:
+        // the oversized-split loop would never shrink `remaining` and spin
+        // forever. Splitting must be total for any input.
+        let (fits, remainder) = split_text_at_limit("abcdef", 0);
+        assert!(!fits.is_empty());
+        assert_eq!(format!("{}{}", fits, remainder), "abcdef");
+
+        let multibyte = "\u{2019}\u{2019}\u{2019}";
+        let (fits, remainder) = split_text_at_limit(multibyte, 0);
+        assert!(!fits.is_empty());
+        assert_eq!(format!("{}{}", fits, remainder), multibyte);
     }
 
     #[test]
@@ -600,7 +730,7 @@ mod tests {
     fn test_adaptive_empty_db() {
         let conn = setup_test_db(&[]);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -610,7 +740,7 @@ mod tests {
         let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
         let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].document_id, "doc1");
         assert!(chunks[0].text.contains("Hello world"));
@@ -632,8 +762,9 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("Short one"));
         assert!(chunks[0].text.contains("Short three"));
@@ -656,8 +787,9 @@ mod tests {
             overlap_tokens: 5,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // Should have multiple chunks
         assert!(chunks.len() >= 2, "Expected multiple chunks, got {}", chunks.len());
     }
@@ -674,8 +806,9 @@ mod tests {
             overlap_tokens: 10,
             min_chars: 20,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The huge text should result in multiple chunks
         assert!(chunks.len() > 1, "Expected split chunks, got {}", chunks.len());
         // Each chunk should not exceed max_chars
@@ -702,8 +835,9 @@ mod tests {
             overlap_tokens: 10,
             min_chars: 20,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The "ok" text alone would be too small, but combined they're fine
         assert!(!chunks.is_empty());
         for chunk in &chunks {
@@ -719,7 +853,7 @@ mod tests {
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         let doc_ids: Vec<&str> = chunks.iter().map(|c| c.document_id.as_str()).collect();
@@ -741,8 +875,9 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         let meta = chunks[0].metadata.as_ref().unwrap();
@@ -758,7 +893,7 @@ mod tests {
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["start_timestamp"], "2025-01-01T10:00:00Z");
@@ -769,7 +904,7 @@ mod tests {
     fn test_adaptive_source_id_format() {
         let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", "Content here that is long enough to meet minimum chunk size requirements for the test.", None)]);
         let config = ChunkingConfig::default();
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert!(chunks[0].source_id.starts_with("doc1:"));
     }
@@ -796,7 +931,7 @@ mod tests {
     fn test_panel_section_chunker_empty_db() {
         let conn = setup_panel_test_db();
         let config = ChunkingConfig::default();
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -807,7 +942,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].source_type, ChunkSourceType::PanelSection);
@@ -824,7 +959,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].text.contains("Chat with"));
@@ -837,7 +972,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 50, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         // "Ok." section is too short, only "Key Decisions" should remain
         assert_eq!(chunks.len(), 1);
@@ -858,7 +993,7 @@ mod tests {
         ).unwrap();
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -869,7 +1004,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["panel_id"], "panel1");
@@ -881,7 +1016,7 @@ mod tests {
     #[test]
     fn test_notes_paragraph_chunker_empty_db() {
         let conn = setup_panel_test_db();
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -893,7 +1028,7 @@ mod tests {
             ["First paragraph with enough content.\n\nSecond paragraph also with enough content."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].source_type, ChunkSourceType::NotesParagraph);
@@ -909,7 +1044,7 @@ mod tests {
             ["ok\n\nThis paragraph is long enough to be included in the embedding."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
 
         // "ok" is too short
         assert_eq!(chunks.len(), 1);
@@ -924,7 +1059,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -936,7 +1071,7 @@ mod tests {
             ["A paragraph that is long enough to be embedded."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["paragraph_idx"], 0);
@@ -949,7 +1084,7 @@ mod tests {
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
         let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
-        let chunks = panel_section_chunker(&conn, &config).unwrap();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].source_type, ChunkSourceType::PanelSection);
@@ -966,6 +1101,293 @@ mod tests {
         let meta2 = chunks[2].metadata.as_ref().unwrap();
         assert_eq!(meta2["section_heading"], "Action Items");
         assert!(chunks[2].text.contains("welcome email"));
+    }
+
+    // Tests for utterance-boundary overlap mode
+    #[test]
+    fn test_utterance_overlap_carries_whole_utterances() {
+        // Three ~50-char utterances; target forces a split after the
+        // second. In utterance mode the next chunk starts with the full
+        // second utterance, not a mid-utterance character slice.
+        let utt_a = "Utterance alpha talks about the quarterly budget.";
+        let utt_b = "Utterance bravo covers the deployment timeline ok.";
+        let utt_c = "Utterance charlie wraps up with the action items.";
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt_a, None),
+            ("doc1", "2025-01-01T10:01:00Z", utt_b, None),
+            ("doc1", "2025-01-01T10:02:00Z", utt_c, None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 25,
+            max_tokens: 100,
+            overlap_tokens: 15,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert!(chunks.len() >= 2, "expected a split, got {} chunks", chunks.len());
+        for chunk in &chunks {
+            assert!(
+                [utt_a, utt_b, utt_c].iter().any(|u| chunk.text.starts_with(u)),
+                "chunk must start at an utterance boundary, got: {:?}",
+                &chunk.text[..chunk.text.len().min(60)]
+            );
+        }
+        // The overlap actually carries content: some chunk beyond the first
+        // repeats an utterance already emitted.
+        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(all_text.matches(utt_b).count() >= 2 || all_text.matches(utt_a).count() >= 2);
+
+        // Contrast: chars mode slices mid-utterance under the same config.
+        let chars_config = ChunkingConfig { overlap_mode: OverlapMode::Chars, ..config };
+        let chars_chunks = transcript_window_chunker_adaptive(&conn, &chars_config, None).unwrap();
+        assert!(
+            chars_chunks
+                .iter()
+                .any(|c| ![utt_a, utt_b, utt_c].iter().any(|u| c.text.starts_with(u))),
+            "chars mode should produce at least one mid-utterance chunk here"
+        );
+    }
+
+    #[test]
+    fn test_utterance_overlap_skips_oversized_tail() {
+        // The trailing utterance is bigger than the overlap budget, so
+        // nothing is carried: the next chunk starts with the new utterance.
+        let utt_a = "Utterance alpha talks about the quarterly budget and it keeps going for a while longer.";
+        let utt_b = "Utterance bravo is the next one and stands alone with plenty of content of its own.";
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt_a, None),
+            ("doc1", "2025-01-01T10:01:00Z", utt_b, None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 20,
+            max_tokens: 100,
+            overlap_tokens: 5, // 20 chars: smaller than either utterance
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, utt_a);
+        assert_eq!(chunks[1].text, utt_b);
+    }
+
+    #[test]
+    fn test_overlap_mode_roundtrip() {
+        assert_eq!(OverlapMode::parse(OverlapMode::Chars.as_str()), Some(OverlapMode::Chars));
+        assert_eq!(
+            OverlapMode::parse(OverlapMode::Utterances.as_str()),
+            Some(OverlapMode::Utterances)
+        );
+        assert_eq!(OverlapMode::parse("bogus"), None);
+    }
+
+    // Tests for contextual headers threading through the chunkers
+    fn headers_for(doc_id: &str, header: &str) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(doc_id.to_string(), header.to_string());
+        map
+    }
+
+    #[test]
+    fn test_adaptive_header_on_chunk_not_in_text() {
+        let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
+        let config = ChunkingConfig::default();
+        let headers = headers_for("doc1", "Meeting: Sync\n\n");
+
+        let chunks =
+            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
+        assert!(!chunks[0].text.contains("Meeting:"));
+        assert!(chunks[0].embed_input().starts_with("Meeting: Sync\n\n"));
+    }
+
+    #[test]
+    fn test_adaptive_header_changes_content_hash() {
+        let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
+        let config = ChunkingConfig::default();
+
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
+        let without =
+            transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+        let with_a = transcript_window_chunker_adaptive(
+            &conn,
+            &config,
+            Some(&headers_for("doc1", "Meeting: A\n\n")),
+        )
+        .unwrap();
+        let with_b = transcript_window_chunker_adaptive(
+            &conn,
+            &config,
+            Some(&headers_for("doc1", "Meeting: B\n\n")),
+        )
+        .unwrap();
+
+        assert_ne!(without[0].content_hash, with_a[0].content_hash);
+        assert_ne!(with_a[0].content_hash, with_b[0].content_hash);
+        // Text itself is identical in all three.
+        assert_eq!(without[0].text, with_a[0].text);
+    }
+
+    #[test]
+    fn test_adaptive_header_shrinks_chunk_budget() {
+        // With a header, header + text must stay within max_chars.
+        let long_text = "This is a fairly long sentence that keeps going with more words. ".repeat(10);
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", &long_text, None)]);
+        let config = ChunkingConfig {
+            target_tokens: 30,
+            max_tokens: 50,
+            overlap_tokens: 10,
+            min_chars: 20,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let header = "Meeting: Budget Review Session\nDate: 2026-02-01\n\n";
+        let headers = headers_for("doc1", header);
+
+        let chunks =
+            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(
+                chunk.embed_input().len() <= config.max_chars() + 50,
+                "embed input too large: {} bytes vs max {}",
+                chunk.embed_input().len(),
+                config.max_chars()
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaptive_no_header_entry_means_no_header() {
+        let text = "Hello world, this is a test with enough content to meet minimum chunk size requirements.";
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
+        let config = ChunkingConfig::default();
+        let headers = headers_for("other-doc", "Meeting: Other\n\n");
+
+        let chunks =
+            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+
+        assert_eq!(chunks[0].header, None);
+    }
+
+    #[test]
+    fn test_panel_chunker_carries_header() {
+        let conn = setup_panel_test_db();
+        let markdown = "### Action Items\n\nComplete the deployment process for the entire team.";
+        insert_test_panel(&conn, "panel1", "doc1", markdown);
+        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let headers = headers_for("doc1", "Meeting: Sync\n\n");
+
+        let chunks = panel_section_chunker(&conn, &config, Some(&headers)).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
+        assert!(!chunks[0].text.contains("Meeting: Sync"));
+    }
+
+    #[test]
+    fn test_notes_chunker_carries_header() {
+        let conn = setup_panel_test_db();
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at, notes_plain) VALUES ('doc1', 'Test', '2025-01-01T00:00:00Z', ?1)",
+            ["A paragraph that is long enough to be embedded."],
+        ).unwrap();
+        let headers = headers_for("doc1", "Meeting: Sync\n\n");
+
+        let chunks = notes_paragraph_chunker(&conn, 20, Some(&headers)).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
+    }
+
+    // Regression tests: transcripts contain multi-byte UTF-8 (curly
+    // apostrophes from transcription); byte-offset slicing must not panic.
+    #[test]
+    fn test_split_text_multibyte_hard_split_no_panic() {
+        // 27 three-byte chars, no sentence or word boundaries: forces the
+        // hard-split path with max_chars landing mid-character.
+        let text = "\u{2019}".repeat(27);
+        let (fits, remainder) = split_text_at_limit(&text, 10);
+        assert!(!fits.is_empty());
+        assert!(fits.len() <= 10);
+        assert_eq!(format!("{}{}", fits, remainder), text);
+    }
+
+    #[test]
+    fn test_adaptive_target_overlap_multibyte_no_panic() {
+        // Two 81-byte utterances of 3-byte chars; finalizing at the target
+        // boundary computes overlap_start = 81 - 20 = 61, which is not a
+        // char boundary.
+        let utt = "\u{2019}".repeat(27);
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", utt.as_str(), None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 15,
+            max_tokens: 100,
+            overlap_tokens: 5,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_adaptive_max_overlap_multibyte_no_panic() {
+        // Same shape, but the second utterance pushes past max_chars so the
+        // max-limit finalization path computes the overlap slice.
+        let utt = "\u{2019}".repeat(27);
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", utt.as_str(), None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 15,
+            max_tokens: 25,
+            overlap_tokens: 5,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_adaptive_oversized_multibyte_utterance_no_panic() {
+        // A single 600-byte utterance of 3-byte chars exercises the
+        // oversized-split loop and its overlap carryover.
+        let utt = "\u{2019}".repeat(200);
+        let utts = vec![("doc1", "2025-01-01T10:00:00Z", utt.as_str(), None)];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 15,
+            max_tokens: 25,
+            overlap_tokens: 5,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+        assert!(chunks.len() > 1);
     }
 
     // Tests for format_utterance_text
@@ -1014,8 +1436,9 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         assert!(chunks.is_empty(), "Empty text with source should produce no chunks, got {}", chunks.len());
     }
 
@@ -1034,8 +1457,9 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("[You] I think we should proceed"));
@@ -1056,8 +1480,9 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].text.contains("[You]"));
@@ -1080,8 +1505,9 @@ mod tests {
             overlap_tokens: 100,
             min_chars: 10,
             chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
         };
-        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("[You] Labeled utterance from the user."));
@@ -1107,13 +1533,13 @@ mod tests {
         let config = ChunkingConfig::default();
 
         let conn_mic = setup_test_db(&utts_mic);
-        let chunks_mic = transcript_window_chunker_adaptive(&conn_mic, &config).unwrap();
+        let chunks_mic = transcript_window_chunker_adaptive(&conn_mic, &config, None).unwrap();
 
         let conn_sys = setup_test_db(&utts_sys);
-        let chunks_sys = transcript_window_chunker_adaptive(&conn_sys, &config).unwrap();
+        let chunks_sys = transcript_window_chunker_adaptive(&conn_sys, &config, None).unwrap();
 
         let conn_none = setup_test_db(&utts_none);
-        let chunks_none = transcript_window_chunker_adaptive(&conn_none, &config).unwrap();
+        let chunks_none = transcript_window_chunker_adaptive(&conn_none, &config, None).unwrap();
 
         // All three should produce different hashes
         assert_ne!(chunks_mic[0].content_hash, chunks_sys[0].content_hash);

@@ -64,9 +64,24 @@ fn main() -> Result<()> {
     }
 
     // Embed command
-    if let Commands::Embed { action, yes, batch_size } = &cli.command {
+    if let Commands::Embed {
+        action,
+        yes,
+        batch_size,
+        chunk_target_tokens,
+        chunk_overlap_tokens,
+        overlap_mode,
+        contextual_headers,
+    } = &cli.command
+    {
         let conn = get_connection(cli.db.as_deref())?;
-        commands::embed::run(&conn, action.as_ref(), *yes, *batch_size, ctx.output_mode)?;
+        let overrides = embed::config::EmbedOverrides {
+            target_tokens: *chunk_target_tokens,
+            overlap_tokens: *chunk_overlap_tokens,
+            overlap_mode: overlap_mode.as_deref().and_then(embed::chunker::OverlapMode::parse),
+            contextual_headers: *contextual_headers,
+        };
+        commands::embed::run(&conn, action.as_ref(), *yes, *batch_size, ctx.output_mode, &overrides)?;
         return Ok(());
     }
 

@@ -261,6 +261,69 @@ pub fn set_model_metadata(
     Ok(())
 }
 
+/// One metadata value by key.
+fn get_metadata_value(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM embedding_metadata WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// Chunking parameters read back from `embedding_metadata`. Absent keys
+/// (legacy databases) are `None`.
+#[derive(Debug, Clone, Default)]
+pub struct StoredChunkingParams {
+    pub target_tokens: Option<usize>,
+    pub overlap_tokens: Option<usize>,
+    pub overlap_mode: Option<crate::embed::chunker::OverlapMode>,
+    pub contextual_headers: Option<bool>,
+}
+
+impl StoredChunkingParams {
+    pub fn is_empty(&self) -> bool {
+        self.target_tokens.is_none()
+            && self.overlap_tokens.is_none()
+            && self.overlap_mode.is_none()
+            && self.contextual_headers.is_none()
+    }
+}
+
+/// Persist the chunking scheme the embeddings were built with.
+pub fn set_chunking_metadata(
+    conn: &Connection,
+    spec: &crate::embed::config::EmbedSpec,
+) -> Result<()> {
+    let (target, overlap, mode, headers) = spec.persisted_fields();
+    for (key, value) in [
+        ("chunking_target_tokens", target.to_string()),
+        ("chunking_overlap_tokens", overlap.to_string()),
+        ("chunking_overlap_mode", mode.as_str().to_string()),
+        ("contextual_headers", headers.to_string()),
+    ] {
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_metadata (key, value) VALUES (?1, ?2)",
+            [key, value.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
+/// Read back the stored chunking scheme.
+pub fn get_chunking_metadata(conn: &Connection) -> StoredChunkingParams {
+    StoredChunkingParams {
+        target_tokens: get_metadata_value(conn, "chunking_target_tokens")
+            .and_then(|s| s.parse().ok()),
+        overlap_tokens: get_metadata_value(conn, "chunking_overlap_tokens")
+            .and_then(|s| s.parse().ok()),
+        overlap_mode: get_metadata_value(conn, "chunking_overlap_mode")
+            .and_then(|s| crate::embed::chunker::OverlapMode::parse(&s)),
+        contextual_headers: get_metadata_value(conn, "contextual_headers")
+            .and_then(|s| s.parse().ok()),
+    }
+}
+
 /// Get stored max_length (None for legacy embeddings that don't have it).
 pub fn get_max_length(conn: &Connection) -> Option<usize> {
     conn.query_row(
@@ -361,6 +424,7 @@ mod tests {
             text: "hello world".to_string(),
             content_hash: hash_content("hello world"),
             metadata: None,
+            header: None,
         };
         let vec = vec![1.0_f32, 2.0, 3.0];
 
@@ -383,6 +447,7 @@ mod tests {
             text: "test".to_string(),
             content_hash: hash_content("test"),
             metadata: None,
+            header: None,
         };
         let id = insert_chunk_with_embedding(&conn, &chunk, &[0.5, 0.5]).unwrap();
         delete_chunks(&conn, &[id]).unwrap();
@@ -401,6 +466,7 @@ mod tests {
             text: "test".to_string(),
             content_hash: hash_content("test"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -436,6 +502,7 @@ mod tests {
             text: "test".to_string(),
             content_hash: hash_content("test"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -458,6 +525,7 @@ mod tests {
             text: "hello world".to_string(),
             content_hash: hash_content("hello world"),
             metadata: Some(metadata),
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0, 2.0]).unwrap();
 
@@ -481,6 +549,7 @@ mod tests {
             text: "no metadata".to_string(),
             content_hash: hash_content("no metadata"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -502,6 +571,7 @@ mod tests {
                 text: format!("chunk {}", i),
                 content_hash: hash_content(&format!("chunk {}", i)),
                 metadata: None,
+                header: None,
             };
             insert_chunk_with_embedding(&conn, &chunk, &[i as f32]).unwrap();
         }
@@ -528,6 +598,7 @@ mod tests {
             text: "only one".to_string(),
             content_hash: hash_content("only one"),
             metadata: None,
+            header: None,
         };
         insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
 
@@ -551,6 +622,7 @@ mod tests {
                 text: format!("chunk {}", i),
                 content_hash: hash_content(&format!("chunk {}", i)),
                 metadata: None,
+                header: None,
             })
             .collect();
 
@@ -589,6 +661,32 @@ mod tests {
         let conn = test_db();
         // Should not error when deleting empty list
         delete_chunks(&conn, &[]).unwrap();
+    }
+
+    #[test]
+    fn test_chunking_metadata_roundtrip() {
+        use crate::embed::chunker::{ChunkingConfig, OverlapMode};
+        use crate::embed::config::EmbedSpec;
+
+        let conn = test_db();
+        assert!(get_chunking_metadata(&conn).is_empty());
+
+        let spec = EmbedSpec {
+            chunking: ChunkingConfig {
+                target_tokens: 192,
+                overlap_tokens: 48,
+                overlap_mode: OverlapMode::Utterances,
+                ..ChunkingConfig::from_max_length(512)
+            },
+            contextual_headers: true,
+        };
+        set_chunking_metadata(&conn, &spec).unwrap();
+
+        let stored = get_chunking_metadata(&conn);
+        assert_eq!(stored.target_tokens, Some(192));
+        assert_eq!(stored.overlap_tokens, Some(48));
+        assert_eq!(stored.overlap_mode, Some(OverlapMode::Utterances));
+        assert_eq!(stored.contextual_headers, Some(true));
     }
 
     #[test]

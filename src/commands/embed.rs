@@ -9,38 +9,50 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::cli::args::EmbedAction;
+use crate::embed::config::{EmbedOverrides, EmbedSpec};
 use crate::embed::{self, EmbeddingStatus};
 use crate::output::format::OutputMode;
 
-/// Run the embed command.
+/// Run the embed command. `overrides` carries the hidden experiment
+/// flags; they win over the stored scheme, which wins over defaults.
 pub fn run(
     conn: &Connection,
     action: Option<&EmbedAction>,
     yes: bool,
     batch_size: usize,
     mode: OutputMode,
+    overrides: &EmbedOverrides,
 ) -> Result<()> {
+    let spec =
+        EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS).with_overrides(overrides)?;
     match action {
-        Some(EmbedAction::Status) => show_status(conn, mode),
-        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode),
-        None => embed_with_prompt(conn, yes, batch_size, mode),
+        Some(EmbedAction::Status) => show_status(conn, mode, &spec),
+        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode, &spec),
+        None => embed_with_prompt(conn, yes, batch_size, mode, &spec),
     }
 }
 
 /// Show embedding status without triggering embedding.
-fn show_status(conn: &Connection, mode: OutputMode) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
+fn show_status(conn: &Connection, mode: OutputMode, spec: &EmbedSpec) -> Result<()> {
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
 
     match mode {
-        OutputMode::Json => print_status_json(&status),
-        OutputMode::Tty => print_status_tty(&status),
+        OutputMode::Json => print_status_json(&status, spec),
+        OutputMode::Tty => print_status_tty(&status, spec),
     }
 
     Ok(())
 }
 
-fn print_status_json(status: &EmbeddingStatus) {
+fn print_status_json(status: &EmbeddingStatus, spec: &EmbedSpec) {
     let mut json = serde_json::json!({
+        "chunking": {
+            "target_tokens": spec.chunking.target_tokens,
+            "overlap_tokens": spec.chunking.overlap_tokens,
+            "overlap_mode": spec.chunking.overlap_mode.as_str(),
+            "contextual_headers": spec.contextual_headers,
+        },
+        "chunking_changed_warning": status.chunking_changed_warning,
         "total_chunks": status.total_chunks,
         "embedded_chunks": status.embedded_chunks,
         "pending_chunks": status.pending_chunks,
@@ -93,7 +105,7 @@ fn print_status_json(status: &EmbeddingStatus) {
     println!("{}", json);
 }
 
-fn print_status_tty(status: &EmbeddingStatus) {
+fn print_status_tty(status: &EmbeddingStatus, spec: &EmbedSpec) {
     println!("\x1b[1mEmbedding Status\x1b[0m");
     println!("\x1b[2m────────────────\x1b[0m");
 
@@ -102,6 +114,13 @@ fn print_status_tty(status: &EmbeddingStatus) {
     if let Some(max_len) = status.max_length {
         println!("Max length: {} tokens", format_number(max_len));
     }
+    println!(
+        "Chunking:   {} target / {} overlap tokens, {} overlap, headers {}",
+        format_number(spec.chunking.target_tokens),
+        format_number(spec.chunking.overlap_tokens),
+        spec.chunking.overlap_mode.as_str(),
+        if spec.contextual_headers { "on" } else { "off" },
+    );
     println!();
 
     println!(
@@ -264,8 +283,9 @@ fn clear_embeddings(
     count: Option<usize>,
     yes: bool,
     mode: OutputMode,
+    spec: &EmbedSpec,
 ) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
 
     if status.embedded_chunks == 0 && status.orphaned_chunks == 0 {
         match mode {
@@ -340,8 +360,14 @@ fn clear_embeddings(
 }
 
 /// Embed with optional confirmation prompt.
-fn embed_with_prompt(conn: &Connection, yes: bool, batch_size: usize, mode: OutputMode) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
+fn embed_with_prompt(
+    conn: &Connection,
+    yes: bool,
+    batch_size: usize,
+    mode: OutputMode,
+    spec: &EmbedSpec,
+) -> Result<()> {
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
 
     if status.total_chunks == 0 {
         match mode {
@@ -389,7 +415,8 @@ fn embed_with_prompt(conn: &Connection, yes: bool, batch_size: usize, mode: Outp
     if !yes && mode == OutputMode::Tty && (status.pending_chunks > 0 || status.orphaned_chunks > 0) {
         let needs_full_reembed = status.orphaned_chunks > 0
             || status.legacy_max_length_warning
-            || status.model_changed_warning;
+            || status.model_changed_warning
+            || status.chunking_changed_warning;
 
         if needs_full_reembed {
             eprintln!("\nEmbeddings need to be rebuilt:");
@@ -398,6 +425,9 @@ fn embed_with_prompt(conn: &Connection, yes: bool, batch_size: usize, mode: Outp
             }
             if status.model_changed_warning {
                 eprintln!("  - Existing embeddings were created by a different embedding model");
+            }
+            if status.chunking_changed_warning {
+                eprintln!("  - Existing embeddings use a different chunking scheme");
             }
             if status.orphaned_chunks > 0 {
                 eprintln!(
@@ -426,13 +456,13 @@ fn embed_with_prompt(conn: &Connection, yes: bool, batch_size: usize, mode: Outp
         }
     }
 
-    do_embed(conn, batch_size, mode)
+    do_embed(conn, batch_size, mode, spec)
 }
 
 /// Actually perform the embedding.
-fn do_embed(conn: &Connection, batch_size: usize, mode: OutputMode) -> Result<()> {
+fn do_embed(conn: &Connection, batch_size: usize, mode: OutputMode, spec: &EmbedSpec) -> Result<()> {
     let embedder = embed::model::FastEmbedModel::new()?;
-    let index = embed::ensure_embeddings(conn, &embedder, batch_size)?;
+    let index = embed::ensure_embeddings(conn, &embedder, batch_size, spec)?;
 
     match mode {
         OutputMode::Json => {
@@ -464,7 +494,8 @@ fn do_embed(conn: &Connection, batch_size: usize, mode: OutputMode) -> Result<()
 /// Run embedding after sync (called from sync_granola when --embed is set).
 /// Does not prompt since user explicitly requested embedding.
 pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME)?;
+    let spec = EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS);
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, &spec)?;
 
     if status.total_chunks == 0 {
         if mode != OutputMode::Json {
@@ -490,7 +521,7 @@ pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
         );
     }
 
-    do_embed(conn, embed::DEFAULT_BATCH_SIZE, mode)
+    do_embed(conn, embed::DEFAULT_BATCH_SIZE, mode, &spec)
 }
 
 fn format_number(n: usize) -> String {
