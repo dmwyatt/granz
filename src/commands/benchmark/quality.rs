@@ -150,12 +150,7 @@ pub(super) fn run_quality_benchmark(
         .with_context(|| format!("Failed to read benchmark file: {}", args.file.display()))?;
     let queries = parse_benchmark(&content)?;
     let title_map = build_title_map(conn)?;
-
-    let modes: Vec<QualityMode> = if args.compare.is_empty() {
-        vec![args.mode]
-    } else {
-        args.compare.to_vec()
-    };
+    let modes = resolve_modes(args.mode, args.compare)?;
 
     let mut runs = Vec::with_capacity(modes.len());
     for mode in modes {
@@ -329,6 +324,23 @@ fn latency_stats(outcomes: &[QueryOutcome]) -> LatencyStats {
         avg_ms: latencies.iter().sum::<f64>() / latencies.len() as f64,
         p50_ms: percentile(&latencies, 50.0),
     }
+}
+
+/// The modes to run: the --compare list when given (validated), else the
+/// single --mode.
+fn resolve_modes(mode: QualityMode, compare: &[QualityMode]) -> Result<Vec<QualityMode>> {
+    if compare.is_empty() {
+        return Ok(vec![mode]);
+    }
+    if compare.len() < 2 {
+        bail!("--compare needs at least two modes, e.g. --compare fts,semantic");
+    }
+    for (i, m) in compare.iter().enumerate() {
+        if compare[..i].contains(m) {
+            bail!("--compare has a duplicate mode: {}", m.as_str());
+        }
+    }
+    Ok(compare.to_vec())
 }
 
 /// Run-level matching method: "id" or "title" when uniform, "mixed" otherwise.
@@ -614,6 +626,38 @@ mod tests {
         assert_eq!(matching_summary(&["id", "id"]), "id");
         assert_eq!(matching_summary(&["title"]), "title");
         assert_eq!(matching_summary(&["id", "title"]), "mixed");
+    }
+
+    #[test]
+    fn resolve_modes_defaults_to_single_mode() {
+        let modes = resolve_modes(QualityMode::Semantic, &[]).unwrap();
+        assert_eq!(modes, vec![QualityMode::Semantic]);
+    }
+
+    #[test]
+    fn resolve_modes_uses_compare_list() {
+        let modes = resolve_modes(
+            QualityMode::Semantic,
+            &[QualityMode::Fts, QualityMode::Semantic],
+        )
+        .unwrap();
+        assert_eq!(modes, vec![QualityMode::Fts, QualityMode::Semantic]);
+    }
+
+    #[test]
+    fn resolve_modes_rejects_single_compare_mode() {
+        let err = resolve_modes(QualityMode::Semantic, &[QualityMode::Fts]).unwrap_err();
+        assert!(err.to_string().contains("at least two"));
+    }
+
+    #[test]
+    fn resolve_modes_rejects_duplicate_compare_modes() {
+        let err = resolve_modes(
+            QualityMode::Semantic,
+            &[QualityMode::Fts, QualityMode::Fts],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
     }
 
     fn stub_ranked(ids: &[&str]) -> Vec<RankedDoc> {

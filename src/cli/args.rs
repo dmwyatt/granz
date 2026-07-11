@@ -294,8 +294,9 @@ pub enum BenchmarkAction {
         #[arg(long, value_enum, default_value = "semantic", conflicts_with = "compare")]
         mode: QualityMode,
 
-        /// Compare modes: per-query rank table plus win/loss/tie summary
-        #[arg(long, value_enum, value_delimiter = ',', num_args = 2..)]
+        /// Compare modes, e.g. fts,semantic: per-query rank table plus
+        /// win/loss/tie summary
+        #[arg(long, value_enum, value_delimiter = ',')]
         compare: Vec<QualityMode>,
 
         /// Show detailed results for each query
@@ -549,6 +550,63 @@ mod tests {
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert();
+    }
+
+    fn quality_compare(cli: &Cli) -> &[QualityMode] {
+        match &cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Quality { compare, .. },
+            } => compare,
+            _ => panic!("expected benchmark quality subcommand"),
+        }
+    }
+
+    #[test]
+    fn benchmark_quality_compare_accepts_comma_separated_modes() {
+        let cli = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--compare",
+            "fts,semantic",
+        ])
+        .unwrap();
+        assert_eq!(
+            quality_compare(&cli),
+            &[QualityMode::Fts, QualityMode::Semantic]
+        );
+    }
+
+    #[test]
+    fn benchmark_quality_mode_conflicts_with_compare() {
+        let result = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--mode",
+            "fts",
+            "--compare",
+            "fts,semantic",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn benchmark_quality_note_requires_record() {
+        let result = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--note",
+            "some note",
+        ]);
+        assert!(result.is_err());
     }
 
     fn transcripts_action(cli: &Cli) -> &SyncAction {
