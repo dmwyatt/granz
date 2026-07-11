@@ -2,6 +2,7 @@ pub mod chunk;
 pub mod chunker;
 pub mod model;
 pub mod progress;
+pub mod rerank;
 pub mod search;
 pub mod store;
 
