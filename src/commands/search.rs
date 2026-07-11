@@ -266,7 +266,16 @@ fn hybrid_search(
     if rerank {
         let reranker =
             crate::embed::rerank::FastEmbedReranker::new(crate::embed::rerank::DEFAULT_RERANK_MODEL)?;
-        let mut reranked = crate::query::rerank::rerank_hybrid(conn, &reranker, query, &ranking)?;
+        let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
+        let cfg = crate::query::adjust::RankingConfig::default();
+        let mut reranked = crate::query::rerank::rerank_hybrid(
+            conn,
+            &reranker,
+            query,
+            &ranking,
+            &ranking_ctx,
+            &cfg,
+        )?;
         if let Some(min) = min_score {
             reranked.retain(|d| d.score >= min);
         }

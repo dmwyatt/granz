@@ -164,7 +164,8 @@ pub(super) fn run_quality_benchmark(
 
     let mut runs = Vec::with_capacity(modes.len());
     for mode in modes {
-        let retriever = Retriever::build(mode, conn)?;
+        let retriever =
+            Retriever::build(mode, conn, crate::query::adjust::RankingConfig::default())?;
         runs.push(run_queries(
             |q| match dump.as_mut() {
                 Some(writer) => {
