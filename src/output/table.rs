@@ -36,6 +36,24 @@ pub fn format_meeting_row(doc: &Document, tz: &FixedOffset) -> String {
     format!("{} {} {}", id, date, title)
 }
 
+/// Color a relevance score by band: strong green, medium yellow, weak dimmed.
+fn colored_score(score: f32) -> String {
+    let score_str = format!("{:.2}", score);
+    if score > 0.8 {
+        score_str.green().bold().to_string()
+    } else if score > 0.6 {
+        score_str.yellow().to_string()
+    } else {
+        score_str.dimmed().to_string()
+    }
+}
+
+/// Format a meeting row prefixed with its relevance score (reranked hybrid
+/// search results).
+pub fn format_scored_meeting_row(doc: &Document, score: f32, tz: &FixedOffset) -> String {
+    format!("{} {}", colored_score(score), format_meeting_row(doc, tz))
+}
+
 /// Format a meeting detail view for TTY.
 pub fn format_meeting_detail(doc: &Document, tz: &FixedOffset) -> String {
     let mut lines = Vec::new();
@@ -299,14 +317,7 @@ pub fn format_search_separator(index: usize, total: usize, title: &str, score: O
 
 /// Format a semantic search result for TTY display.
 pub fn format_semantic_result(result: &SemanticSearchResult, conn: &Connection, tz: &FixedOffset) -> String {
-    let score_str = format!("{:.2}", result.score);
-    let score_colored = if result.score > 0.8 {
-        score_str.green().bold().to_string()
-    } else if result.score > 0.6 {
-        score_str.yellow().to_string()
-    } else {
-        score_str.dimmed().to_string()
-    };
+    let score_colored = colored_score(result.score);
 
     let (title, date) = lookup_document_meta(conn, &result.document_id, tz);
     let title_str = title.bold().to_string();

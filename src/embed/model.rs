@@ -25,21 +25,73 @@ pub struct FastEmbedModel {
     dim: usize,
 }
 
+/// The model cache directory (in the platform data directory), created if
+/// missing. Models must cache here rather than in a CWD-relative directory.
+pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
+    let cache_dir = platform::data_dir()?.join("fastembed_cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    Ok(cache_dir)
+}
+
+/// Set HF_HOME so fastembed's hf-hub downloads land in [`hf_cache_dir`].
+pub(crate) fn set_hf_cache_dir() -> Result<()> {
+    let cache_dir = hf_cache_dir()?;
+
+    // SAFETY: called during model initialization (single-threaded context),
+    // before any threads the model wrappers spawn.
+    unsafe {
+        env::set_var("HF_HOME", cache_dir);
+    }
+    Ok(())
+}
+
+/// Hardware execution providers enabled by cargo features. CPU is always
+/// the implicit fallback in ort.
+pub(crate) fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    #[allow(unused_mut)]
+    let mut providers = Vec::new();
+
+    #[cfg(feature = "cuda")]
+    {
+        use ort::execution_providers::CUDAExecutionProvider;
+        providers.push(
+            ort::execution_providers::ExecutionProviderDispatch::from(
+                CUDAExecutionProvider::default(),
+            )
+            .error_on_failure(),
+        );
+    }
+
+    #[cfg(feature = "directml")]
+    {
+        use ort::execution_providers::DirectMLExecutionProvider;
+        providers.push(
+            ort::execution_providers::ExecutionProviderDispatch::from(
+                DirectMLExecutionProvider::default(),
+            )
+            .error_on_failure(),
+        );
+    }
+
+    #[cfg(feature = "coreml")]
+    {
+        use ort::execution_providers::CoreMLExecutionProvider;
+        providers.push(
+            ort::execution_providers::ExecutionProviderDispatch::from(
+                CoreMLExecutionProvider::default(),
+            )
+            .error_on_failure(),
+        );
+    }
+
+    providers
+}
+
 impl FastEmbedModel {
     pub fn new() -> Result<Self> {
-        // Set HF_HOME to ensure fastembed caches models in a consistent location
-        // rather than dropping cache directories in the current working directory.
-        // This uses the platform-specific data directory (e.g., ~/.local/share/grans/fastembed_cache)
-        let cache_dir = platform::data_dir()?.join("fastembed_cache");
-        std::fs::create_dir_all(&cache_dir)?;
+        set_hf_cache_dir()?;
 
-        // SAFETY: We're setting HF_HOME before any other threads are spawned from FastEmbedModel,
-        // and this is only called during model initialization (single-threaded context).
-        unsafe {
-            env::set_var("HF_HOME", cache_dir);
-        }
-
-        let providers = Self::execution_providers();
+        let providers = execution_providers();
 
         let mut opts =
             fastembed::TextInitOptions::new(fastembed::EmbeddingModel::NomicEmbedTextV15)
@@ -56,47 +108,6 @@ impl FastEmbedModel {
             model: RefCell::new(model),
             dim: 768,
         })
-    }
-
-    fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
-        #[allow(unused_mut)]
-        let mut providers = Vec::new();
-
-        #[cfg(feature = "cuda")]
-        {
-            use ort::execution_providers::CUDAExecutionProvider;
-            providers.push(
-                ort::execution_providers::ExecutionProviderDispatch::from(
-                    CUDAExecutionProvider::default(),
-                )
-                .error_on_failure(),
-            );
-        }
-
-        #[cfg(feature = "directml")]
-        {
-            use ort::execution_providers::DirectMLExecutionProvider;
-            providers.push(
-                ort::execution_providers::ExecutionProviderDispatch::from(
-                    DirectMLExecutionProvider::default(),
-                )
-                .error_on_failure(),
-            );
-        }
-
-        #[cfg(feature = "coreml")]
-        {
-            use ort::execution_providers::CoreMLExecutionProvider;
-            providers.push(
-                ort::execution_providers::ExecutionProviderDispatch::from(
-                    CoreMLExecutionProvider::default(),
-                )
-                .error_on_failure(),
-            );
-        }
-
-        // CPU is always the implicit fallback in ort
-        providers
     }
 }
 

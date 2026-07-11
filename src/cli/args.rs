@@ -58,6 +58,15 @@ pub enum Commands {
         #[arg(long, conflicts_with_all = ["semantic", "context"])]
         hybrid: bool,
 
+        /// Rerank the top hybrid candidates with a cross-encoder
+        /// (slower, higher quality; shows relevance scores)
+        #[arg(long, requires = "hybrid")]
+        rerank: bool,
+
+        /// Minimum reranker relevance score (0-1) for hybrid results
+        #[arg(long, requires = "rerank")]
+        min_score: Option<f32>,
+
         /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled)
         #[arg(long, default_value = "0")]
         context: usize,
@@ -250,6 +259,10 @@ pub enum QualityMode {
     Semantic,
     /// RRF fusion of FTS and semantic rankings (--hybrid)
     Hybrid,
+    /// Fusion + jina-reranker-v1-turbo-en cross-encoder (--hybrid --rerank)
+    RerankJina,
+    /// Fusion + bge-reranker-base cross-encoder
+    RerankBge,
 }
 
 impl QualityMode {
@@ -258,6 +271,8 @@ impl QualityMode {
             QualityMode::Fts => "fts",
             QualityMode::Semantic => "semantic",
             QualityMode::Hybrid => "hybrid",
+            QualityMode::RerankJina => "rerank-jina",
+            QualityMode::RerankBge => "rerank-bge",
         }
     }
 }

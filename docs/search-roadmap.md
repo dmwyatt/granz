@@ -7,6 +7,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 - **Keyword search** (Phase 1, #39): FTS5 `MATCH` with implicit-AND semantics (each term quoted individually; user-supplied quotes force phrase matching), ranked by `bm25()` with recency as tiebreak. Title substring matches rank as a tier above content matches; weighting them properly is Phase 5. Applies to the combined search and the standalone transcript/notes/panel searches.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
 - **Hybrid search** (Phase 2, #40, opt-in `--hybrid`): runs both retrievers, truncates each ranked list to a 100-document candidate pool, and fuses by reciprocal rank fusion (k=60) in `query/fusion.rs` + `query/hybrid.rs`. Output is the fused meeting list; keyword and semantic remain the forcing modes.
+- **Reranking** (Phase 3, #41, opt-in `--hybrid --rerank`): a cross-encoder (fastembed `TextRerank`, jina-reranker-v1-turbo-en) scores the top 50 fused candidates as title + best-chunk passages and reorders them (`embed/rerank.rs` + `query/rerank.rs`). The sigmoid relevance probability is the user-facing score; `--min-score` filters on it. Opt-in per the Phase 3 gate (see results below).
 - The modes are mutually exclusive; `commands/search.rs` dispatches on a `SearchMode` enum.
 - **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. Implemented in `commands/benchmark/`.
 
@@ -79,6 +80,18 @@ Phase 2 results (2026-07-10, k=10, ID matching, same snapshot, re-audited strata
 Aggregates tie semantic, but the movement is where fusion should act: on exact-term queries hybrid reaches hit-rate 1.00 / MRR 1.000 (semantic 1.00 / 0.924, FTS 0.94 / 0.761), because FTS agreement pulls two semantically rank-2/rank-5 results to rank 1. Per query, hybrid matches or beats the better single mode on 90 of 93; the 3 losses are one-position slips (1→2, 2→3, 1→2) on mixed/paraphrase queries where an irrelevant FTS match fused above a relevant semantic one, costing ~0.015 MRR on those strata. No query with a top-3 result under either mode leaves the top 10, so the #40 gate passes. Against the single modes: hybrid vs FTS 69W/0L/24T, hybrid vs semantic 2W/3L/88T on best rank.
 
 The ceiling here is FTS itself: with FTS scoring zero outside exact-term, fusion has only one useful signal for mixed/paraphrase queries. Larger hybrid gains wait on reranking (Phase 3) and embedding improvements (Phase 4). Promotion of `--hybrid` to the default is a follow-up PR per #40.
+
+Phase 3 results (2026-07-10, k=10, ID matching, same snapshot, all modes in one `--compare` run):
+
+| Mode | hit-rate@10 | recall@10 | MRR@10 | avg latency |
+|---|---|---|---|---|
+| hybrid (RRF) | 0.86 | 0.76 | 0.72 | ~63 ms |
+| rerank-jina | 0.90 | 0.75 | 0.77 | ~2.0 s |
+| rerank-bge | 0.89 | 0.70 | 0.70 | ~7.2 s |
+
+jina-reranker-v1-turbo-en is the model pick: it beats bge-reranker-base on every aggregate and stratum at under a third of the latency, so it backs `--rerank`. Per stratum (hit / MRR), jina reaches mixed 0.87 / 0.759 and paraphrase 0.89 / 0.702 against hybrid's 0.82 / 0.694 and 0.84 / 0.626; exact-term keeps hit 1.00 but MRR slips 1.000 to 0.941 (two one-position slips). Per query at k=10 it goes 23W / 15L / 55T against the better of (hybrid, semantic), matching or beating it on 78 of 93.
+
+The gate: the lift is real but reranking does not become part of plain `--hybrid`. Three queries whose relevant meeting ranked top-3 under fusion fall out of the top 10 (to ranks 13-15), which rule 2 above treats as outweighing the wins, and per-query latency rises from 63 ms to ~2 s plus reranker model load in a one-shot CLI. So `--rerank` is opt-in. Revisit if the dropouts get fixed, e.g. by blending the fusion prior into the reranked order (Phase 5 ranking-polish territory) or a stronger small reranker.
 
 (v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55, title matching.)
 

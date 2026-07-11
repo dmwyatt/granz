@@ -87,6 +87,8 @@ fn main() -> Result<()> {
             r#in,
             semantic,
             hybrid,
+            rerank,
+            min_score,
             context,
             meeting,
             from,
@@ -99,6 +101,8 @@ fn main() -> Result<()> {
         } => {
             let mode = SearchMode::from_cli_args(
                 *hybrid,
+                *rerank,
+                *min_score,
                 *semantic,
                 *context,
                 r#in,
