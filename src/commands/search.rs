@@ -228,7 +228,8 @@ fn keyword_search(
 }
 
 /// Run keyword and semantic retrieval, fuse the rankings, rerank the top
-/// candidates when requested, and display the resulting meetings.
+/// candidates (unless skipped via --fast), and display the resulting
+/// meetings.
 #[allow(clippy::too_many_arguments)]
 fn hybrid_search(
     conn: &Connection,
