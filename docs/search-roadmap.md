@@ -48,20 +48,20 @@ v2 schema: top-level `{description, created, queries}`; each query is
 `{query, query_type, provenance, relevant_meetings, relevant_meeting_ids, rationale}`
 where `query_type` is `exact-term|paraphrase|mixed`, `provenance` is `v1|v2`, `relevant_meetings` holds exact titles, and `relevant_meeting_ids` holds document IDs. Since Phase 0 (#38) the harness matches by `relevant_meeting_ids` and stratifies by `query_type`; title matching remains only as the fallback for files without IDs (the v1 set).
 
-Semantic baseline on v2 (nomic-embed-text-v1.5, k=10, **title matching**):
+Phase 0 baselines on v2 (2026-07-10, k=10, **ID matching**, commit 046d6d6):
 
-| Stratum | n | hit-rate@10 | MRR |
-|---|---|---|---|
-| exact-term | 12 | 0.92 | 0.81 |
-| mixed | 43 | 0.86 | 0.77 |
-| paraphrase | 38 | 0.79 | 0.59 |
-| overall | 93 | 0.84 | 0.70 |
+| Mode | hit-rate@10 | recall@10 | MRR@10 | avg latency |
+|---|---|---|---|---|
+| fts | 0.05 | 0.03 | 0.04 | ~5 ms |
+| semantic | 0.86 | 0.76 | 0.72 | ~58 ms |
 
-(v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55.)
+Semantic per stratum (hit-rate / MRR): exact-term 0.92 / 0.81, mixed 0.86 / 0.77, paraphrase 0.84 / 0.64. FTS beats semantic on best rank for 1 of 93 queries (90 losses, 2 ties); its collapse outside exact-term is the phrase-quoting bug plus recency-only ordering, which Phase 1 addresses. Full per-stratum metrics for both modes are in the ledger.
+
+(v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55, title matching.)
 
 Caveats a maintainer must know:
 
-- These numbers were measured with title matching, which over-credits recurring-title meetings. After switching to ID-based matching (Phase 0), re-record the baseline; do not compare ID-matched numbers against this table.
+- Ledger entries recorded before 2026-07-10 used title matching, which over-credits recurring-title meetings; do not compare them against ID-matched numbers.
 - `query_type` labels were assigned relative to the current phrase-matching keyword behavior: several queries were demoted from exact-term to mixed only because the full query fails as a phrase. After Phase 1 lands implicit-AND semantics, re-audit the strata; the exact-term stratum (n=12) is currently thin and noisy.
 - For stable numbers across syncs, benchmark against a frozen copy of the database via the global `--db` flag rather than the live one.
 - Open review items: the 11 v1 queries' `query_type` values were hand-assigned and unreviewed, and two v1 queries ("AI phone agent...", "changing an intermittent caregiving leave...") had their ID labels expanded across recurring-title instances that may over-include.
