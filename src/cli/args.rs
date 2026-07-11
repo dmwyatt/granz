@@ -41,6 +41,12 @@ pub struct Cli {
 pub enum Commands {
     // === Daily Use Commands ===
     /// Search meetings, transcripts, and notes
+    ///
+    /// Runs hybrid search by default: keyword and semantic results are fused,
+    /// then the top candidates are reranked with a cross-encoder. The first
+    /// search downloads the embedding and reranker models, and a search may
+    /// prompt before embedding new content (--yes accepts). Force a single
+    /// mode with --keyword or --semantic, or skip reranking with --fast.
     #[command(visible_alias = "s")]
     Search {
         /// Search query; words match in any order, "quoted phrases" must match exactly
@@ -50,25 +56,30 @@ pub enum Commands {
         #[arg(long, rename_all = "lowercase", default_value = "titles,transcripts,notes,panels")]
         r#in: String,
 
-        /// Use semantic (vector) search instead of keyword search
+        /// Force keyword (FTS) search instead of the hybrid default
+        #[arg(long, conflicts_with_all = ["hybrid", "semantic"])]
+        keyword: bool,
+
+        /// Force semantic (vector) search instead of the hybrid default
         #[arg(long)]
         semantic: bool,
 
-        /// Combine keyword and semantic search: fuse both rankings and
-        /// rerank the top candidates with a cross-encoder
-        #[arg(long, conflicts_with_all = ["semantic", "context"])]
+        /// Hybrid search: fuse keyword and semantic rankings and rerank the
+        /// top candidates with a cross-encoder (the default; flag kept for
+        /// compatibility)
+        #[arg(long, conflicts_with_all = ["semantic", "context", "speaker"])]
         hybrid: bool,
 
         /// Skip the cross-encoder rerank stage of hybrid search
         /// (fusion order only; faster, but no relevance scores)
-        #[arg(long, requires = "hybrid")]
+        #[arg(long, conflicts_with_all = ["keyword", "semantic", "context", "speaker"])]
         fast: bool,
 
         /// Minimum reranker relevance score (0-1) for hybrid results
-        #[arg(long, requires = "hybrid", conflicts_with = "fast")]
+        #[arg(long, conflicts_with_all = ["fast", "keyword", "semantic", "context", "speaker"])]
         min_score: Option<f32>,
 
-        /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled)
+        /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled; implies keyword search)
         #[arg(long, default_value = "0")]
         context: usize,
 
@@ -88,7 +99,7 @@ pub enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Filter transcript matches by speaker: "me" (your utterances) or "other" (others' utterances)
+        /// Filter transcript matches by speaker: "me" (your utterances) or "other" (others' utterances); implies keyword search unless --semantic or --context
         #[arg(long, value_parser = parse_speaker_filter)]
         speaker: Option<SpeakerFilter>,
 
@@ -601,6 +612,90 @@ mod tests {
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn search_keyword_flag_parses() {
+        let cli = Cli::try_parse_from(["grans", "search", "q", "--keyword"]).unwrap();
+        let Commands::Search { keyword, .. } = &cli.command else {
+            panic!("expected search subcommand");
+        };
+        assert!(*keyword);
+    }
+
+    #[test]
+    fn search_keyword_conflicts_with_hybrid_and_semantic() {
+        for flag in ["--hybrid", "--semantic"] {
+            let result = Cli::try_parse_from(["grans", "search", "q", "--keyword", flag]);
+            assert!(result.is_err(), "--keyword {flag} should conflict");
+        }
+    }
+
+    #[test]
+    fn search_hybrid_flag_still_accepted() {
+        let cli = Cli::try_parse_from(["grans", "search", "q", "--hybrid"]).unwrap();
+        let Commands::Search { hybrid, .. } = &cli.command else {
+            panic!("expected search subcommand");
+        };
+        assert!(*hybrid);
+    }
+
+    #[test]
+    fn search_fast_parses_without_hybrid() {
+        let cli = Cli::try_parse_from(["grans", "search", "q", "--fast"]).unwrap();
+        let Commands::Search { fast, hybrid, .. } = &cli.command else {
+            panic!("expected search subcommand");
+        };
+        assert!(*fast);
+        assert!(!*hybrid);
+    }
+
+    #[test]
+    fn search_fast_conflicts_with_non_hybrid_paths() {
+        for extra in [
+            &["--keyword"][..],
+            &["--semantic"][..],
+            &["--context", "3"][..],
+            &["--speaker", "me"][..],
+        ] {
+            let mut argv = vec!["grans", "search", "q", "--fast"];
+            argv.extend_from_slice(extra);
+            let result = Cli::try_parse_from(argv);
+            assert!(result.is_err(), "--fast {extra:?} should conflict");
+        }
+    }
+
+    #[test]
+    fn search_min_score_parses_without_hybrid() {
+        let cli =
+            Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4"]).unwrap();
+        let Commands::Search { min_score, .. } = &cli.command else {
+            panic!("expected search subcommand");
+        };
+        assert_eq!(*min_score, Some(0.4));
+    }
+
+    #[test]
+    fn search_min_score_conflicts_with_fast_and_non_hybrid_paths() {
+        for extra in [
+            &["--fast"][..],
+            &["--keyword"][..],
+            &["--semantic"][..],
+            &["--context", "3"][..],
+            &["--speaker", "me"][..],
+        ] {
+            let mut argv = vec!["grans", "search", "q", "--min-score", "0.4"];
+            argv.extend_from_slice(extra);
+            let result = Cli::try_parse_from(argv);
+            assert!(result.is_err(), "--min-score {extra:?} should conflict");
+        }
+    }
+
+    #[test]
+    fn search_speaker_conflicts_with_hybrid() {
+        let result =
+            Cli::try_parse_from(["grans", "search", "q", "--hybrid", "--speaker", "me"]);
+        assert!(result.is_err());
     }
 
     fn quality_compare(cli: &Cli) -> &[QualityMode] {

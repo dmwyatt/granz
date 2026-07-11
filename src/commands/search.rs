@@ -46,12 +46,16 @@ pub enum SearchMode {
 
 impl SearchMode {
     /// Construct a SearchMode from CLI arguments.
-    /// Priority: hybrid > semantic > context > keyword.
+    ///
+    /// A bare search runs hybrid. --semantic, --context, and --keyword force
+    /// their modes, and --speaker also routes to the keyword path because
+    /// hybrid does not use it. --hybrid needs no parameter here: it is the
+    /// default, and clap conflicts keep it from combining with forcing flags.
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
-        hybrid: bool,
         fast: bool,
         min_score: Option<f32>,
+        keyword: bool,
         semantic: bool,
         context: usize,
         in_targets: &str,
@@ -60,16 +64,7 @@ impl SearchMode {
         yes: bool,
         limit: usize,
     ) -> Self {
-        if hybrid {
-            SearchMode::Hybrid {
-                targets: SearchTarget::parse_list(in_targets),
-                meeting_filter: meeting_filter.map(String::from),
-                rerank: !fast,
-                min_score,
-                yes,
-                limit,
-            }
-        } else if semantic {
+        if semantic {
             SearchMode::Semantic {
                 targets: SearchTarget::parse_list(in_targets),
                 context_size: context,
@@ -85,10 +80,19 @@ impl SearchMode {
                 speaker_filter: speaker.cloned(),
                 limit,
             }
-        } else {
+        } else if keyword || speaker.is_some() {
             SearchMode::Keyword {
                 targets: SearchTarget::parse_list(in_targets),
                 meeting_filter: meeting_filter.map(String::from),
+                limit,
+            }
+        } else {
+            SearchMode::Hybrid {
+                targets: SearchTarget::parse_list(in_targets),
+                meeting_filter: meeting_filter.map(String::from),
+                rerank: !fast,
+                min_score,
+                yes,
                 limit,
             }
         }
@@ -881,9 +885,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_cli_args_hybrid_takes_priority_and_reranks_by_default() {
+    fn from_cli_args_defaults_to_hybrid() {
         let mode = SearchMode::from_cli_args(
-            true, false, None, true, 5, "titles,notes", Some("standup"), None, true, 10,
+            false, None, false, false, 0, "titles,notes", None, None, false, 10,
         );
         match mode {
             SearchMode::Hybrid {
@@ -897,10 +901,10 @@ mod tests {
                 assert_eq!(targets.len(), 2);
                 assert!(targets.contains(&SearchTarget::Titles));
                 assert!(targets.contains(&SearchTarget::Notes));
-                assert_eq!(meeting_filter.as_deref(), Some("standup"));
+                assert!(meeting_filter.is_none());
                 assert!(rerank);
                 assert_eq!(min_score, None);
-                assert!(yes);
+                assert!(!yes);
                 assert_eq!(limit, 10);
             }
             _ => panic!("Expected Hybrid variant"),
@@ -908,9 +912,31 @@ mod tests {
     }
 
     #[test]
+    fn from_cli_args_keyword_flag_forces_keyword() {
+        let mode = SearchMode::from_cli_args(
+            false, None, true, false, 0, "titles,notes", Some("standup"), None, false, 10,
+        );
+        match mode {
+            SearchMode::Keyword {
+                targets,
+                meeting_filter,
+                limit,
+            } => {
+                assert_eq!(targets.len(), 2);
+                assert!(targets.contains(&SearchTarget::Titles));
+                assert!(targets.contains(&SearchTarget::Notes));
+                assert_eq!(meeting_filter.as_deref(), Some("standup"));
+                assert_eq!(limit, 10);
+            }
+            _ => panic!("Expected Keyword variant"),
+        }
+    }
+
+    #[test]
     fn from_cli_args_fast_skips_rerank() {
-        let mode =
-            SearchMode::from_cli_args(true, true, None, false, 0, "titles", None, None, false, 10);
+        let mode = SearchMode::from_cli_args(
+            true, None, false, false, 0, "titles", None, None, false, 10,
+        );
         match mode {
             SearchMode::Hybrid { rerank, .. } => assert!(!rerank),
             _ => panic!("Expected Hybrid variant"),
@@ -920,7 +946,7 @@ mod tests {
     #[test]
     fn from_cli_args_min_score_threads_to_hybrid() {
         let mode = SearchMode::from_cli_args(
-            true, false, Some(0.4), false, 0, "titles", None, None, false, 10,
+            false, Some(0.4), false, false, 0, "titles", None, None, false, 10,
         );
         match mode {
             SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),
@@ -930,7 +956,7 @@ mod tests {
 
     #[test]
     fn from_cli_args_semantic_takes_priority() {
-        let mode = SearchMode::from_cli_args(false, false, None, true, 5, "titles", Some("standup"), None, true, 10);
+        let mode = SearchMode::from_cli_args(false, None, false, true, 5, "titles", Some("standup"), None, true, 10);
         match mode {
             SearchMode::Semantic {
                 targets,
@@ -949,8 +975,8 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_args_context_takes_priority_over_keyword() {
-        let mode = SearchMode::from_cli_args(false, false, None, false, 3, "titles,notes", Some("standup"), None, false, 10);
+    fn from_cli_args_context_forces_context_window() {
+        let mode = SearchMode::from_cli_args(false, None, false, false, 3, "titles,notes", Some("standup"), None, false, 10);
         match mode {
             SearchMode::ContextWindow {
                 targets,
@@ -971,28 +997,35 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_args_defaults_to_keyword() {
-        let mode = SearchMode::from_cli_args(false, false, None, false, 0, "titles,notes", None, None, false, 10);
+    fn from_cli_args_speaker_routes_bare_search_to_keyword() {
+        let speaker = SpeakerFilter::Me;
+        let mode = SearchMode::from_cli_args(
+            false, None, false, false, 0, "transcripts", None, Some(&speaker), false, 10,
+        );
         match mode {
-            SearchMode::Keyword {
-                targets,
-                meeting_filter,
-                limit,
-            } => {
-                assert_eq!(targets.len(), 2);
-                assert!(targets.contains(&SearchTarget::Titles));
-                assert!(targets.contains(&SearchTarget::Notes));
-                assert!(meeting_filter.is_none());
-                assert_eq!(limit, 10);
-            }
+            SearchMode::Keyword { .. } => {}
             _ => panic!("Expected Keyword variant"),
+        }
+    }
+
+    #[test]
+    fn from_cli_args_meeting_filter_threads_to_hybrid() {
+        let mode =
+            SearchMode::from_cli_args(false, None, false, false, 0, "transcripts", Some("daily"), None, false, 10);
+        match mode {
+            SearchMode::Hybrid {
+                meeting_filter, ..
+            } => {
+                assert_eq!(meeting_filter.as_deref(), Some("daily"));
+            }
+            _ => panic!("Expected Hybrid variant"),
         }
     }
 
     #[test]
     fn from_cli_args_meeting_filter_threads_to_keyword() {
         let mode =
-            SearchMode::from_cli_args(false, false, None, false, 0, "transcripts", Some("daily"), None, false, 10);
+            SearchMode::from_cli_args(false, None, true, false, 0, "transcripts", Some("daily"), None, false, 10);
         match mode {
             SearchMode::Keyword {
                 meeting_filter, ..
@@ -1006,7 +1039,7 @@ mod tests {
     #[test]
     fn from_cli_args_meeting_filter_threads_to_context_window() {
         let mode =
-            SearchMode::from_cli_args(false, false, None, false, 5, "titles", Some("retro"), None, false, 10);
+            SearchMode::from_cli_args(false, None, false, false, 5, "titles", Some("retro"), None, false, 10);
         match mode {
             SearchMode::ContextWindow {
                 meeting_filter, ..
@@ -1020,7 +1053,7 @@ mod tests {
     #[test]
     fn from_cli_args_speaker_filter_threads_to_context_window() {
         let speaker = SpeakerFilter::Me;
-        let mode = SearchMode::from_cli_args(false, false, None, false, 3, "transcripts", None, Some(&speaker), false, 10);
+        let mode = SearchMode::from_cli_args(false, None, false, false, 3, "transcripts", None, Some(&speaker), false, 10);
         match mode {
             SearchMode::ContextWindow {
                 speaker_filter, ..
@@ -1034,7 +1067,7 @@ mod tests {
     #[test]
     fn from_cli_args_speaker_filter_threads_to_semantic() {
         let speaker = SpeakerFilter::Other;
-        let mode = SearchMode::from_cli_args(false, false, None, true, 0, "transcripts", None, Some(&speaker), false, 10);
+        let mode = SearchMode::from_cli_args(false, None, false, true, 0, "transcripts", None, Some(&speaker), false, 10);
         match mode {
             SearchMode::Semantic {
                 speaker_filter, ..
