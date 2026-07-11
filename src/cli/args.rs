@@ -301,6 +301,15 @@ pub enum BenchmarkAction {
         /// Show detailed results for each query
         #[arg(long)]
         detail: bool,
+
+        /// Append results to the ledger and save per-query output under runs/
+        /// (both in the benchmarks directory next to the golden set)
+        #[arg(long)]
+        record: bool,
+
+        /// Note stored with the ledger entry
+        #[arg(long, requires = "record")]
+        note: Option<String>,
     },
 }
 

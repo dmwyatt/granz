@@ -27,6 +27,10 @@ pub struct QualityArgs<'a> {
     pub mode: QualityMode,
     pub compare: &'a [QualityMode],
     pub detail: bool,
+    pub record: bool,
+    pub note: Option<&'a str>,
+    /// --db override, when given; the default database path otherwise applies.
+    pub db: Option<&'a Path>,
 }
 
 /// A single test query from the benchmark file.
@@ -90,7 +94,7 @@ struct TopHit {
 
 /// Full scored outcome for one query in one mode.
 #[derive(Debug, Serialize)]
-struct QueryOutcome {
+pub(super) struct QueryOutcome {
     query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_type: Option<String>,
@@ -119,7 +123,7 @@ pub struct ModeRun {
     /// Empty when no query carries a `query_type` label (v1 golden set).
     pub strata: BTreeMap<String, AggregateMetrics>,
     pub latency: LatencyStats,
-    query_results: Vec<QueryOutcome>,
+    pub(super) query_results: Vec<QueryOutcome>,
 }
 
 impl ModeRun {
@@ -172,6 +176,45 @@ pub(super) fn run_quality_benchmark(
         OutputMode::Tty => print_tty(&runs, &comparisons, args.detail),
     }
 
+    if args.record {
+        record_runs(&runs, args)?;
+    }
+
+    Ok(())
+}
+
+/// Persist every run to the results ledger in the benchmarks directory.
+/// Confirmation goes to stderr so --json stdout stays parseable.
+fn record_runs(runs: &[ModeRun], args: &QualityArgs) -> Result<()> {
+    let benchmarks_dir = crate::platform::data_dir()?.join("benchmarks");
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let set = args
+        .file
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| args.file.display().to_string());
+    let binary = format!("grans {}", env!("GRANS_VERSION"));
+    let db = match args.db {
+        Some(path) => path.display().to_string(),
+        None => crate::db::connection::default_db_path()?.display().to_string(),
+    };
+
+    let ctx = super::ledger::RecordContext {
+        benchmarks_dir: &benchmarks_dir,
+        date: &date,
+        set: &set,
+        binary: &binary,
+        db: &db,
+        note: args.note,
+    };
+    for run in runs {
+        let run_path = super::ledger::record_run(&ctx, run)?;
+        eprintln!("Recorded {} run: {}", run.mode, run_path.display());
+    }
+    eprintln!(
+        "Ledger updated: {}",
+        benchmarks_dir.join("ledger.jsonl").display()
+    );
     Ok(())
 }
 

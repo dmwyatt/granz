@@ -1,9 +1,12 @@
 //! Benchmark commands: search performance and quality measurement.
 
+mod ledger;
 mod metrics;
 mod perf;
 mod quality;
 mod retriever;
+
+use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -11,7 +14,12 @@ use rusqlite::Connection;
 use crate::cli::args::BenchmarkAction;
 use crate::output::format::OutputMode;
 
-pub fn run(conn: &Connection, action: &BenchmarkAction, output_mode: OutputMode) -> Result<()> {
+pub fn run(
+    conn: &Connection,
+    action: &BenchmarkAction,
+    db_path: Option<&Path>,
+    output_mode: OutputMode,
+) -> Result<()> {
     match action {
         BenchmarkAction::SemanticSearch {
             queries,
@@ -34,6 +42,8 @@ pub fn run(conn: &Connection, action: &BenchmarkAction, output_mode: OutputMode)
             mode,
             compare,
             detail,
+            record,
+            note,
         } => {
             let args = quality::QualityArgs {
                 file,
@@ -41,6 +51,9 @@ pub fn run(conn: &Connection, action: &BenchmarkAction, output_mode: OutputMode)
                 mode: *mode,
                 compare,
                 detail: *detail,
+                record: *record,
+                note: note.as_deref(),
+                db: db_path,
             };
             quality::run_quality_benchmark(conn, &args, output_mode)
         }
