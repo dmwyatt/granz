@@ -37,8 +37,10 @@ pub struct RerankedDoc {
 }
 
 /// One reranked candidate with the components that produced its position:
-/// where fusion placed it, its RRF score, and the passage the cross-encoder
-/// judged. Serialized by the benchmark's --dump-candidates output.
+/// where fusion placed it, its RRF score, the passage the cross-encoder
+/// judged, and the document metadata the ranking adjustments consume.
+/// Serialized by the benchmark's --dump-candidates output; title and
+/// created_at make dumps self-contained for offline ranking experiments.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RerankCandidate {
     pub document_id: String,
@@ -47,6 +49,9 @@ pub struct RerankCandidate {
     /// RRF score from fusion.
     pub fused_score: f64,
     pub passage: String,
+    pub title: Option<String>,
+    /// RFC3339 timestamp from documents.created_at.
+    pub created_at: Option<String>,
     pub rerank_score: f32,
 }
 
@@ -83,8 +88,10 @@ pub fn rerank_hybrid_detailed(
     let pool = &ranking.fused[..ranking.fused.len().min(RERANK_POOL)];
     let pool_ids: Vec<String> = pool.iter().map(|d| d.document_id.clone()).collect();
     let docs = crate::db::meetings::get_meetings_by_ids(conn, &pool_ids)?;
-    let titles: HashMap<String, Option<String>> =
-        docs.into_iter().filter_map(|doc| doc.id.map(|id| (id, doc.title))).collect();
+    let meta: HashMap<String, (Option<String>, Option<String>)> = docs
+        .into_iter()
+        .filter_map(|doc| doc.id.map(|id| (id, (doc.title, doc.created_at))))
+        .collect();
 
     // Candidates are built in fused order so the stable sort below keeps
     // that order for ties; documents missing from the db drop out.
@@ -92,7 +99,7 @@ pub fn rerank_hybrid_detailed(
         .iter()
         .enumerate()
         .filter_map(|(i, fused)| {
-            let title = titles.get(&fused.document_id)?;
+            let (title, created_at) = meta.get(&fused.document_id)?;
             Some(RerankCandidate {
                 document_id: fused.document_id.clone(),
                 fused_rank: i + 1,
@@ -101,6 +108,8 @@ pub fn rerank_hybrid_detailed(
                     title.as_deref(),
                     ranking.best_chunks.get(&fused.document_id).map(String::as_str),
                 ),
+                title: title.clone(),
+                created_at: created_at.clone(),
                 rerank_score: 0.0,
             })
         })
@@ -252,6 +261,24 @@ mod tests {
         assert_eq!(detailed[0].rerank_score, 1.0);
         assert_eq!(detailed[1].document_id, "doc-deep");
         assert_eq!(detailed[1].rerank_score, 2.0);
+    }
+
+    #[test]
+    fn candidates_carry_title_and_created_at() {
+        // The ranking adjustments (and dump self-containment) need each
+        // candidate's title and created_at alongside the passage.
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-1": {"id": "doc-1", "title": "Kumquat sync", "created_at": "2026-01-02T10:00:00Z"}
+            }
+        }));
+        let ranking = HybridRanking { fused: fused(&["doc-1"]), best_chunks: HashMap::new() };
+
+        let detailed =
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+
+        assert_eq!(detailed[0].title.as_deref(), Some("Kumquat sync"));
+        assert_eq!(detailed[0].created_at.as_deref(), Some("2026-01-02T10:00:00Z"));
     }
 
     #[test]
