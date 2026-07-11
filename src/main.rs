@@ -100,8 +100,11 @@ fn main() -> Result<()> {
         Commands::Search {
             query,
             r#in,
+            keyword,
             semantic,
-            hybrid,
+            // --hybrid is the default; it only exists so clap can reject it
+            // alongside the forcing flags, so dispatch never consults it
+            hybrid: _,
             fast,
             min_score,
             context,
@@ -115,9 +118,9 @@ fn main() -> Result<()> {
             include_deleted,
         } => {
             let mode = SearchMode::from_cli_args(
-                *hybrid,
                 *fast,
                 *min_score,
+                *keyword,
                 *semantic,
                 *context,
                 r#in,

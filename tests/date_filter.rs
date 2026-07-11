@@ -99,7 +99,7 @@ fn meetings_search_with_date_filter() {
     let output = env
         .cmd_json()
         .args([
-            "search", "Sprint", "--in", "titles", "--from", "2025-08-01",
+            "search", "Sprint", "--keyword", "--in", "titles", "--from", "2025-08-01",
         ])
         .output()
         .unwrap();

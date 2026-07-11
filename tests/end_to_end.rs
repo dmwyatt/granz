@@ -193,7 +193,7 @@ fn meetings_show_transcript_no_transcript_errors() {
 fn meetings_search_by_title() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "Alpha", "--in", "titles"])
+        .args(["search", "Alpha", "--keyword", "--in", "titles"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Project Alpha Kickoff"));
@@ -203,7 +203,7 @@ fn meetings_search_by_title() {
 fn meetings_search_by_notes() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "benchmarks", "--in", "notes"])
+        .args(["search", "benchmarks", "--keyword", "--in", "notes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Beta Feature Review"));
@@ -213,7 +213,7 @@ fn meetings_search_by_notes() {
 fn meetings_search_by_transcripts() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "prototype", "--in", "transcripts"])
+        .args(["search", "prototype", "--keyword", "--in", "transcripts"])
         .assert()
         .success()
         .stdout(predicate::str::contains("doc-alpha").or(predicate::str::contains("doc-beta")));

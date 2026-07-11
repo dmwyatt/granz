@@ -128,7 +128,7 @@ fn meetings_search_notes_fts() {
     let env = TestEnv::with_fixture();
     // "milestones" appears in doc-alpha notes
     env.cmd()
-        .args(["search", "milestones", "--in", "notes"])
+        .args(["search", "milestones", "--keyword", "--in", "notes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("doc-alpha").or(predicate::str::contains("Alpha")));
@@ -139,7 +139,7 @@ fn meetings_search_notes_no_match() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "xyzzynotaword", "--in", "notes"])
+        .args(["search", "xyzzynotaword", "--keyword", "--in", "notes"])
         .output()
         .unwrap();
 
@@ -156,7 +156,7 @@ fn meetings_search_multiple_targets() {
     // "prototype" appears in transcript of doc-alpha (utt-a3) and doc-beta (utt-b3)
     // Searching both titles and transcripts
     env.cmd()
-        .args(["search", "prototype", "--in", "titles,transcripts"])
+        .args(["search", "prototype", "--keyword", "--in", "titles,transcripts"])
         .assert()
         .success();
 }
@@ -170,7 +170,7 @@ fn keyword_search_respects_limit() {
     // --limit 1 should return only 1 result.
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--in", "transcripts", "--limit", "1"])
+        .args(["search", "prototype", "--keyword", "--in", "transcripts", "--limit", "1"])
         .output()
         .unwrap();
 
@@ -185,7 +185,7 @@ fn keyword_search_limit_zero_returns_all() {
     // --limit 0 means no limit, should return all matches
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--in", "transcripts", "--limit", "0"])
+        .args(["search", "prototype", "--keyword", "--in", "transcripts", "--limit", "0"])
         .output()
         .unwrap();
 
