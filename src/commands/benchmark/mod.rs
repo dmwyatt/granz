@@ -4,6 +4,7 @@ mod ledger;
 mod metrics;
 mod perf;
 mod quality;
+mod report;
 mod retriever;
 
 use std::path::Path;
