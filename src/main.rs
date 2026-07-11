@@ -86,6 +86,7 @@ fn main() -> Result<()> {
             query,
             r#in,
             semantic,
+            hybrid,
             context,
             meeting,
             from,
@@ -97,6 +98,7 @@ fn main() -> Result<()> {
             include_deleted,
         } => {
             let mode = SearchMode::from_cli_args(
+                *hybrid,
                 *semantic,
                 *context,
                 r#in,
