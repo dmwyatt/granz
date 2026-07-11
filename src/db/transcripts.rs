@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::models::TranscriptUtterance;
 use crate::query::dates::DateRange;
+use crate::query::fts::{matches_all_tokens, parse_query, sanitize_fts_query};
 use crate::query::search::ContextWindow;
 
 /// Raw SQLite row for a transcript utterance.
@@ -140,8 +141,7 @@ fn build_context_windows(
     query: &str,
     context_size: usize,
 ) -> Vec<ContextWindow> {
-    use crate::query::search::contains_ignore_case;
-
+    let tokens = parse_query(query);
     let mut results = Vec::new();
 
     for (i, utt) in utterances.iter().enumerate() {
@@ -150,7 +150,7 @@ fn build_context_windows(
             None => continue,
         };
 
-        if !contains_ignore_case(text, query) {
+        if !matches_all_tokens(text, &tokens) {
             continue;
         }
 
@@ -175,10 +175,6 @@ fn build_context_windows(
     }
 
     results
-}
-
-fn sanitize_fts_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
 }
 
 /// Build a context window from semantic search result indices.
@@ -479,6 +475,20 @@ mod tests {
         );
         assert_eq!(windows[0].after.len(), 1);
         assert_eq!(windows[0].after[0].text.as_deref(), Some("Great idea"));
+    }
+
+    #[test]
+    fn test_search_transcripts_multi_word_matches_any_order() {
+        // Regression: phrase-quoting meant reversed word order never matched,
+        // and the context-window filter required the full query as a substring.
+        let conn = build_test_db(&transcripts_state());
+        let results = search_transcripts(&conn, "networks neural", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "AI Meeting");
+        assert_eq!(
+            results[0].1[0].matched.text.as_deref(),
+            Some("Let's talk about neural networks today")
+        );
     }
 
     #[test]

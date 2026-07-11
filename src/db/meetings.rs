@@ -5,6 +5,7 @@ use super::common::{DocumentRow, row_to_document};
 use super::transcripts::{TranscriptUtteranceRow, row_to_utterance};
 use crate::models::{Document, TranscriptUtterance};
 use crate::query::dates::DateRange;
+use crate::query::fts::sanitize_fts_query;
 
 pub fn list_meetings(
     conn: &Connection,
@@ -337,10 +338,6 @@ fn append_date_filter(
     }
 }
 
-fn sanitize_fts_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +520,35 @@ mod tests {
             search_meetings(&conn, "neural networks", false, true, false, false, None, false).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn test_search_meetings_multi_word_matches_any_order() {
+        // Regression: the old sanitizer quoted the whole query as one FTS5
+        // phrase, so reversed word order never matched.
+        let conn = build_test_db(&meetings_state());
+        let results =
+            search_meetings(&conn, "networks neural", false, true, false, false, None, false)
+                .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id.as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn test_search_meetings_user_quotes_force_phrase() {
+        let conn = build_test_db(&meetings_state());
+        let results = search_meetings(
+            &conn,
+            "\"networks neural\"",
+            false,
+            true,
+            false,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]

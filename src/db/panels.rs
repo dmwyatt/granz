@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::api::ApiPanel;
 use crate::models::Panel;
 use crate::query::dates::DateRange;
+use crate::query::fts::sanitize_fts_query;
 use crate::tiptap::{extract_chat_url, tiptap_to_markdown};
 
 // ============================================================================
@@ -252,10 +253,6 @@ fn find_matching_panel_documents(
     })?;
 
     Ok(rows.filter_map(|r| r.ok()).collect())
-}
-
-fn sanitize_fts_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
 }
 
 // ============================================================================
@@ -900,6 +897,17 @@ mod tests {
         let window = &results[0].2[0];
         // "deployment" is in "Action Items" section
         assert_eq!(window.matched.label.as_deref(), Some("Action Items"));
+    }
+
+    #[test]
+    fn test_search_panels_multi_word_matches_any_order() {
+        // Regression: phrase-quoting meant reversed word order never matched.
+        let conn = build_test_db(&panels_state());
+        let results =
+            search_panels_with_context(&conn, "priorities roadmap", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "doc-1");
+        assert!(results[0].2[0].matched.text.contains("roadmap and priorities"));
     }
 
     #[test]

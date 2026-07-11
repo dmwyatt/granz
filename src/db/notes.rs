@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::query::dates::DateRange;
+use crate::query::fts::sanitize_fts_query;
 use crate::query::search::{build_text_context_windows, TextContextWindow, TextSegment};
 use crate::query::text::split_into_paragraphs;
 
@@ -101,10 +102,6 @@ fn find_matching_note_documents(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn sanitize_fts_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +139,17 @@ mod tests {
         assert!(results[0].2[0].matched.text.contains("roadmap"));
         // Should have context after (the "priorities" paragraph)
         assert_eq!(results[0].2[0].after.len(), 1);
+    }
+
+    #[test]
+    fn test_search_notes_multi_word_matches_any_order() {
+        // Regression: phrase-quoting meant reversed word order never matched.
+        let conn = build_test_db(&notes_state());
+        let results =
+            search_notes_with_context(&conn, "agreed team", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "doc-1");
+        assert!(results[0].2[0].matched.text.contains("team agreed"));
     }
 
     #[test]

@@ -1,7 +1,5 @@
 use crate::models::TranscriptUtterance;
-
-// Re-export from text module for backwards compatibility
-pub use crate::query::text::contains_ignore_case;
+use crate::query::fts::{matches_all_tokens, parse_query};
 
 /// A matched utterance with its surrounding context.
 #[derive(Debug, Clone)]
@@ -30,17 +28,19 @@ pub struct TextContextWindow {
 
 /// Build context windows for text segments that match the query.
 ///
-/// For each segment whose text contains the query (case-insensitive),
-/// includes `context_size` segments before and after as context.
+/// For each segment whose text contains every query term (case-insensitive,
+/// any order; user-quoted phrases must match contiguously), includes
+/// `context_size` segments before and after as context.
 pub fn build_text_context_windows(
     segments: &[TextSegment],
     query: &str,
     context_size: usize,
 ) -> Vec<TextContextWindow> {
+    let tokens = parse_query(query);
     let mut results = Vec::new();
 
     for (i, seg) in segments.iter().enumerate() {
-        if !contains_ignore_case(&seg.text, query) {
+        if !matches_all_tokens(&seg.text, &tokens) {
             continue;
         }
 
