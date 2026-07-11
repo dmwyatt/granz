@@ -4,7 +4,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 
 ## Current state (2026-07)
 
-- **Keyword search**: FTS5 `MATCH` used as a boolean filter; results ordered by `created_at DESC`. No relevance ranking. Additionally, `sanitize_fts_query` wraps the whole query in double quotes, which FTS5 interprets as a phrase query: multi-word searches only match the words adjacent and in order, not AND semantics.
+- **Keyword search** (Phase 1, #39): FTS5 `MATCH` with implicit-AND semantics (each term quoted individually; user-supplied quotes force phrase matching), ranked by `bm25()` with recency as tiebreak. Title substring matches rank as a tier above content matches; weighting them properly is Phase 5. Applies to the combined search and the standalone transcript/notes/panel searches.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
 - The two modes are mutually exclusive; `commands/search.rs` dispatches to one or the other.
 - **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. Implemented in `commands/benchmark/`.

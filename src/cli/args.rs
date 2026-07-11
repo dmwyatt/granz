@@ -43,7 +43,7 @@ pub enum Commands {
     /// Search meetings, transcripts, and notes
     #[command(visible_alias = "s")]
     Search {
-        /// Search query
+        /// Search query; words match in any order, "quoted phrases" must match exactly
         query: String,
 
         /// Search targets: titles, transcripts, notes, panels (comma-separated)

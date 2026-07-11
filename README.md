@@ -181,6 +181,8 @@ grans search "budget" --include-deleted
 grans search "old project" --semantic --include-deleted
 ```
 
+Keyword search matches every word in the query, in any order: `grans search "budget review"` finds meetings that mention both words. To require an exact phrase, quote it inside the query (e.g. `grans search '"budget review"'`). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties.
+
 Semantic search uses a local embedding model (`nomic-embed-text-v1.5`) to find meetings by meaning rather than exact keywords. On first use, the model is downloaded automatically (~270MB). Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database. Use `--in` to restrict which sources are searched (e.g. `--in panels` to only search AI notes).
 
 When an upgrade changes the embedding model, existing embeddings are detected as stale and rebuilt automatically on the next embed or semantic search. This full rebuild is a one-time cost and can take a while on large databases; run `grans embed -y` to do it at a time of your choosing.
