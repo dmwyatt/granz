@@ -192,7 +192,7 @@ fn calculate_results(
     }
 }
 
-fn percentile(sorted_values: &[f64], p: f64) -> f64 {
+pub(super) fn percentile(sorted_values: &[f64], p: f64) -> f64 {
     if sorted_values.is_empty() {
         return 0.0;
     }

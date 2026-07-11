@@ -28,8 +28,21 @@ pub fn run(conn: &Connection, action: &BenchmarkAction, output_mode: OutputMode)
             *min_score,
             output_mode,
         ),
-        BenchmarkAction::Quality { file, k, detail } => {
-            quality::run_quality_benchmark(conn, file, *k, *detail, output_mode)
+        BenchmarkAction::Quality {
+            file,
+            k,
+            mode,
+            compare,
+            detail,
+        } => {
+            let args = quality::QualityArgs {
+                file,
+                k: *k,
+                mode: *mode,
+                compare,
+                detail: *detail,
+            };
+            quality::run_quality_benchmark(conn, &args, output_mode)
         }
     }
 }

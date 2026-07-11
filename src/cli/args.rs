@@ -280,15 +280,23 @@ pub enum BenchmarkAction {
         min_score: f32,
     },
 
-    /// Run semantic search quality benchmark against test suite
+    /// Run search quality benchmark against a labeled golden set
     Quality {
         /// Path to benchmark JSON file
         #[arg(long)]
         file: std::path::PathBuf,
 
-        /// Number of top results to check for expected matches (precision@k)
+        /// Number of top results scored (hit-rate@k, recall@k, MRR@k)
         #[arg(long, default_value = "10")]
         k: usize,
+
+        /// Search mode to benchmark
+        #[arg(long, value_enum, default_value = "semantic", conflicts_with = "compare")]
+        mode: QualityMode,
+
+        /// Compare modes: per-query rank table plus win/loss/tie summary
+        #[arg(long, value_enum, value_delimiter = ',', num_args = 2..)]
+        compare: Vec<QualityMode>,
 
         /// Show detailed results for each query
         #[arg(long)]
