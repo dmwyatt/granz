@@ -334,7 +334,7 @@ pub fn transcript_window_chunker_adaptive(
 /// If that index is 0 (i.e. `max` falls inside the first character), the
 /// end of the first character is returned instead, so callers slicing at
 /// the result always make progress.
-fn floor_char_boundary(s: &str, max: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
     }
@@ -393,8 +393,11 @@ fn split_text_at_limit(text: &str, max_chars: usize) -> (&str, &str) {
         return (text, "");
     }
 
-    // Find the last sentence boundary (., !, ?) within max_chars
-    let limit = floor_char_boundary(text, max_chars);
+    // Find the last sentence boundary (., !, ?) within max_chars.
+    // The budget is clamped to at least one character: a zero budget must
+    // still yield a non-empty fits, or the oversized-split loop that calls
+    // this in a `while remaining.len() > max_chars` never terminates.
+    let limit = floor_char_boundary(text, max_chars.max(1));
     let search_area = &text[..limit];
     let sentence_end = search_area
         .rfind(|c| c == '.' || c == '!' || c == '?')
@@ -629,6 +632,21 @@ mod tests {
         let (fits, remainder) = split_text_at_limit("", 100);
         assert_eq!(fits, "");
         assert_eq!(remainder, "");
+    }
+
+    #[test]
+    fn test_split_text_zero_limit_still_makes_progress() {
+        // A zero budget must not return an empty fits for non-empty text:
+        // the oversized-split loop would never shrink `remaining` and spin
+        // forever. Splitting must be total for any input.
+        let (fits, remainder) = split_text_at_limit("abcdef", 0);
+        assert!(!fits.is_empty());
+        assert_eq!(format!("{}{}", fits, remainder), "abcdef");
+
+        let multibyte = "\u{2019}\u{2019}\u{2019}";
+        let (fits, remainder) = split_text_at_limit(multibyte, 0);
+        assert!(!fits.is_empty());
+        assert_eq!(format!("{}{}", fits, remainder), multibyte);
     }
 
     #[test]

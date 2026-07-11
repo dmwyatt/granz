@@ -59,12 +59,22 @@ pub fn build_doc_headers(conn: &Connection) -> Result<HashMap<String, String>> {
     Ok(headers)
 }
 
-/// Assemble one header, ending with a blank line. Attendee names that
-/// would push the header past [`HEADER_MAX_CHARS`] are dropped.
+/// Assemble one header, ending with a blank line. The cap covers the
+/// whole header: the title is truncated to leave room for the fixed
+/// `Meeting: `/`Date: ` framing, and attendee names that would push the
+/// header past [`HEADER_MAX_CHARS`] are dropped.
 fn assemble_header(title: &str, created_at: Option<&str>, names: &[String]) -> Option<String> {
     let mut header = String::new();
 
     if !title.is_empty() {
+        // "Meeting: " + '\n' (10) + "Date: YYYY-MM-DD\n" (17) + trailing '\n' (1)
+        const FRAMING_RESERVE: usize = 28;
+        let title_budget = HEADER_MAX_CHARS - FRAMING_RESERVE;
+        let title = if title.len() > title_budget {
+            &title[..crate::embed::chunker::floor_char_boundary(title, title_budget)]
+        } else {
+            title
+        };
         header.push_str("Meeting: ");
         header.push_str(title);
         header.push('\n');
@@ -256,6 +266,27 @@ mod tests {
         let header = headers.get("doc-1").unwrap();
         assert!(header.len() <= HEADER_MAX_CHARS, "header is {} bytes", header.len());
         assert!(header.starts_with("Meeting: All Hands\nDate: 2026-02-01\nAttendees: Attendee Number 00"));
+        assert!(header.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn pathological_title_is_truncated_to_the_cap() {
+        // A huge multi-byte title must not blow the header cap: unchecked,
+        // it would consume the chunker's entire per-document budget and
+        // stall the oversized-split loop. The cap applies to the whole
+        // assembled header, not just the attendees line.
+        let title = "Budget\u{2019}s ".repeat(400); // ~3600 bytes, multi-byte
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-1": {"id": "doc-1", "title": title, "created_at": "2026-02-01T09:00:00Z"}
+            }
+        }));
+        let headers = build_doc_headers(&conn).unwrap();
+
+        let header = headers.get("doc-1").unwrap();
+        assert!(header.len() <= HEADER_MAX_CHARS, "header is {} bytes", header.len());
+        assert!(header.starts_with("Meeting: Budget"));
+        assert!(header.contains("\nDate: 2026-02-01\n"));
         assert!(header.ends_with("\n\n"));
     }
 
