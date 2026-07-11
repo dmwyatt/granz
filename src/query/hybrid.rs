@@ -5,6 +5,8 @@
 //! [`crate::query::fusion`]). Used by `grans search --hybrid` and the
 //! quality benchmark's hybrid mode.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -17,8 +19,17 @@ use crate::query::fusion::{reciprocal_rank_fusion, FusedDoc, RRF_K};
 /// How many top documents each retriever contributes to fusion.
 pub const CANDIDATE_POOL: usize = 100;
 
+/// Hybrid retrieval output: the fused ranking plus each document's
+/// best-matching chunk text from the semantic pass. The rerank stage uses
+/// the chunk texts as passages; documents without embedded content (e.g.
+/// title-only FTS matches) have no entry.
+pub struct HybridRanking {
+    pub fused: Vec<FusedDoc>,
+    pub best_chunks: HashMap<String, String>,
+}
+
 /// Run FTS and semantic retrieval for `query` and fuse the rankings.
-/// Returns fused documents, best first.
+/// Fused documents come back best first.
 pub fn hybrid_ranked(
     conn: &Connection,
     embedder: &dyn Embedder,
@@ -27,7 +38,7 @@ pub fn hybrid_ranked(
     targets: &[SearchTarget],
     date_range: Option<&DateRange>,
     include_deleted: bool,
-) -> Result<Vec<FusedDoc>> {
+) -> Result<HybridRanking> {
     let fts_docs = crate::db::meetings::search_meetings(
         conn,
         query,
@@ -40,6 +51,9 @@ pub fn hybrid_ranked(
     )?;
     let fts_ids: Vec<String> = fts_docs.into_iter().filter_map(|d| d.id).collect();
 
+    // No limit: the per-document best chunks must cover every candidate,
+    // including FTS-only documents outside the semantic top of the pool.
+    // Fusion still truncates each id list to the pool.
     let source_filter = semantic_source_filter(targets);
     let (semantic_results, _) = crate::embed::semantic_search_with_index(
         conn,
@@ -47,13 +61,22 @@ pub fn hybrid_ranked(
         index,
         query,
         date_range,
-        CANDIDATE_POOL,
+        0,
         source_filter.as_deref(),
         include_deleted,
     )?;
-    let semantic_ids: Vec<String> = semantic_results.into_iter().map(|r| r.document_id).collect();
 
-    Ok(fuse_candidates(fts_ids, semantic_ids))
+    let mut semantic_ids = Vec::with_capacity(semantic_results.len());
+    let mut best_chunks = HashMap::with_capacity(semantic_results.len());
+    for r in semantic_results {
+        semantic_ids.push(r.document_id.clone());
+        best_chunks.insert(r.document_id, r.matched_text);
+    }
+
+    Ok(HybridRanking {
+        fused: fuse_candidates(fts_ids, semantic_ids),
+        best_chunks,
+    })
 }
 
 /// Truncate each ranked id list to the candidate pool and fuse with RRF.
@@ -96,12 +119,12 @@ mod tests {
         }
     }
 
-    fn stored(doc_id: &str, vector: Vec<f32>) -> StoredVector {
+    fn stored(doc_id: &str, text: &str, vector: Vec<f32>) -> StoredVector {
         StoredVector {
             chunk_id: 0,
             document_id: doc_id.to_string(),
             source_type: "transcript_window".to_string(),
-            text: String::new(),
+            text: text.to_string(),
             vector,
             metadata_json: None,
         }
@@ -124,8 +147,8 @@ mod tests {
         EmbeddingIndex {
             vectors: vec![
                 // cosine vs [1, 0]: doc-both = 1.0, doc-sem ~= 0.707
-                stored("doc-both", vec![1.0, 0.0]),
-                stored("doc-sem", vec![1.0, 1.0]),
+                stored("doc-both", "both chunk", vec![1.0, 0.0]),
+                stored("doc-sem", "sem chunk", vec![1.0, 1.0]),
             ],
             stats: None,
         }
@@ -142,7 +165,8 @@ mod tests {
 
         let fused =
             hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
-                .unwrap();
+                .unwrap()
+                .fused;
 
         // FTS title tier orders by recency: [doc-fts, doc-both].
         // Semantic orders by cosine: [doc-both, doc-sem].
@@ -166,7 +190,8 @@ mod tests {
 
         let fused =
             hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &targets, None, false)
-                .unwrap();
+                .unwrap()
+                .fused;
 
         // Semantic search is filtered to no embeddable source types, so
         // only the FTS title matches remain, in FTS order.
@@ -175,15 +200,39 @@ mod tests {
     }
 
     #[test]
+    fn ranking_exposes_best_chunk_text_per_document() {
+        let conn = build_test_db(&hybrid_state());
+        // doc-sem has two chunks; the higher-cosine one must win.
+        let index = EmbeddingIndex {
+            vectors: vec![
+                stored("doc-both", "both chunk", vec![1.0, 0.0]),
+                stored("doc-sem", "weak chunk", vec![0.0, 1.0]),
+                stored("doc-sem", "strong chunk", vec![1.0, 0.5]),
+            ],
+            stats: None,
+        };
+
+        let ranking =
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
+                .unwrap();
+
+        assert_eq!(ranking.best_chunks.get("doc-both").map(String::as_str), Some("both chunk"));
+        assert_eq!(ranking.best_chunks.get("doc-sem").map(String::as_str), Some("strong chunk"));
+        // doc-fts has no chunks, so it has no passage entry.
+        assert!(!ranking.best_chunks.contains_key("doc-fts"));
+    }
+
+    #[test]
     fn no_matches_fuse_to_empty() {
         let conn = build_test_db(&hybrid_state());
         let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
 
-        let fused =
+        let ranking =
             hybrid_ranked(&conn, &FixedEmbedder, &index, "zyzzyva", &all_targets(), None, false)
                 .unwrap();
 
-        assert!(fused.is_empty());
+        assert!(ranking.fused.is_empty());
+        assert!(ranking.best_chunks.is_empty());
     }
 
     #[test]

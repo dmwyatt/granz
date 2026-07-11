@@ -238,7 +238,7 @@ fn hybrid_search(
     let embedder = crate::embed::model::FastEmbedModel::new()?;
     let index = crate::embed::ensure_embeddings(conn, &embedder, crate::embed::DEFAULT_BATCH_SIZE)?;
 
-    let fused = crate::query::hybrid::hybrid_ranked(
+    let ranking = crate::query::hybrid::hybrid_ranked(
         conn,
         &embedder,
         &index,
@@ -247,7 +247,7 @@ fn hybrid_search(
         date_range.as_ref(),
         include_deleted,
     )?;
-    let ids: Vec<String> = fused.into_iter().map(|d| d.document_id).collect();
+    let ids: Vec<String> = ranking.fused.into_iter().map(|d| d.document_id).collect();
     let results = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;
 
     let results = filter_by_meeting(results, meeting_filter);

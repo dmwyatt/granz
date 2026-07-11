@@ -91,7 +91,8 @@ fn retrieve_hybrid(
 ) -> Result<Vec<RankedDoc>> {
     let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
     let fused =
-        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
+        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?
+            .fused;
     Ok(fused
         .into_iter()
         .map(|d| RankedDoc {
