@@ -260,7 +260,7 @@ fn find_matching_panel_documents(
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 // ============================================================================

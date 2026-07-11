@@ -116,7 +116,7 @@ fn find_matching_documents(
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Load all transcript utterances for a document, ordered by timestamp.

@@ -312,7 +312,8 @@ pub fn search_meetings(
         })
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).map(row_to_document).collect())
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().map(row_to_document).collect())
 }
 
 fn append_date_filter(
@@ -575,6 +576,20 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id.as_deref(), Some("doc-tie-new"));
         assert_eq!(results[1].id.as_deref(), Some("doc-tie-old"));
+    }
+
+    #[test]
+    fn test_search_meetings_surfaces_row_errors() {
+        // Regression: row-mapping errors were silently dropped, which turned
+        // real failures into empty search results.
+        let conn = build_test_db(&meetings_state());
+        conn.execute(
+            "UPDATE documents SET title = x'DEADBEEF' WHERE id = 'doc-1'",
+            [],
+        )
+        .unwrap();
+        let result = search_meetings(&conn, "neural", false, true, false, false, None, false);
+        assert!(result.is_err());
     }
 
     #[test]
