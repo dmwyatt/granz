@@ -2,8 +2,9 @@
 //!
 //! Takes the top fused candidates from [`crate::query::hybrid`], builds a
 //! (title + best chunk) passage per document, and reorders them by
-//! cross-encoder relevance. The reranker score is the user-facing score
-//! for hybrid results.
+//! cross-encoder relevance blended with the RRF fusion prior (see
+//! [`FUSION_BLEND_WEIGHT`]). The reranker probability is the user-facing
+//! score for hybrid results; the blend affects ordering only.
 
 use std::collections::HashMap;
 
@@ -17,6 +18,16 @@ use crate::query::hybrid::HybridRanking;
 /// How many top fused candidates the reranker scores. Documents fused
 /// below this cutoff are dropped from reranked results.
 pub const RERANK_POOL: usize = 50;
+
+/// Weight of the RRF fusion score in the final ranking, blended as
+/// `rerank_score + FUSION_BLEND_WEIGHT * fused_score`. RRF scores top out
+/// near 2/(60+1), so 30 scales the prior to roughly the cross-encoder's
+/// [0, 1] range. Without the prior, queries where the cross-encoder is
+/// unconfident (max score well under 0.8) get noise-dominated orderings
+/// that can bury documents fusion ranked highly; the sweep on the 93-query
+/// golden set picked 30 (hit-rate@10 0.935, MRR@10 0.804, no fusion top-3
+/// document leaving the top 10).
+pub const FUSION_BLEND_WEIGHT: f32 = 30.0;
 
 /// A reranked document with its relevance score.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +50,15 @@ pub struct RerankCandidate {
     pub rerank_score: f32,
 }
 
+impl RerankCandidate {
+    /// The ranking score: cross-encoder probability plus the weighted
+    /// fusion prior. Ordering only; the user-facing score stays
+    /// [`RerankCandidate::rerank_score`].
+    pub fn blended_score(&self) -> f32 {
+        self.rerank_score + FUSION_BLEND_WEIGHT * self.fused_score as f32
+    }
+}
+
 /// Build the passage the reranker judges for one document: the title and
 /// the best-matching chunk, whichever exist.
 fn build_passage(title: Option<&str>, best_chunk: Option<&str>) -> String {
@@ -52,7 +72,7 @@ fn build_passage(title: Option<&str>, best_chunk: Option<&str>) -> String {
 
 /// Rerank the top [`RERANK_POOL`] fused candidates of a hybrid ranking,
 /// keeping each candidate's fusion components: fetch titles, build
-/// passages, score with the cross-encoder. Sorted best-first by rerank
+/// passages, score with the cross-encoder. Sorted best-first by blended
 /// score; ties keep the fused order.
 pub fn rerank_hybrid_detailed(
     conn: &Connection,
@@ -92,7 +112,7 @@ pub fn rerank_hybrid_detailed(
         candidate.rerank_score = score;
     }
     candidates.sort_by(|a, b| {
-        b.rerank_score.partial_cmp(&a.rerank_score).unwrap_or(std::cmp::Ordering::Equal)
+        b.blended_score().partial_cmp(&a.blended_score()).unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(candidates)
 }
@@ -161,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn detailed_carries_fusion_components_and_sorts_by_rerank_score() {
+    fn detailed_carries_fusion_components_and_sorts_by_blended_score() {
         // Fused order is the reverse of cross-encoder relevance: doc-chunk
         // matches "kumquat" twice via its chunk, doc-title once via its
         // title, doc-none not at all.
@@ -200,6 +220,38 @@ mod tests {
         assert_eq!(detailed[2].document_id, "doc-none");
         assert_eq!(detailed[2].fused_rank, 1);
         assert_eq!(detailed[2].rerank_score, 0.0);
+    }
+
+    #[test]
+    fn blend_prefers_strong_fusion_prior_in_close_calls() {
+        // doc-deep outscores doc-fused on the cross-encoder (2 vs 1 query
+        // occurrences), but doc-fused carries a far stronger fusion prior,
+        // so the blended ordering must put doc-fused first.
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-fused": {"id": "doc-fused", "title": "Kumquat sync", "created_at": "2026-01-01T10:00:00Z"},
+                "doc-deep": {"id": "doc-deep", "title": "Planning", "created_at": "2026-01-02T10:00:00Z"}
+            }
+        }));
+        let ranking = HybridRanking {
+            fused: vec![
+                FusedDoc { document_id: "doc-fused".to_string(), score: 0.1 },
+                FusedDoc { document_id: "doc-deep".to_string(), score: 0.0 },
+            ],
+            best_chunks: HashMap::from([(
+                "doc-deep".to_string(),
+                "kumquat kumquat".to_string(),
+            )]),
+        };
+
+        let detailed =
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+
+        // Blends: doc-fused 1 + 30 * 0.1 = 4, doc-deep 2 + 30 * 0 = 2.
+        assert_eq!(detailed[0].document_id, "doc-fused");
+        assert_eq!(detailed[0].rerank_score, 1.0);
+        assert_eq!(detailed[1].document_id, "doc-deep");
+        assert_eq!(detailed[1].rerank_score, 2.0);
     }
 
     #[test]
