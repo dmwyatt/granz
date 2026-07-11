@@ -239,6 +239,22 @@ pub enum Commands {
         /// Number of chunks to embed per batch (higher values use more memory but may be faster on GPU)
         #[arg(long, default_value = "16", global = true)]
         batch_size: usize,
+
+        /// Experiment knob: target tokens per chunk (overrides the stored scheme)
+        #[arg(long, hide = true, value_name = "N")]
+        chunk_target_tokens: Option<usize>,
+
+        /// Experiment knob: overlap tokens between chunks (overrides the stored scheme)
+        #[arg(long, hide = true, value_name = "N")]
+        chunk_overlap_tokens: Option<usize>,
+
+        /// Experiment knob: how consecutive transcript chunks overlap
+        #[arg(long, hide = true, value_parser = ["chars", "utterances"])]
+        overlap_mode: Option<String>,
+
+        /// Experiment knob: prepend meeting title/date/attendees to the embed input
+        #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "true")]
+        contextual_headers: Option<bool>,
     },
 
     /// Benchmarking commands
@@ -589,6 +605,63 @@ mod tests {
             } => compare,
             _ => panic!("expected benchmark quality subcommand"),
         }
+    }
+
+    fn embed_experiment_flags(cli: &Cli) -> (Option<usize>, Option<usize>, Option<String>, Option<bool>) {
+        match &cli.command {
+            Commands::Embed {
+                chunk_target_tokens,
+                chunk_overlap_tokens,
+                overlap_mode,
+                contextual_headers,
+                ..
+            } => (
+                *chunk_target_tokens,
+                *chunk_overlap_tokens,
+                overlap_mode.clone(),
+                *contextual_headers,
+            ),
+            _ => panic!("expected embed subcommand"),
+        }
+    }
+
+    #[test]
+    fn embed_experiment_flags_default_to_none() {
+        let cli = Cli::try_parse_from(["grans", "embed"]).unwrap();
+        assert_eq!(embed_experiment_flags(&cli), (None, None, None, None));
+    }
+
+    #[test]
+    fn embed_experiment_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "grans",
+            "embed",
+            "--chunk-target-tokens",
+            "192",
+            "--chunk-overlap-tokens",
+            "48",
+            "--overlap-mode",
+            "utterances",
+            "--contextual-headers",
+        ])
+        .unwrap();
+        assert_eq!(
+            embed_experiment_flags(&cli),
+            (Some(192), Some(48), Some("utterances".to_string()), Some(true))
+        );
+    }
+
+    #[test]
+    fn embed_contextual_headers_can_be_forced_off() {
+        let cli =
+            Cli::try_parse_from(["grans", "embed", "--contextual-headers=false"]).unwrap();
+        assert_eq!(embed_experiment_flags(&cli).3, Some(false));
+    }
+
+    #[test]
+    fn embed_overlap_mode_rejects_unknown_value() {
+        let result = Cli::try_parse_from(["grans", "embed", "--overlap-mode", "bogus"]);
+        assert!(result.is_err());
     }
 
     #[test]
