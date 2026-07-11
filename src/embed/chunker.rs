@@ -155,7 +155,8 @@ pub fn transcript_window_chunker_adaptive(
                 }
 
                 // Start new buffer with overlap
-                let overlap_start = buffer.len().saturating_sub(overlap_chars);
+                let overlap_start =
+                    floor_char_boundary(&buffer, buffer.len().saturating_sub(overlap_chars));
                 buffer = buffer[overlap_start..].to_string();
                 buffer_start_idx = i;
             }
@@ -196,7 +197,8 @@ pub fn transcript_window_chunker_adaptive(
                 }
 
                 // Start fresh buffer with overlap
-                let overlap_start = buffer.len().saturating_sub(overlap_chars);
+                let overlap_start =
+                    floor_char_boundary(&buffer, buffer.len().saturating_sub(overlap_chars));
                 buffer = buffer[overlap_start..].to_string();
                 buffer_start_idx = i;
                 buffer_start_ts = None;
@@ -232,7 +234,8 @@ pub fn transcript_window_chunker_adaptive(
                     }
 
                     // Start new buffer with overlap
-                    let overlap_start = buffer.len().saturating_sub(overlap_chars);
+                    let overlap_start =
+                    floor_char_boundary(&buffer, buffer.len().saturating_sub(overlap_chars));
                     buffer = buffer[overlap_start..].to_string();
                     buffer_start_idx = i;
                     buffer_start_ts = None;
@@ -280,6 +283,27 @@ pub fn transcript_window_chunker_adaptive(
     Ok(chunks)
 }
 
+/// Largest byte index <= `max` that lies on a char boundary of `s`.
+/// If that index is 0 (i.e. `max` falls inside the first character), the
+/// end of the first character is returned instead, so callers slicing at
+/// the result always make progress.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    if i == 0 {
+        i = max;
+        while !s.is_char_boundary(i) {
+            i += 1;
+        }
+    }
+    i
+}
+
 /// Split text to fit within max_chars, returning (fits, remainder).
 /// Strategy: prefer sentence boundaries, fall back to word boundaries.
 /// If text <= max_chars, returns (text, "").
@@ -289,7 +313,8 @@ fn split_text_at_limit(text: &str, max_chars: usize) -> (&str, &str) {
     }
 
     // Find the last sentence boundary (., !, ?) within max_chars
-    let search_area = &text[..max_chars];
+    let limit = floor_char_boundary(text, max_chars);
+    let search_area = &text[..limit];
     let sentence_end = search_area
         .rfind(|c| c == '.' || c == '!' || c == '?')
         .map(|pos| pos + 1); // Include the punctuation
@@ -308,8 +333,8 @@ fn split_text_at_limit(text: &str, max_chars: usize) -> (&str, &str) {
         }
     }
 
-    // No good boundary - hard split at max_chars
-    (&text[..max_chars], &text[max_chars..])
+    // No good boundary - hard split at the char boundary nearest max_chars
+    (&text[..limit], &text[limit..])
 }
 
 /// Format utterance text with a speaker label prefix based on source.
@@ -966,6 +991,80 @@ mod tests {
         let meta2 = chunks[2].metadata.as_ref().unwrap();
         assert_eq!(meta2["section_heading"], "Action Items");
         assert!(chunks[2].text.contains("welcome email"));
+    }
+
+    // Regression tests: transcripts contain multi-byte UTF-8 (curly
+    // apostrophes from transcription); byte-offset slicing must not panic.
+    #[test]
+    fn test_split_text_multibyte_hard_split_no_panic() {
+        // 27 three-byte chars, no sentence or word boundaries: forces the
+        // hard-split path with max_chars landing mid-character.
+        let text = "\u{2019}".repeat(27);
+        let (fits, remainder) = split_text_at_limit(&text, 10);
+        assert!(!fits.is_empty());
+        assert!(fits.len() <= 10);
+        assert_eq!(format!("{}{}", fits, remainder), text);
+    }
+
+    #[test]
+    fn test_adaptive_target_overlap_multibyte_no_panic() {
+        // Two 81-byte utterances of 3-byte chars; finalizing at the target
+        // boundary computes overlap_start = 81 - 20 = 61, which is not a
+        // char boundary.
+        let utt = "\u{2019}".repeat(27);
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", utt.as_str(), None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 15,
+            max_tokens: 100,
+            overlap_tokens: 5,
+            min_chars: 10,
+            chars_per_token: 4.0,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_adaptive_max_overlap_multibyte_no_panic() {
+        // Same shape, but the second utterance pushes past max_chars so the
+        // max-limit finalization path computes the overlap slice.
+        let utt = "\u{2019}".repeat(27);
+        let utts = vec![
+            ("doc1", "2025-01-01T10:00:00Z", utt.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", utt.as_str(), None),
+        ];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 15,
+            max_tokens: 25,
+            overlap_tokens: 5,
+            min_chars: 10,
+            chars_per_token: 4.0,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_adaptive_oversized_multibyte_utterance_no_panic() {
+        // A single 600-byte utterance of 3-byte chars exercises the
+        // oversized-split loop and its overlap carryover.
+        let utt = "\u{2019}".repeat(200);
+        let utts = vec![("doc1", "2025-01-01T10:00:00Z", utt.as_str(), None)];
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 15,
+            max_tokens: 25,
+            overlap_tokens: 5,
+            min_chars: 10,
+            chars_per_token: 4.0,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config).unwrap();
+        assert!(chunks.len() > 1);
     }
 
     // Tests for format_utterance_text
