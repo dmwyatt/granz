@@ -25,12 +25,17 @@ pub struct FastEmbedModel {
     dim: usize,
 }
 
-/// Set HF_HOME so fastembed caches models in a consistent location
-/// (the platform data directory, e.g. ~/.local/share/grans/fastembed_cache)
-/// rather than dropping cache directories in the current working directory.
-pub(crate) fn set_hf_cache_dir() -> Result<()> {
+/// The model cache directory (in the platform data directory), created if
+/// missing. Models must cache here rather than in a CWD-relative directory.
+pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
     let cache_dir = platform::data_dir()?.join("fastembed_cache");
     std::fs::create_dir_all(&cache_dir)?;
+    Ok(cache_dir)
+}
+
+/// Set HF_HOME so fastembed's hf-hub downloads land in [`hf_cache_dir`].
+pub(crate) fn set_hf_cache_dir() -> Result<()> {
+    let cache_dir = hf_cache_dir()?;
 
     // SAFETY: called during model initialization (single-threaded context),
     // before any threads the model wrappers spawn.

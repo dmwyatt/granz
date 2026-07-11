@@ -49,20 +49,25 @@ pub struct FastEmbedReranker {
     model: RefCell<fastembed::TextRerank>,
 }
 
+/// Init options for a reranker model: data-dir cache, download progress,
+/// hardware execution providers. `TextRerank` resolves its cache from these
+/// options alone (it ignores HF_HOME, unlike `TextEmbedding`), so the cache
+/// directory must be explicit.
+fn init_options(choice: RerankModel) -> Result<fastembed::RerankInitOptions> {
+    let mut opts = fastembed::RerankInitOptions::new(choice.fastembed_model())
+        .with_cache_dir(super::model::hf_cache_dir()?)
+        .with_show_download_progress(true);
+
+    let providers = super::model::execution_providers();
+    if !providers.is_empty() {
+        opts = opts.with_execution_providers(providers);
+    }
+    Ok(opts)
+}
+
 impl FastEmbedReranker {
     pub fn new(choice: RerankModel) -> Result<Self> {
-        super::model::set_hf_cache_dir()?;
-
-        let providers = super::model::execution_providers();
-
-        let mut opts = fastembed::RerankInitOptions::new(choice.fastembed_model())
-            .with_show_download_progress(true);
-        if !providers.is_empty() {
-            opts = opts.with_execution_providers(providers);
-        }
-
-        let model = fastembed::TextRerank::try_new(opts)?;
-
+        let model = fastembed::TextRerank::try_new(init_options(choice)?)?;
         Ok(Self { model: RefCell::new(model) })
     }
 }
@@ -116,6 +121,17 @@ mod tests {
         // f32 rounding saturates extreme logits to the interval bounds.
         assert!(sigmoid(-20.0) >= 0.0);
         assert!(sigmoid(20.0) <= 1.0);
+    }
+
+    #[test]
+    fn init_options_cache_models_in_the_data_dir() {
+        // TextRerank resolves its cache from the init options alone (it
+        // ignores HF_HOME, unlike TextEmbedding), so the data-dir cache
+        // must be set explicitly or models land in a CWD-relative
+        // .fastembed_cache.
+        let opts = init_options(RerankModel::JinaTurbo).unwrap();
+        let expected = crate::platform::data_dir().unwrap().join("fastembed_cache");
+        assert_eq!(opts.cache_dir, expected);
     }
 
     #[test]
