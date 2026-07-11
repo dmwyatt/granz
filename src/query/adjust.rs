@@ -34,13 +34,17 @@ pub struct RankingConfig {
     /// Weight of the title-match boost: the fraction of query content
     /// tokens appearing in the document title, damped by
     /// `log2(1 + series count)` so recurring meeting series don't drown a
-    /// query in same-titled siblings.
+    /// query in same-titled siblings. The Phase 5 sweep on the 93-query
+    /// golden set (rerank-jina) picked 0.2 from a plateau spanning
+    /// 0.10-0.25: recall@10 0.798 -> 0.805, MRR@10 0.804 -> 0.813,
+    /// hit-rate@10 unchanged, with no per-query recall loss. Above the
+    /// plateau the boost starts overpowering the cross-encoder.
     pub title_boost_weight: f32,
 }
 
 impl Default for RankingConfig {
     fn default() -> Self {
-        Self { fusion_blend_weight: 30.0, title_boost_weight: 0.0 }
+        Self { fusion_blend_weight: 30.0, title_boost_weight: 0.2 }
     }
 }
 
@@ -161,6 +165,11 @@ mod tests {
     #[test]
     fn default_fusion_blend_weight_is_thirty() {
         assert_eq!(RankingConfig::default().fusion_blend_weight, 30.0);
+    }
+
+    #[test]
+    fn default_title_boost_weight_is_the_adopted_winner() {
+        assert_eq!(RankingConfig::default().title_boost_weight, 0.2);
     }
 
     #[test]
