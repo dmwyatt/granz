@@ -6,7 +6,8 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 
 - **Keyword search** (Phase 1, #39): FTS5 `MATCH` with implicit-AND semantics (each term quoted individually; user-supplied quotes force phrase matching), ranked by `bm25()` with recency as tiebreak. Title substring matches rank as a tier above content matches; weighting them properly is Phase 5. Applies to the combined search and the standalone transcript/notes/panel searches.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
-- The two modes are mutually exclusive; `commands/search.rs` dispatches to one or the other.
+- **Hybrid search** (Phase 2, #40, opt-in `--hybrid`): runs both retrievers, truncates each ranked list to a 100-document candidate pool, and fuses by reciprocal rank fusion (k=60) in `query/fusion.rs` + `query/hybrid.rs`. Output is the fused meeting list; keyword and semantic remain the forcing modes.
+- The modes are mutually exclusive; `commands/search.rs` dispatches on a `SearchMode` enum.
 - **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. Implemented in `commands/benchmark/`.
 
 ## Target pipeline
@@ -66,6 +67,18 @@ Phase 1 results (2026-07-10, k=10, ID matching, same snapshot):
 | semantic (unchanged) | 0.86 | 0.76 | 0.72 | ~58 ms |
 
 Per query, 11 flipped miss-to-hit, none hit-to-miss, worst rank change 7 to 9; FTS vs semantic on best rank moved from 1/90/2 to 2/82/9 (W/L/T). Under the re-audited strata (below), FTS scores hit-rate 0.94 / MRR 0.76 on exact-term (n=17) and zero on mixed and paraphrase; semantic scores 1.00 / 0.92 on exact-term. Note the implicit-AND granularity: all terms must co-occur within one FTS row (a single utterance, panel, or notes document), so multi-term queries whose terms are scattered across a transcript still miss.
+
+Phase 2 results (2026-07-10, k=10, ID matching, same snapshot, re-audited strata):
+
+| Mode | hit-rate@10 | recall@10 | MRR@10 | avg latency |
+|---|---|---|---|---|
+| fts (Phase 1) | 0.17 | 0.09 | 0.14 | ~5 ms |
+| semantic | 0.86 | 0.76 | 0.72 | ~56 ms |
+| hybrid (RRF) | 0.86 | 0.76 | 0.72 | ~65 ms |
+
+Aggregates tie semantic, but the movement is where fusion should act: on exact-term queries hybrid reaches hit-rate 1.00 / MRR 1.000 (semantic 1.00 / 0.924, FTS 0.94 / 0.761), because FTS agreement pulls two semantically rank-2/rank-5 results to rank 1. Per query, hybrid matches or beats the better single mode on 90 of 93; the 3 losses are one-position slips (1→2, 2→3, 1→2) on mixed/paraphrase queries where an irrelevant FTS match fused above a relevant semantic one, costing ~0.015 MRR on those strata. No query with a top-3 result under either mode leaves the top 10, so the #40 gate passes. Against the single modes: hybrid vs FTS 69W/0L/24T, hybrid vs semantic 2W/3L/88T on best rank.
+
+The ceiling here is FTS itself: with FTS scoring zero outside exact-term, fusion has only one useful signal for mixed/paraphrase queries. Larger hybrid gains wait on reranking (Phase 3) and embedding improvements (Phase 4). Promotion of `--hybrid` to the default is a follow-up PR per #40.
 
 (v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55, title matching.)
 

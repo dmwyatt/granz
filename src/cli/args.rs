@@ -54,6 +54,10 @@ pub enum Commands {
         #[arg(long)]
         semantic: bool,
 
+        /// Combine keyword and semantic search, fusing both rankings
+        #[arg(long, conflicts_with_all = ["semantic", "context"])]
+        hybrid: bool,
+
         /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled)
         #[arg(long, default_value = "0")]
         context: usize,
@@ -244,6 +248,8 @@ pub enum QualityMode {
     Fts,
     /// Semantic search over embeddings
     Semantic,
+    /// RRF fusion of FTS and semantic rankings (--hybrid)
+    Hybrid,
 }
 
 impl QualityMode {
@@ -251,6 +257,7 @@ impl QualityMode {
         match self {
             QualityMode::Fts => "fts",
             QualityMode::Semantic => "semantic",
+            QualityMode::Hybrid => "hybrid",
         }
     }
 }

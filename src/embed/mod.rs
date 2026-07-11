@@ -525,7 +525,32 @@ pub fn semantic_search(
 ) -> Result<(Vec<SemanticSearchResult>, usize)> {
     let embedder = model::FastEmbedModel::new()?;
     let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE)?;
+    semantic_search_with_index(
+        conn,
+        &embedder,
+        &index,
+        query,
+        date_range,
+        limit,
+        source_type_filter,
+        include_deleted,
+    )
+}
 
+/// Run a semantic search against an already-loaded embedder and index.
+/// Callers that issue many queries (hybrid search, benchmarks) load the
+/// model and index once and reuse them here.
+#[allow(clippy::too_many_arguments)]
+pub fn semantic_search_with_index(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    index: &EmbeddingIndex,
+    query: &str,
+    date_range: Option<&crate::query::dates::DateRange>,
+    limit: usize,
+    source_type_filter: Option<&[&str]>,
+    include_deleted: bool,
+) -> Result<(Vec<SemanticSearchResult>, usize)> {
     if index.is_empty() {
         return Ok((Vec::new(), 0));
     }
@@ -570,22 +595,7 @@ pub fn semantic_search_with_embedder_and_limit(
     limit: usize,
 ) -> Result<(Vec<SemanticSearchResult>, usize)> {
     let index = ensure_embeddings(conn, embedder, DEFAULT_BATCH_SIZE)?;
-
-    if index.is_empty() {
-        return Ok((Vec::new(), 0));
-    }
-
-    let query_vec = embedder.embed_query(query)?;
-    let results = index.search(&query_vec, 0.0, None);
-    let total_count = results.len();
-
-    let results = if limit > 0 {
-        results.into_iter().take(limit).collect()
-    } else {
-        results
-    };
-
-    Ok((results, total_count))
+    semantic_search_with_index(conn, embedder, &index, query, None, limit, None, false)
 }
 
 #[cfg(test)]

@@ -316,6 +316,50 @@ pub fn search_meetings(
     Ok(rows.into_iter().map(row_to_document).collect())
 }
 
+/// Fetch documents by id, returned in the order the ids were given.
+/// Unknown ids are skipped. No deleted filter is applied: callers pass ids
+/// from a search that already honored include_deleted.
+pub fn get_meetings_by_ids(conn: &Connection, ids: &[String]) -> Result<Vec<Document>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json
+         FROM documents WHERE id IN ({})",
+        placeholders
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::types::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok(DocumentRow {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            created_at: row.get(2)?,
+            updated_at: row.get(3)?,
+            deleted_at: row.get(4)?,
+            doc_type: row.get(5)?,
+            notes_plain: row.get(6)?,
+            notes_markdown: row.get(7)?,
+            summary: row.get(8)?,
+            people_json: row.get(9)?,
+            google_calendar_event_json: row.get(10)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut by_id: std::collections::HashMap<String, Document> = rows
+        .into_iter()
+        .map(row_to_document)
+        .filter_map(|d| d.id.clone().map(|id| (id, d)))
+        .collect();
+
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
 fn append_date_filter(
     sql: &mut String,
     params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
@@ -346,6 +390,32 @@ mod tests {
         let docs = list_meetings(&conn, None, None, false).unwrap();
         // deleted doc excluded
         assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_get_meetings_by_ids_preserves_input_order() {
+        let conn = build_test_db(&meetings_state());
+        let ids = vec!["doc-2".to_string(), "doc-1".to_string()];
+        let docs = get_meetings_by_ids(&conn, &ids).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0].id.as_deref(), Some("doc-2"));
+        assert_eq!(docs[1].id.as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn test_get_meetings_by_ids_skips_unknown_ids() {
+        let conn = build_test_db(&meetings_state());
+        let ids = vec!["doc-1".to_string(), "doc-missing".to_string()];
+        let docs = get_meetings_by_ids(&conn, &ids).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].id.as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn test_get_meetings_by_ids_empty_input() {
+        let conn = build_test_db(&meetings_state());
+        let docs = get_meetings_by_ids(&conn, &[]).unwrap();
+        assert!(docs.is_empty());
     }
 
     #[test]
