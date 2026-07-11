@@ -63,7 +63,7 @@ Caveats a maintainer must know:
 
 - Ledger entries recorded before 2026-07-10 used title matching, which over-credits recurring-title meetings; do not compare them against ID-matched numbers.
 - `query_type` labels were assigned relative to the current phrase-matching keyword behavior: several queries were demoted from exact-term to mixed only because the full query fails as a phrase. After Phase 1 lands implicit-AND semantics, re-audit the strata; the exact-term stratum (n=12) is currently thin and noisy.
-- For stable numbers across syncs, benchmark against a frozen copy of the database via the global `--db` flag rather than the live one.
+- For stable numbers across syncs, benchmark against the frozen snapshot rather than the live database: `grans --db <benchmarks-dir>/grans-snapshot-2026-07-09.db benchmark quality ...`. The snapshot is byte-identical to the state the Phase 0 baselines were recorded against (872 docs, 33,510 chunks); the live database drifts with every `grans sync`, which invalidates per-query comparison against earlier ledger entries.
 - Open review items: the 11 v1 queries' `query_type` values were hand-assigned and unreviewed, and two v1 queries ("AI phone agent...", "changing an intermittent caregiving leave...") had their ID labels expanded across recurring-title instances that may over-include.
 
 ## Phases
