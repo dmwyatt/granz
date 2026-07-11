@@ -3,7 +3,8 @@
 //! Each mode returns the full document-level ranked list for a query;
 //! scoring (metrics.rs) applies k. Lists reflect current production
 //! behavior for the mode: FTS is ranked by bm25 with a recency tiebreak,
-//! semantic by best-chunk cosine score, and hybrid by RRF over both.
+//! semantic by best-chunk cosine score, hybrid by RRF over both, and the
+//! rerank modes by cross-encoder score over the top of the fused pool.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -11,6 +12,7 @@ use rusqlite::Connection;
 use super::metrics::RankedDoc;
 use crate::cli::args::QualityMode;
 use crate::embed::model::{Embedder, FastEmbedModel};
+use crate::embed::rerank::{FastEmbedReranker, RerankModel, Reranker};
 use crate::embed::search::SemanticSearchResult;
 use crate::embed::{ensure_embeddings, EmbeddingIndex, DEFAULT_BATCH_SIZE};
 use crate::query::filter::SearchTarget;
@@ -28,12 +30,18 @@ pub enum Retriever<'a> {
         embedder: FastEmbedModel,
         index: EmbeddingIndex,
     },
+    HybridRerank {
+        conn: &'a Connection,
+        embedder: FastEmbedModel,
+        index: EmbeddingIndex,
+        reranker: Box<FastEmbedReranker>,
+    },
 }
 
 impl<'a> Retriever<'a> {
-    /// Build the retriever for a mode. For semantic and hybrid, the embedding
-    /// model and index are loaded once here so per-query latency measures
-    /// search, not one-time setup.
+    /// Build the retriever for a mode. For semantic, hybrid, and rerank
+    /// modes, the models and index are loaded once here so per-query
+    /// latency measures search, not one-time setup.
     pub fn build(mode: QualityMode, conn: &'a Connection) -> Result<Self> {
         match mode {
             QualityMode::Fts => Ok(Retriever::Fts { conn }),
@@ -46,6 +54,16 @@ impl<'a> Retriever<'a> {
                 let embedder = FastEmbedModel::new()?;
                 let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE)?;
                 Ok(Retriever::Hybrid { conn, embedder, index })
+            }
+            QualityMode::RerankJina | QualityMode::RerankBge => {
+                let embedder = FastEmbedModel::new()?;
+                let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE)?;
+                let model = match mode {
+                    QualityMode::RerankJina => RerankModel::JinaTurbo,
+                    _ => RerankModel::BgeBase,
+                };
+                let reranker = Box::new(FastEmbedReranker::new(model)?);
+                Ok(Retriever::HybridRerank { conn, embedder, index, reranker })
             }
         }
     }
@@ -60,6 +78,9 @@ impl<'a> Retriever<'a> {
             }
             Retriever::Hybrid { conn, embedder, index } => {
                 retrieve_hybrid(conn, embedder, index, query)
+            }
+            Retriever::HybridRerank { conn, embedder, index, reranker } => {
+                retrieve_hybrid_rerank(conn, embedder, index, reranker.as_ref(), query)
             }
         }
     }
@@ -98,6 +119,29 @@ fn retrieve_hybrid(
         .map(|d| RankedDoc {
             document_id: d.document_id,
             score: Some(d.score as f32),
+        })
+        .collect())
+}
+
+/// Reranked hybrid retrieval over the same default targets: production
+/// fusion, then the cross-encoder reorders the top candidates (the
+/// `grans search --hybrid` default path).
+fn retrieve_hybrid_rerank(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    index: &EmbeddingIndex,
+    reranker: &dyn Reranker,
+    query: &str,
+) -> Result<Vec<RankedDoc>> {
+    let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
+    let ranking =
+        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
+    let reranked = crate::query::rerank::rerank_hybrid(conn, reranker, query, &ranking)?;
+    Ok(reranked
+        .into_iter()
+        .map(|d| RankedDoc {
+            document_id: d.document_id,
+            score: Some(d.score),
         })
         .collect())
 }
@@ -180,6 +224,62 @@ mod tests {
         let embedder = crate::embed::model::MockEmbedder { dim: 2, max_length: 512 };
 
         let ranked = retrieve_hybrid(&conn, &embedder, &index, "zebra xylophone").unwrap();
+
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn hybrid_rerank_retriever_reorders_by_cross_encoder() {
+        use crate::embed::model::MockEmbedder;
+        use crate::embed::rerank::MockReranker;
+        use crate::embed::store::StoredVector;
+
+        let conn = build_test_db(&meetings_state());
+        // Query "standup": FTS matches doc-2 by title, and MockEmbedder's
+        // query vector has a larger first component, so doc-1 (vector
+        // [1, 0]) outranks doc-2 ([0, 1]) semantically. Fusion puts doc-2
+        // (in both lists) first. The passages reverse that: doc-1's chunk
+        // repeats the query three times, doc-2's not at all (its single
+        // occurrence is the title).
+        let stored = |doc_id: &str, text: &str, vector: Vec<f32>| StoredVector {
+            chunk_id: 0,
+            document_id: doc_id.to_string(),
+            source_type: "transcript_window".to_string(),
+            text: text.to_string(),
+            vector,
+            metadata_json: None,
+        };
+        let index = EmbeddingIndex {
+            vectors: vec![
+                stored("doc-1", "standup standup standup", vec![1.0, 0.0]),
+                stored("doc-2", "planning", vec![0.0, 1.0]),
+            ],
+            stats: None,
+        };
+        let embedder = MockEmbedder { dim: 2, max_length: 512 };
+
+        let ranked =
+            retrieve_hybrid_rerank(&conn, &embedder, &index, &MockReranker, "standup").unwrap();
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].document_id, "doc-1");
+        assert_eq!(ranked[0].score, Some(3.0));
+        assert_eq!(ranked[1].document_id, "doc-2");
+        assert_eq!(ranked[1].score, Some(1.0));
+    }
+
+    #[test]
+    fn hybrid_rerank_retriever_empty_for_no_match() {
+        use crate::embed::model::MockEmbedder;
+        use crate::embed::rerank::MockReranker;
+
+        let conn = build_test_db(&meetings_state());
+        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+        let embedder = MockEmbedder { dim: 2, max_length: 512 };
+
+        let ranked =
+            retrieve_hybrid_rerank(&conn, &embedder, &index, &MockReranker, "zebra xylophone")
+                .unwrap();
 
         assert!(ranked.is_empty());
     }

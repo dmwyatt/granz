@@ -15,7 +15,6 @@ pub trait Reranker {
     /// order; higher is more relevant. Production models return sigmoid
     /// probabilities in [0, 1].
     fn rerank(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>>;
-    fn model_name(&self) -> &str;
 }
 
 /// Reranker model selection. Both candidates from the Phase 3 evaluation
@@ -32,13 +31,6 @@ pub enum RerankModel {
 pub const DEFAULT_RERANK_MODEL: RerankModel = RerankModel::JinaTurbo;
 
 impl RerankModel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RerankModel::JinaTurbo => "jina-reranker-v1-turbo-en",
-            RerankModel::BgeBase => "bge-reranker-base",
-        }
-    }
-
     fn fastembed_model(&self) -> fastembed::RerankerModel {
         match self {
             RerankModel::JinaTurbo => fastembed::RerankerModel::JINARerankerV1TurboEn,
@@ -55,7 +47,6 @@ fn sigmoid(logit: f32) -> f32 {
 /// Production reranker using fastembed's `TextRerank`.
 pub struct FastEmbedReranker {
     model: RefCell<fastembed::TextRerank>,
-    choice: RerankModel,
 }
 
 impl FastEmbedReranker {
@@ -72,10 +63,7 @@ impl FastEmbedReranker {
 
         let model = fastembed::TextRerank::try_new(opts)?;
 
-        Ok(Self {
-            model: RefCell::new(model),
-            choice,
-        })
+        Ok(Self { model: RefCell::new(model) })
     }
 }
 
@@ -93,10 +81,6 @@ impl Reranker for FastEmbedReranker {
         }
         Ok(scores)
     }
-
-    fn model_name(&self) -> &str {
-        self.choice.as_str()
-    }
 }
 
 /// Mock reranker for testing: a document's score is the number of times the
@@ -113,10 +97,6 @@ impl Reranker for MockReranker {
             .iter()
             .map(|d| d.to_lowercase().matches(&needle).count() as f32)
             .collect())
-    }
-
-    fn model_name(&self) -> &str {
-        "mock-reranker"
     }
 }
 
@@ -157,12 +137,5 @@ mod tests {
         let reranker: &dyn Reranker = &MockReranker;
         let scores = reranker.rerank("q", &["q"]).unwrap();
         assert_eq!(scores.len(), 1);
-        assert_eq!(reranker.model_name(), "mock-reranker");
-    }
-
-    #[test]
-    fn rerank_model_names() {
-        assert_eq!(RerankModel::JinaTurbo.as_str(), "jina-reranker-v1-turbo-en");
-        assert_eq!(RerankModel::BgeBase.as_str(), "bge-reranker-base");
     }
 }

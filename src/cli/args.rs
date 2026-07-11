@@ -257,8 +257,12 @@ pub enum QualityMode {
     Fts,
     /// Semantic search over embeddings
     Semantic,
-    /// RRF fusion of FTS and semantic rankings (--hybrid)
+    /// RRF fusion of FTS and semantic rankings (--hybrid --fast)
     Hybrid,
+    /// Fusion + jina-reranker-v1-turbo-en cross-encoder
+    RerankJina,
+    /// Fusion + bge-reranker-base cross-encoder
+    RerankBge,
 }
 
 impl QualityMode {
@@ -267,6 +271,8 @@ impl QualityMode {
             QualityMode::Fts => "fts",
             QualityMode::Semantic => "semantic",
             QualityMode::Hybrid => "hybrid",
+            QualityMode::RerankJina => "rerank-jina",
+            QualityMode::RerankBge => "rerank-bge",
         }
     }
 }
