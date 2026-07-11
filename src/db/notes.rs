@@ -64,7 +64,7 @@ fn find_matching_note_documents(
     let deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
 
     let mut sql = format!(
-        "SELECT DISTINCT d.id, COALESCE(d.title, '(untitled)')
+        "SELECT d.id, COALESCE(d.title, '(untitled)')
          FROM notes_fts
          JOIN documents d ON notes_fts.rowid = d.rowid
          WHERE notes_fts MATCH ?1{}",
@@ -90,7 +90,8 @@ fn find_matching_note_documents(
         }
     }
 
-    sql.push_str(" ORDER BY d.created_at DESC");
+    // bm25 is lower-is-better; recency breaks ties.
+    sql.push_str(" ORDER BY bm25(notes_fts) ASC, d.created_at DESC");
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -139,6 +140,32 @@ mod tests {
         assert!(results[0].2[0].matched.text.contains("roadmap"));
         // Should have context after (the "priorities" paragraph)
         assert_eq!(results[0].2[0].after.len(), 1);
+    }
+
+    #[test]
+    fn test_search_notes_orders_by_relevance_then_recency() {
+        // Regression: matches were ordered by created_at DESC, so a passing
+        // mention in a newer meeting outranked the meeting about the topic.
+        // Filler docs keep the term under half the corpus so BM25 IDF stays
+        // positive.
+        let conn = build_test_db(&serde_json::json!({
+            "documents": {
+                "doc-relevant": {"id": "doc-relevant", "title": "Relevant", "created_at": "2026-01-10T10:00:00Z",
+                    "notes_plain": "grafana dashboards for grafana alerts and grafana panel layout"},
+                "doc-mention": {"id": "doc-mention", "title": "Mention", "created_at": "2026-01-20T10:00:00Z",
+                    "notes_plain": "we touched on grafana briefly during the quarterly budget review"},
+                "doc-f1": {"id": "doc-f1", "title": "Filler 1", "created_at": "2026-01-11T10:00:00Z",
+                    "notes_plain": "planning notes for the offsite agenda"},
+                "doc-f2": {"id": "doc-f2", "title": "Filler 2", "created_at": "2026-01-12T10:00:00Z",
+                    "notes_plain": "budget discussion carried over from last week"},
+                "doc-f3": {"id": "doc-f3", "title": "Filler 3", "created_at": "2026-01-13T10:00:00Z",
+                    "notes_plain": "team retro action items and follow ups"}
+            }
+        }));
+        let results = search_notes_with_context(&conn, "grafana", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "doc-relevant");
+        assert_eq!(results[1].0, "doc-mention");
     }
 
     #[test]

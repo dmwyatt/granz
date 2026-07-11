@@ -231,69 +231,67 @@ pub fn search_meetings(
     date_range: Option<&DateRange>,
     include_deleted: bool,
 ) -> Result<Vec<Document>> {
-    let title_pattern = format!("%{}%", query);
-    let fts_query = sanitize_fts_query(query);
-    let doc_filter = if include_deleted { "" } else { " AND deleted_at IS NULL" };
-    let d_doc_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
-
-    // Build UNION of matching document IDs from requested search types
-    let mut union_parts: Vec<String> = Vec::new();
+    // Each enabled source contributes (doc_id, title_hit, score) rows; a
+    // document's rank is its best (lowest) bm25 score across sources.
+    let mut union_parts: Vec<&str> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    let mut param_idx = 1;
 
     if search_titles {
-        let mut sub = format!(
-            "SELECT id FROM documents WHERE 1=1{} AND title LIKE ?{} COLLATE NOCASE",
-            doc_filter, param_idx
+        union_parts.push(
+            "SELECT id AS doc_id, 1 AS title_hit, NULL AS score FROM documents WHERE title LIKE ? COLLATE NOCASE",
         );
-        params.push(Box::new(title_pattern));
-        param_idx += 1;
-        append_date_filter(&mut sub, &mut params, &mut param_idx, date_range, "created_at");
-        union_parts.push(sub);
+        params.push(Box::new(format!("%{}%", query)));
     }
 
+    let fts_query = sanitize_fts_query(query);
+
     if search_notes {
-        let mut sub = format!(
-            "SELECT d.id FROM notes_fts JOIN documents d ON notes_fts.rowid = d.rowid WHERE 1=1{} AND notes_fts MATCH ?{}",
-            d_doc_filter, param_idx
+        union_parts.push(
+            "SELECT d.id AS doc_id, 0 AS title_hit, bm25(notes_fts) AS score FROM notes_fts JOIN documents d ON notes_fts.rowid = d.rowid WHERE notes_fts MATCH ?",
         );
         params.push(Box::new(fts_query.clone()));
-        param_idx += 1;
-        append_date_filter(&mut sub, &mut params, &mut param_idx, date_range, "d.created_at");
-        union_parts.push(sub);
     }
 
     if search_transcripts {
-        let mut sub = format!(
-            "SELECT DISTINCT tu.document_id FROM transcript_fts JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid JOIN documents d ON tu.document_id = d.id WHERE 1=1{} AND transcript_fts MATCH ?{}",
-            d_doc_filter, param_idx
+        union_parts.push(
+            "SELECT tu.document_id AS doc_id, 0 AS title_hit, bm25(transcript_fts) AS score FROM transcript_fts JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid WHERE transcript_fts MATCH ?",
         );
         params.push(Box::new(fts_query.clone()));
-        param_idx += 1;
-        append_date_filter(&mut sub, &mut params, &mut param_idx, date_range, "d.created_at");
-        union_parts.push(sub);
     }
 
     if search_panels {
-        let mut sub = format!(
-            "SELECT DISTINCT p.document_id FROM panels_fts JOIN panels p ON panels_fts.rowid = p.rowid JOIN documents d ON p.document_id = d.id WHERE p.deleted_at IS NULL{} AND panels_fts MATCH ?{}",
-            d_doc_filter, param_idx
+        union_parts.push(
+            "SELECT p.document_id AS doc_id, 0 AS title_hit, bm25(panels_fts) AS score FROM panels_fts JOIN panels p ON panels_fts.rowid = p.rowid WHERE p.deleted_at IS NULL AND panels_fts MATCH ?",
         );
         params.push(Box::new(fts_query));
-        param_idx += 1;
-        append_date_filter(&mut sub, &mut params, &mut param_idx, date_range, "d.created_at");
-        union_parts.push(sub);
     }
 
     if union_parts.is_empty() {
         return Ok(Vec::new());
     }
 
-    let union_sql = union_parts.join(" UNION ");
-    let sql = format!(
-        "SELECT id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json FROM documents WHERE 1=1{} AND id IN ({}) ORDER BY created_at DESC",
-        doc_filter, union_sql
+    // MATERIALIZED stops the query flattener from pulling bm25() into the
+    // aggregate context, where FTS5 auxiliary functions cannot run.
+    let mut sql = format!(
+        "WITH hits AS MATERIALIZED ({})
+         SELECT d.id, d.title, d.created_at, d.updated_at, d.deleted_at, d.doc_type, d.notes_plain, d.notes_markdown, d.summary, d.people_json, d.google_calendar_event_json
+         FROM documents d
+         JOIN (SELECT doc_id, MAX(title_hit) AS title_hit, MIN(score) AS best_score
+               FROM hits GROUP BY doc_id) m ON d.id = m.doc_id
+         WHERE 1=1",
+        union_parts.join(" UNION ALL ")
     );
+
+    if !include_deleted {
+        sql.push_str(" AND d.deleted_at IS NULL");
+    }
+    append_date_filter(&mut sql, &mut params, date_range, "d.created_at");
+
+    // bm25 is lower-is-better. Title matches carry no bm25 score: a title
+    // hit (the whole query as a substring of the title) outranks content
+    // matches, and within that tier title-only matches sort after scored
+    // ones. Recency breaks remaining ties.
+    sql.push_str(" ORDER BY m.title_hit DESC, m.best_score ASC NULLS LAST, d.created_at DESC");
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -320,20 +318,17 @@ pub fn search_meetings(
 fn append_date_filter(
     sql: &mut String,
     params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
-    param_idx: &mut usize,
     date_range: Option<&DateRange>,
     column: &str,
 ) {
     if let Some(range) = date_range {
         if let Some(start) = &range.start {
-            sql.push_str(&format!(" AND {} >= ?{}", column, param_idx));
+            sql.push_str(&format!(" AND {} >= ?", column));
             params.push(Box::new(start.to_rfc3339()));
-            *param_idx += 1;
         }
         if let Some(end) = &range.end {
-            sql.push_str(&format!(" AND {} < ?{}", column, param_idx));
+            sql.push_str(&format!(" AND {} < ?", column));
             params.push(Box::new(end.to_rfc3339()));
-            *param_idx += 1;
         }
     }
 }
@@ -520,6 +515,66 @@ mod tests {
             search_meetings(&conn, "neural networks", false, true, false, false, None, false).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-1"));
+    }
+
+    /// Docs where relevance and recency disagree. Filler rows keep the
+    /// matched terms under half the corpus so BM25 IDF stays positive.
+    fn ranking_state() -> serde_json::Value {
+        serde_json::json!({
+            "documents": {
+                "doc-relevant": {"id": "doc-relevant", "title": "Platform Sync", "created_at": "2026-01-10T10:00:00Z"},
+                "doc-mention": {"id": "doc-mention", "title": "Team Catchup", "created_at": "2026-01-20T10:00:00Z"},
+                "doc-titled": {"id": "doc-titled", "title": "Kubernetes Migration", "created_at": "2026-01-05T10:00:00Z"},
+                "doc-tie-old": {"id": "doc-tie-old", "title": "Metrics Review A", "created_at": "2026-01-08T10:00:00Z"},
+                "doc-tie-new": {"id": "doc-tie-new", "title": "Metrics Review B", "created_at": "2026-01-18T10:00:00Z"}
+            },
+            "transcripts": {
+                "doc-relevant": [
+                    {"id": "r1", "document_id": "doc-relevant", "text": "kubernetes migration steps kubernetes cluster upgrades and kubernetes networking"}
+                ],
+                "doc-mention": [
+                    {"id": "m1", "document_id": "doc-mention", "text": "someone mentioned kubernetes briefly while we mostly discussed the quarterly budget review"},
+                    {"id": "m2", "document_id": "doc-mention", "text": "budget planning discussion continued"}
+                ],
+                "doc-tie-old": [
+                    {"id": "t1", "document_id": "doc-tie-old", "text": "prometheus metrics dashboard review"}
+                ],
+                "doc-tie-new": [
+                    {"id": "t2", "document_id": "doc-tie-new", "text": "prometheus metrics dashboard review"}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn test_search_meetings_ranks_by_relevance_not_recency() {
+        // Regression: results were ordered by created_at DESC, so a passing
+        // mention in a newer meeting outranked the meeting about the topic.
+        let conn = build_test_db(&ranking_state());
+        let results =
+            search_meetings(&conn, "kubernetes", false, true, false, false, None, false).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id.as_deref(), Some("doc-relevant"));
+        assert_eq!(results[1].id.as_deref(), Some("doc-mention"));
+    }
+
+    #[test]
+    fn test_search_meetings_title_match_ranks_first() {
+        let conn = build_test_db(&ranking_state());
+        let results =
+            search_meetings(&conn, "kubernetes", true, true, false, false, None, false).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].id.as_deref(), Some("doc-titled"));
+    }
+
+    #[test]
+    fn test_search_meetings_equal_relevance_breaks_ties_by_recency() {
+        let conn = build_test_db(&ranking_state());
+        let results =
+            search_meetings(&conn, "prometheus", false, true, false, false, None, false).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id.as_deref(), Some("doc-tie-new"));
+        assert_eq!(results[1].id.as_deref(), Some("doc-tie-old"));
     }
 
     #[test]

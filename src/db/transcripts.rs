@@ -71,8 +71,12 @@ fn find_matching_documents(
     let fts_query = sanitize_fts_query(query);
     let deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
 
+    // MATERIALIZED stops the query flattener from pulling bm25() into the
+    // aggregate context, where FTS5 auxiliary functions cannot run.
     let mut sql = format!(
-        "SELECT DISTINCT tu.document_id, COALESCE(d.title, '(untitled)')
+        "WITH hits AS MATERIALIZED (
+         SELECT tu.document_id AS doc_id, COALESCE(d.title, '(untitled)') AS title,
+                d.created_at AS created_at, bm25(transcript_fts) AS score
          FROM transcript_fts
          JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid
          JOIN documents d ON tu.document_id = d.id
@@ -99,7 +103,11 @@ fn find_matching_documents(
         }
     }
 
-    sql.push_str(" ORDER BY d.created_at DESC");
+    // A document's rank is its best-matching utterance; bm25 is
+    // lower-is-better, recency breaks ties.
+    sql.push_str(
+        ") SELECT doc_id, title FROM hits GROUP BY doc_id ORDER BY MIN(score) ASC, created_at DESC",
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -475,6 +483,34 @@ mod tests {
         );
         assert_eq!(windows[0].after.len(), 1);
         assert_eq!(windows[0].after[0].text.as_deref(), Some("Great idea"));
+    }
+
+    #[test]
+    fn test_search_transcripts_orders_by_relevance_then_recency() {
+        // Regression: matches were ordered by created_at DESC, so a passing
+        // mention in a newer meeting outranked the meeting about the topic.
+        // Filler rows keep the term under half the corpus so BM25 IDF stays
+        // positive.
+        let conn = build_test_db(&serde_json::json!({
+            "documents": {
+                "doc-relevant": {"id": "doc-relevant", "title": "Relevant Meeting", "created_at": "2026-01-10T10:00:00Z"},
+                "doc-mention": {"id": "doc-mention", "title": "Passing Mention", "created_at": "2026-01-20T10:00:00Z"}
+            },
+            "transcripts": {
+                "doc-relevant": [
+                    {"id": "r1", "document_id": "doc-relevant", "text": "kubernetes migration steps kubernetes cluster upgrades and kubernetes networking"}
+                ],
+                "doc-mention": [
+                    {"id": "m1", "document_id": "doc-mention", "text": "someone mentioned kubernetes briefly while we mostly discussed the quarterly budget review"},
+                    {"id": "m2", "document_id": "doc-mention", "text": "budget planning discussion continued"},
+                    {"id": "m3", "document_id": "doc-mention", "text": "then we walked through the offsite agenda"}
+                ]
+            }
+        }));
+        let results = search_transcripts(&conn, "kubernetes", None, 0, None, false).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "Relevant Meeting");
+        assert_eq!(results[1].0, "Passing Mention");
     }
 
     #[test]
