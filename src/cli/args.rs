@@ -248,6 +248,8 @@ pub enum QualityMode {
     Fts,
     /// Semantic search over embeddings
     Semantic,
+    /// RRF fusion of FTS and semantic rankings (--hybrid)
+    Hybrid,
 }
 
 impl QualityMode {
@@ -255,6 +257,7 @@ impl QualityMode {
         match self {
             QualityMode::Fts => "fts",
             QualityMode::Semantic => "semantic",
+            QualityMode::Hybrid => "hybrid",
         }
     }
 }

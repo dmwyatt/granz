@@ -2,8 +2,8 @@
 //!
 //! Each mode returns the full document-level ranked list for a query;
 //! scoring (metrics.rs) applies k. Lists reflect current production
-//! behavior for the mode: FTS has no relevance ranking yet (Phase 1),
-//! semantic is ranked by best-chunk cosine score.
+//! behavior for the mode: FTS is ranked by bm25 with a recency tiebreak,
+//! semantic by best-chunk cosine score, and hybrid by RRF over both.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -13,6 +13,7 @@ use crate::cli::args::QualityMode;
 use crate::embed::model::{Embedder, FastEmbedModel};
 use crate::embed::search::SemanticSearchResult;
 use crate::embed::{ensure_embeddings, EmbeddingIndex, DEFAULT_BATCH_SIZE};
+use crate::query::filter::SearchTarget;
 
 pub enum Retriever<'a> {
     Fts {
@@ -22,12 +23,17 @@ pub enum Retriever<'a> {
         embedder: FastEmbedModel,
         index: EmbeddingIndex,
     },
+    Hybrid {
+        conn: &'a Connection,
+        embedder: FastEmbedModel,
+        index: EmbeddingIndex,
+    },
 }
 
 impl<'a> Retriever<'a> {
-    /// Build the retriever for a mode. For semantic, the embedding model and
-    /// index are loaded once here so per-query latency measures search, not
-    /// one-time setup.
+    /// Build the retriever for a mode. For semantic and hybrid, the embedding
+    /// model and index are loaded once here so per-query latency measures
+    /// search, not one-time setup.
     pub fn build(mode: QualityMode, conn: &'a Connection) -> Result<Self> {
         match mode {
             QualityMode::Fts => Ok(Retriever::Fts { conn }),
@@ -35,6 +41,11 @@ impl<'a> Retriever<'a> {
                 let embedder = FastEmbedModel::new()?;
                 let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE)?;
                 Ok(Retriever::Semantic { embedder, index })
+            }
+            QualityMode::Hybrid => {
+                let embedder = FastEmbedModel::new()?;
+                let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE)?;
+                Ok(Retriever::Hybrid { conn, embedder, index })
             }
         }
     }
@@ -46,6 +57,9 @@ impl<'a> Retriever<'a> {
             Retriever::Semantic { embedder, index } => {
                 let query_vec = embedder.embed_query(query)?;
                 Ok(to_ranked(index.search(&query_vec, 0.0, None)))
+            }
+            Retriever::Hybrid { conn, embedder, index } => {
+                retrieve_hybrid(conn, embedder, index, query)
             }
         }
     }
@@ -63,6 +77,26 @@ fn retrieve_fts(conn: &Connection, query: &str) -> Result<Vec<RankedDoc>> {
         .map(|id| RankedDoc {
             document_id: id,
             score: None,
+        })
+        .collect())
+}
+
+/// Hybrid retrieval over the same default targets, in production fusion
+/// order (RRF over the FTS and semantic rankings).
+fn retrieve_hybrid(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    index: &EmbeddingIndex,
+    query: &str,
+) -> Result<Vec<RankedDoc>> {
+    let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
+    let fused =
+        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
+    Ok(fused
+        .into_iter()
+        .map(|d| RankedDoc {
+            document_id: d.document_id,
+            score: Some(d.score as f32),
         })
         .collect())
 }
@@ -102,6 +136,49 @@ mod tests {
         let retriever = Retriever::Fts { conn: &conn };
 
         let ranked = retriever.retrieve("zebra xylophone").unwrap();
+
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn hybrid_retriever_fuses_fts_and_semantic() {
+        use crate::embed::model::MockEmbedder;
+        use crate::embed::store::StoredVector;
+
+        let conn = build_test_db(&meetings_state());
+        // doc-1 is the sole semantic candidate; MockEmbedder query vectors
+        // have non-negative components, so its cosine vs [1, 1] is >= 0 and
+        // it ranks first (and only) on the semantic side.
+        let index = EmbeddingIndex {
+            vectors: vec![StoredVector {
+                chunk_id: 0,
+                document_id: "doc-1".to_string(),
+                source_type: "transcript_window".to_string(),
+                text: String::new(),
+                vector: vec![1.0, 1.0],
+                metadata_json: None,
+            }],
+            stats: None,
+        };
+        let embedder = MockEmbedder { dim: 2, max_length: 512 };
+
+        // "machine learning" matches doc-1 by FTS too (notes), so doc-1 is
+        // rank 1 in both lists: RRF score 2/(60 + 1).
+        let ranked = retrieve_hybrid(&conn, &embedder, &index, "machine learning").unwrap();
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].document_id, "doc-1");
+        let score = ranked[0].score.expect("hybrid results carry RRF scores");
+        assert!((score - 2.0 / 61.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hybrid_retriever_empty_for_no_match() {
+        let conn = build_test_db(&meetings_state());
+        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+        let embedder = crate::embed::model::MockEmbedder { dim: 2, max_length: 512 };
+
+        let ranked = retrieve_hybrid(&conn, &embedder, &index, "zebra xylophone").unwrap();
 
         assert!(ranked.is_empty());
     }
