@@ -7,7 +7,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 - **Keyword search**: FTS5 `MATCH` used as a boolean filter; results ordered by `created_at DESC`. No relevance ranking. Additionally, `sanitize_fts_query` wraps the whole query in double quotes, which FTS5 interprets as a phrase query: multi-word searches only match the words adjacent and in order, not AND semantics.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
 - The two modes are mutually exclusive; `commands/search.rs` dispatches to one or the other.
-- **Evaluation**: `grans benchmark quality --file <golden-set.json>` scores the semantic pipeline only (hardcoded in `commands/benchmark.rs`) and matches results to labels by exact title. See "Golden set" below for the dataset and baselines. No FTS baseline exists yet.
+- **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. Implemented in `commands/benchmark/`.
 
 ## Target pipeline
 
@@ -33,7 +33,7 @@ Every phase below ships with a before/after run of the quality benchmark, and th
    - no query whose first relevant result currently ranks in the top 3 falls out of the top k.
    One catastrophic regression outweighs several mild improvements.
 3. **Strata.** Golden-set queries carry a `query_type` label (`exact-term`, `paraphrase`, `mixed`). Success reads as: hybrid ≈ FTS on exact-term, hybrid ≈ semantic on paraphrase, hybrid ≥ both on mixed.
-4. **Results ledger.** Each benchmark run is appended to a dated ledger file kept next to the golden set (outside the repo): commit hash, mode, metrics, latency, notes. Trends stay visible across months.
+4. **Results ledger.** Each benchmark run is appended to a dated ledger file kept next to the golden set (outside the repo): commit hash, mode, metrics, latency, notes. `benchmark quality --record` does this automatically. Trends stay visible across months.
 5. **Failures feed the suite.** Any real-world search that returns bad results becomes a new labeled query in the golden set. The suite gets more trustworthy exactly where it was wrong.
 6. **Escape hatches stay.** `--keyword` and `--semantic` remain after hybrid becomes the default, so a missed regression is recoverable and diagnosable (run the same query in all three modes).
 
@@ -46,7 +46,7 @@ Golden-set files live in the `benchmarks/` subdirectory of the grans data direct
 
 v2 schema: top-level `{description, created, queries}`; each query is
 `{query, query_type, provenance, relevant_meetings, relevant_meeting_ids, rationale}`
-where `query_type` is `exact-term|paraphrase|mixed`, `provenance` is `v1|v2`, `relevant_meetings` holds exact titles (what the current harness matches on), and `relevant_meeting_ids` holds document IDs (what ID-based matching should use). The current harness ignores the extra fields, so v2 runs on the existing binary.
+where `query_type` is `exact-term|paraphrase|mixed`, `provenance` is `v1|v2`, `relevant_meetings` holds exact titles, and `relevant_meeting_ids` holds document IDs. Since Phase 0 (#38) the harness matches by `relevant_meeting_ids` and stratifies by `query_type`; title matching remains only as the fallback for files without IDs (the v1 set).
 
 Semantic baseline on v2 (nomic-embed-text-v1.5, k=10, **title matching**):
 
