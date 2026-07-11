@@ -1,5 +1,6 @@
 pub mod adjust;
 pub mod dates;
+pub mod evidence;
 pub mod filter;
 pub mod fts;
 pub mod fusion;
