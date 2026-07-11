@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::models::SpeakerFilter;
 
@@ -236,6 +236,25 @@ pub enum Commands {
 
 // === Benchmark Subcommands ===
 
+/// Search mode measured by the quality benchmark. New modes appear here as
+/// the hybrid pipeline phases land.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityMode {
+    /// FTS5 keyword search (current production behavior)
+    Fts,
+    /// Semantic search over embeddings
+    Semantic,
+}
+
+impl QualityMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QualityMode::Fts => "fts",
+            QualityMode::Semantic => "semantic",
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum BenchmarkAction {
     /// Benchmark semantic search performance
@@ -261,19 +280,37 @@ pub enum BenchmarkAction {
         min_score: f32,
     },
 
-    /// Run semantic search quality benchmark against test suite
+    /// Run search quality benchmark against a labeled golden set
     Quality {
         /// Path to benchmark JSON file
         #[arg(long)]
         file: std::path::PathBuf,
 
-        /// Number of top results to check for expected matches (precision@k)
+        /// Number of top results scored (hit-rate@k, recall@k, MRR@k)
         #[arg(long, default_value = "10")]
         k: usize,
+
+        /// Search mode to benchmark
+        #[arg(long, value_enum, default_value = "semantic", conflicts_with = "compare")]
+        mode: QualityMode,
+
+        /// Compare modes, e.g. fts,semantic: per-query rank table plus
+        /// win/loss/tie summary
+        #[arg(long, value_enum, value_delimiter = ',')]
+        compare: Vec<QualityMode>,
 
         /// Show detailed results for each query
         #[arg(long)]
         detail: bool,
+
+        /// Append results to the ledger and save per-query output under runs/
+        /// (both in the benchmarks directory next to the golden set)
+        #[arg(long)]
+        record: bool,
+
+        /// Note stored with the ledger entry
+        #[arg(long, requires = "record")]
+        note: Option<String>,
     },
 }
 
@@ -513,6 +550,63 @@ mod tests {
     #[test]
     fn verify_cli() {
         Cli::command().debug_assert();
+    }
+
+    fn quality_compare(cli: &Cli) -> &[QualityMode] {
+        match &cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Quality { compare, .. },
+            } => compare,
+            _ => panic!("expected benchmark quality subcommand"),
+        }
+    }
+
+    #[test]
+    fn benchmark_quality_compare_accepts_comma_separated_modes() {
+        let cli = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--compare",
+            "fts,semantic",
+        ])
+        .unwrap();
+        assert_eq!(
+            quality_compare(&cli),
+            &[QualityMode::Fts, QualityMode::Semantic]
+        );
+    }
+
+    #[test]
+    fn benchmark_quality_mode_conflicts_with_compare() {
+        let result = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--mode",
+            "fts",
+            "--compare",
+            "fts,semantic",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn benchmark_quality_note_requires_record() {
+        let result = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--note",
+            "some note",
+        ]);
+        assert!(result.is_err());
     }
 
     fn transcripts_action(cli: &Cli) -> &SyncAction {

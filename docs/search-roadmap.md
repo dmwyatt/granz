@@ -7,7 +7,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 - **Keyword search**: FTS5 `MATCH` used as a boolean filter; results ordered by `created_at DESC`. No relevance ranking. Additionally, `sanitize_fts_query` wraps the whole query in double quotes, which FTS5 interprets as a phrase query: multi-word searches only match the words adjacent and in order, not AND semantics.
 - **Semantic search** (`--semantic`): nomic-embed-text-v1.5 (768d) via fastembed, brute-force cosine over in-memory vectors, `min_score` cutoff. Chunkers for transcripts (adaptive window), panels (section), notes (paragraph).
 - The two modes are mutually exclusive; `commands/search.rs` dispatches to one or the other.
-- **Evaluation**: `grans benchmark quality --file <golden-set.json>` scores the semantic pipeline only (hardcoded in `commands/benchmark.rs`) and matches results to labels by exact title. See "Golden set" below for the dataset and baselines. No FTS baseline exists yet.
+- **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. Implemented in `commands/benchmark/`.
 
 ## Target pipeline
 
@@ -33,7 +33,7 @@ Every phase below ships with a before/after run of the quality benchmark, and th
    - no query whose first relevant result currently ranks in the top 3 falls out of the top k.
    One catastrophic regression outweighs several mild improvements.
 3. **Strata.** Golden-set queries carry a `query_type` label (`exact-term`, `paraphrase`, `mixed`). Success reads as: hybrid ≈ FTS on exact-term, hybrid ≈ semantic on paraphrase, hybrid ≥ both on mixed.
-4. **Results ledger.** Each benchmark run is appended to a dated ledger file kept next to the golden set (outside the repo): commit hash, mode, metrics, latency, notes. Trends stay visible across months.
+4. **Results ledger.** Each benchmark run is appended to a dated ledger file kept next to the golden set (outside the repo): commit hash, mode, metrics, latency, notes. `benchmark quality --record` does this automatically. Trends stay visible across months.
 5. **Failures feed the suite.** Any real-world search that returns bad results becomes a new labeled query in the golden set. The suite gets more trustworthy exactly where it was wrong.
 6. **Escape hatches stay.** `--keyword` and `--semantic` remain after hybrid becomes the default, so a missed regression is recoverable and diagnosable (run the same query in all three modes).
 
@@ -46,24 +46,24 @@ Golden-set files live in the `benchmarks/` subdirectory of the grans data direct
 
 v2 schema: top-level `{description, created, queries}`; each query is
 `{query, query_type, provenance, relevant_meetings, relevant_meeting_ids, rationale}`
-where `query_type` is `exact-term|paraphrase|mixed`, `provenance` is `v1|v2`, `relevant_meetings` holds exact titles (what the current harness matches on), and `relevant_meeting_ids` holds document IDs (what ID-based matching should use). The current harness ignores the extra fields, so v2 runs on the existing binary.
+where `query_type` is `exact-term|paraphrase|mixed`, `provenance` is `v1|v2`, `relevant_meetings` holds exact titles, and `relevant_meeting_ids` holds document IDs. Since Phase 0 (#38) the harness matches by `relevant_meeting_ids` and stratifies by `query_type`; title matching remains only as the fallback for files without IDs (the v1 set).
 
-Semantic baseline on v2 (nomic-embed-text-v1.5, k=10, **title matching**):
+Phase 0 baselines on v2 (2026-07-10, k=10, **ID matching**, commit 046d6d6):
 
-| Stratum | n | hit-rate@10 | MRR |
-|---|---|---|---|
-| exact-term | 12 | 0.92 | 0.81 |
-| mixed | 43 | 0.86 | 0.77 |
-| paraphrase | 38 | 0.79 | 0.59 |
-| overall | 93 | 0.84 | 0.70 |
+| Mode | hit-rate@10 | recall@10 | MRR@10 | avg latency |
+|---|---|---|---|---|
+| fts | 0.05 | 0.03 | 0.04 | ~5 ms |
+| semantic | 0.86 | 0.76 | 0.72 | ~58 ms |
 
-(v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55.)
+Semantic per stratum (hit-rate / MRR): exact-term 0.92 / 0.81, mixed 0.86 / 0.77, paraphrase 0.84 / 0.64. FTS beats semantic on best rank for 1 of 93 queries (90 losses, 2 ties); its collapse outside exact-term is the phrase-quoting bug plus recency-only ordering, which Phase 1 addresses. Full per-stratum metrics for both modes are in the ledger.
+
+(v1-file baseline for reference: hit-rate@10 ~73%, MRR ~0.55, title matching.)
 
 Caveats a maintainer must know:
 
-- These numbers were measured with title matching, which over-credits recurring-title meetings. After switching to ID-based matching (Phase 0), re-record the baseline; do not compare ID-matched numbers against this table.
+- Ledger entries recorded before 2026-07-10 used title matching, which over-credits recurring-title meetings; do not compare them against ID-matched numbers.
 - `query_type` labels were assigned relative to the current phrase-matching keyword behavior: several queries were demoted from exact-term to mixed only because the full query fails as a phrase. After Phase 1 lands implicit-AND semantics, re-audit the strata; the exact-term stratum (n=12) is currently thin and noisy.
-- For stable numbers across syncs, benchmark against a frozen copy of the database via the global `--db` flag rather than the live one.
+- For stable numbers across syncs, benchmark against the frozen snapshot rather than the live database: `grans --db <benchmarks-dir>/grans-snapshot-2026-07-09.db benchmark quality ...`. The snapshot is byte-identical to the state the Phase 0 baselines were recorded against (872 docs, 33,510 chunks); the live database drifts with every `grans sync`, which invalidates per-query comparison against earlier ledger entries.
 - Open review items: the 11 v1 queries' `query_type` values were hand-assigned and unreviewed, and two v1 queries ("AI phone agent...", "changing an intermittent caregiving leave...") had their ID labels expanded across recurring-title instances that may over-include.
 
 ## Work tracking

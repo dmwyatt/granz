@@ -84,7 +84,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 **Admin Commands** (maintenance):
 - `admin db` - Database management (clear, info, list)
 - `admin token` - Print the current Granola API token
-- `benchmark quality` - Measure semantic search quality against a test suite
+- `benchmark quality` - Measure search quality (FTS or semantic) against a labeled test suite
 
 ### Sync
 
@@ -542,42 +542,57 @@ grans update --check
 
 ### Benchmark Quality
 
-Measure semantic search quality against a suite of queries with known expected results. The suite is a JSON file you author, since the expected results are the exact titles of meetings in your own database:
+Measure search quality against a suite of queries with known expected results. The suite is a JSON file you author against your own database:
 
 ```json
 {
-  "description": "My semantic search suite",
+  "description": "My search quality suite",
   "queries": [
     {
       "query": "what did we decide about the API redesign",
+      "query_type": "paraphrase",
       "relevant_meetings": ["Architecture Sync", "API v2 Planning"],
-      "rationale": "Paraphrase query; both meetings covered the decision"
+      "relevant_meeting_ids": ["abc123", "def456"],
+      "rationale": "Both meetings covered the decision"
     }
   ]
 }
 ```
 
-Each query lists the meeting titles that should appear in the results (`relevant_meetings` are matched exactly against titles); `rationale` is a free-text note for your own reference.
+Results are matched to labels by document ID when `relevant_meeting_ids` is present, otherwise by exact title against `relevant_meetings` (ID matching is preferred; recurring meetings often share one title, which over-credits title matching). `query_type` is an optional stratum label (for example `exact-term`, `paraphrase`, `mixed`); when present, the report includes a per-stratum breakdown. `rationale` is a free-text note for your own reference.
 
 ```bash
-# Run benchmark with default settings (precision@10)
+# Score semantic search (the default mode) at k=10
 grans benchmark quality --file my-benchmark.json
 
-# Check top 5 results (precision@5)
+# Score keyword (FTS) search instead
+grans benchmark quality --file my-benchmark.json --mode fts
+
+# Compare modes: per-query rank table plus win/loss/tie summary
+grans benchmark quality --file my-benchmark.json --compare fts,semantic
+
+# Check top 5 results
 grans benchmark quality --file my-benchmark.json --k 5
 
 # Show detailed results for each query
 grans benchmark quality --file my-benchmark.json --detail
+
+# Append the run to the results ledger (ledger.jsonl in the benchmarks
+# directory, with full per-query output under runs/)
+grans benchmark quality --file my-benchmark.json --record --note "baseline"
 ```
 
 The benchmark reports:
-- **Precision@k**: Percentage of queries where an expected meeting appears in the top k results
-- **Mean Reciprocal Rank (MRR)**: Average of 1/rank for found matches (measures how high expected results appear)
+- **hit-rate@k**: Percentage of queries where an expected meeting appears in the top k results
+- **recall@k**: Fraction of each query's expected meetings found in the top k, averaged over queries
+- **MRR@k**: Average of 1/rank of the first relevant result (0 when it falls outside the top k)
+- **Latency**: Average and median per-query search time for the mode
 
 This is useful for:
+- Comparing keyword and semantic retrieval on the same suite
 - Testing chunking strategy changes
 - Evaluating embedding model updates
-- Comparing semantic search performance across database versions
+- Comparing search performance across database versions
 
 Use the `--db` flag to benchmark against a different database file without affecting your main database:
 

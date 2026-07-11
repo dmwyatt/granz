@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     // Benchmark command
     if let Commands::Benchmark { action } = &cli.command {
         let conn = get_connection(cli.db.as_deref())?;
-        commands::benchmark::run(&conn, action, ctx.output_mode)?;
+        commands::benchmark::run(&conn, action, cli.db.as_deref(), ctx.output_mode)?;
         return Ok(());
     }
 
