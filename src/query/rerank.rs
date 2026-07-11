@@ -2,9 +2,10 @@
 //!
 //! Takes the top fused candidates from [`crate::query::hybrid`], builds a
 //! (title + best chunk) passage per document, and reorders them by
-//! cross-encoder relevance blended with the RRF fusion prior (see
-//! [`FUSION_BLEND_WEIGHT`]). The reranker probability is the user-facing
-//! score for hybrid results; the blend affects ordering only.
+//! cross-encoder relevance plus the ordering adjustments in
+//! [`crate::query::adjust`] (RRF fusion prior, title-match boost). The
+//! reranker probability is the user-facing score for hybrid results; the
+//! adjustments affect ordering only.
 
 use std::collections::HashMap;
 
@@ -13,21 +14,12 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::embed::rerank::Reranker;
+use crate::query::adjust::{self, RankingConfig, RankingContext};
 use crate::query::hybrid::HybridRanking;
 
 /// How many top fused candidates the reranker scores. Documents fused
 /// below this cutoff are dropped from reranked results.
 pub const RERANK_POOL: usize = 50;
-
-/// Weight of the RRF fusion score in the final ranking, blended as
-/// `rerank_score + FUSION_BLEND_WEIGHT * fused_score`. RRF scores top out
-/// near 2/(60+1), so 30 scales the prior to roughly the cross-encoder's
-/// [0, 1] range. Without the prior, queries where the cross-encoder is
-/// unconfident (max score well under 0.8) get noise-dominated orderings
-/// that can bury documents fusion ranked highly; the sweep on the 93-query
-/// golden set picked 30 (hit-rate@10 0.935, MRR@10 0.804, no fusion top-3
-/// document leaving the top 10).
-pub const FUSION_BLEND_WEIGHT: f32 = 30.0;
 
 /// A reranked document with its relevance score.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,8 +29,10 @@ pub struct RerankedDoc {
 }
 
 /// One reranked candidate with the components that produced its position:
-/// where fusion placed it, its RRF score, and the passage the cross-encoder
-/// judged. Serialized by the benchmark's --dump-candidates output.
+/// where fusion placed it, its RRF score, the passage the cross-encoder
+/// judged, and the document metadata the ranking adjustments consume.
+/// Serialized by the benchmark's --dump-candidates output; title and
+/// created_at make dumps self-contained for offline ranking experiments.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RerankCandidate {
     pub document_id: String,
@@ -47,16 +41,10 @@ pub struct RerankCandidate {
     /// RRF score from fusion.
     pub fused_score: f64,
     pub passage: String,
+    pub title: Option<String>,
+    /// RFC3339 timestamp from documents.created_at.
+    pub created_at: Option<String>,
     pub rerank_score: f32,
-}
-
-impl RerankCandidate {
-    /// The ranking score: cross-encoder probability plus the weighted
-    /// fusion prior. Ordering only; the user-facing score stays
-    /// [`RerankCandidate::rerank_score`].
-    pub fn blended_score(&self) -> f32 {
-        self.rerank_score + FUSION_BLEND_WEIGHT * self.fused_score as f32
-    }
 }
 
 /// Build the passage the reranker judges for one document: the title and
@@ -71,20 +59,24 @@ fn build_passage(title: Option<&str>, best_chunk: Option<&str>) -> String {
 }
 
 /// Rerank the top [`RERANK_POOL`] fused candidates of a hybrid ranking,
-/// keeping each candidate's fusion components: fetch titles, build
-/// passages, score with the cross-encoder. Sorted best-first by blended
-/// score; ties keep the fused order.
+/// keeping each candidate's fusion components: fetch document metadata,
+/// build passages, score with the cross-encoder. Sorted best-first by the
+/// adjusted ordering score; ties keep the fused order.
 pub fn rerank_hybrid_detailed(
     conn: &Connection,
     reranker: &dyn Reranker,
     query: &str,
     ranking: &HybridRanking,
+    ctx: &RankingContext,
+    cfg: &RankingConfig,
 ) -> Result<Vec<RerankCandidate>> {
     let pool = &ranking.fused[..ranking.fused.len().min(RERANK_POOL)];
     let pool_ids: Vec<String> = pool.iter().map(|d| d.document_id.clone()).collect();
     let docs = crate::db::meetings::get_meetings_by_ids(conn, &pool_ids)?;
-    let titles: HashMap<String, Option<String>> =
-        docs.into_iter().filter_map(|doc| doc.id.map(|id| (id, doc.title))).collect();
+    let meta: HashMap<String, (Option<String>, Option<String>)> = docs
+        .into_iter()
+        .filter_map(|doc| doc.id.map(|id| (id, (doc.title, doc.created_at))))
+        .collect();
 
     // Candidates are built in fused order so the stable sort below keeps
     // that order for ties; documents missing from the db drop out.
@@ -92,7 +84,7 @@ pub fn rerank_hybrid_detailed(
         .iter()
         .enumerate()
         .filter_map(|(i, fused)| {
-            let title = titles.get(&fused.document_id)?;
+            let (title, created_at) = meta.get(&fused.document_id)?;
             Some(RerankCandidate {
                 document_id: fused.document_id.clone(),
                 fused_rank: i + 1,
@@ -101,6 +93,8 @@ pub fn rerank_hybrid_detailed(
                     title.as_deref(),
                     ranking.best_chunks.get(&fused.document_id).map(String::as_str),
                 ),
+                title: title.clone(),
+                created_at: created_at.clone(),
                 rerank_score: 0.0,
             })
         })
@@ -111,21 +105,20 @@ pub fn rerank_hybrid_detailed(
     for (candidate, score) in candidates.iter_mut().zip(scores) {
         candidate.rerank_score = score;
     }
-    candidates.sort_by(|a, b| {
-        b.blended_score().partial_cmp(&a.blended_score()).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(candidates)
+    Ok(adjust::sort_candidates(candidates, query, ctx, cfg))
 }
 
 /// Rerank the top [`RERANK_POOL`] fused candidates of a hybrid ranking:
-/// fetch titles, build passages, score with the cross-encoder.
+/// fetch document metadata, build passages, score with the cross-encoder.
 pub fn rerank_hybrid(
     conn: &Connection,
     reranker: &dyn Reranker,
     query: &str,
     ranking: &HybridRanking,
+    ctx: &RankingContext,
+    cfg: &RankingConfig,
 ) -> Result<Vec<RerankedDoc>> {
-    Ok(rerank_hybrid_detailed(conn, reranker, query, ranking)?
+    Ok(rerank_hybrid_detailed(conn, reranker, query, ranking, ctx, cfg)?
         .into_iter()
         .map(|c| RerankedDoc { document_id: c.document_id, score: c.rerank_score })
         .collect())
@@ -139,6 +132,12 @@ mod tests {
     use crate::query::fusion::FusedDoc;
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// Explicitly boost-free config: these tests pin the fusion-blend
+    /// behavior on its own, independent of the adopted default weights.
+    fn no_boost() -> RankingConfig {
+        RankingConfig { title_boost_weight: 0.0, ..Default::default() }
+    }
 
     #[test]
     fn passage_combines_title_and_chunk() {
@@ -174,7 +173,7 @@ mod tests {
             )]),
         };
 
-        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
         let ids: Vec<&str> = reranked.iter().map(|d| d.document_id.as_str()).collect();
         assert_eq!(ids, vec!["doc-chunk", "doc-title", "doc-none"]);
@@ -205,7 +204,7 @@ mod tests {
         };
 
         let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
         assert_eq!(detailed.len(), 3);
         assert_eq!(detailed[0].document_id, "doc-chunk");
@@ -245,13 +244,73 @@ mod tests {
         };
 
         let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
         // Blends: doc-fused 1 + 30 * 0.1 = 4, doc-deep 2 + 30 * 0 = 2.
         assert_eq!(detailed[0].document_id, "doc-fused");
         assert_eq!(detailed[0].rerank_score, 1.0);
         assert_eq!(detailed[1].document_id, "doc-deep");
         assert_eq!(detailed[1].rerank_score, 2.0);
+    }
+
+    #[test]
+    fn candidates_carry_title_and_created_at() {
+        // The ranking adjustments (and dump self-containment) need each
+        // candidate's title and created_at alongside the passage.
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-1": {"id": "doc-1", "title": "Kumquat sync", "created_at": "2026-01-02T10:00:00Z"}
+            }
+        }));
+        let ranking = HybridRanking { fused: fused(&["doc-1"]), best_chunks: HashMap::new() };
+
+        let detailed =
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+
+        assert_eq!(detailed[0].title.as_deref(), Some("Kumquat sync"));
+        assert_eq!(detailed[0].created_at.as_deref(), Some("2026-01-02T10:00:00Z"));
+    }
+
+    #[test]
+    fn title_boost_flips_close_call_and_keeps_user_score() {
+        // Both passages contain "kumquat" once via their chunk; doc-titled
+        // also matches via its title (cross-encoder 2 vs 1), but doc-plain's
+        // stronger fusion prior wins without the boost (1 + 30*0.05 = 2.5
+        // vs 2 + 30*0.01 = 2.3). The title boost (signal 1.0, weight 0.25
+        // -> 2.55) flips that, while both user-facing scores stay the raw
+        // cross-encoder outputs.
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-plain": {"id": "doc-plain", "title": "Unrelated retro", "created_at": "2026-01-01T10:00:00Z"},
+                "doc-titled": {"id": "doc-titled", "title": "Kumquat retro", "created_at": "2026-01-02T10:00:00Z"}
+            }
+        }));
+        let ranking = HybridRanking {
+            fused: vec![
+                FusedDoc { document_id: "doc-plain".to_string(), score: 0.05 },
+                FusedDoc { document_id: "doc-titled".to_string(), score: 0.01 },
+            ],
+            best_chunks: HashMap::from([
+                ("doc-plain".to_string(), "kumquat".to_string()),
+                ("doc-titled".to_string(), "kumquat".to_string()),
+            ]),
+        };
+        let ctx = RankingContext::default();
+
+        let without = rerank_hybrid_detailed(
+            &conn, &MockReranker, "kumquat", &ranking, &ctx, &no_boost(),
+        )
+        .unwrap();
+        assert_eq!(without[0].document_id, "doc-plain");
+
+        let boosted = RankingConfig { title_boost_weight: 0.25, ..Default::default() };
+        let with = rerank_hybrid_detailed(
+            &conn, &MockReranker, "kumquat", &ranking, &ctx, &boosted,
+        )
+        .unwrap();
+        assert_eq!(with[0].document_id, "doc-titled");
+        assert_eq!(with[0].rerank_score, 2.0);
+        assert_eq!(with[1].rerank_score, 1.0);
     }
 
     #[test]
@@ -270,7 +329,7 @@ mod tests {
         };
 
         let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
         let ids: Vec<&str> = detailed.iter().map(|d| d.document_id.as_str()).collect();
         assert_eq!(ids, vec!["doc-first", "doc-second"]);
@@ -284,7 +343,7 @@ mod tests {
         let ranking = HybridRanking { fused: Vec::new(), best_chunks: HashMap::new() };
 
         let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
         assert!(detailed.is_empty());
     }
@@ -310,7 +369,7 @@ mod tests {
             best_chunks: HashMap::from([("doc-59".to_string(), "kumquat".to_string())]),
         };
 
-        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
         assert_eq!(reranked.len(), RERANK_POOL);
         assert!(reranked.iter().all(|d| d.document_id != "doc-59"));

@@ -357,6 +357,11 @@ pub enum BenchmarkAction {
         /// (rerank modes only)
         #[arg(long, value_name = "PATH", conflicts_with = "compare")]
         dump_candidates: Option<std::path::PathBuf>,
+
+        /// Experiment knob: title-match boost weight for rerank modes,
+        /// overriding the adopted default (0 disables the boost)
+        #[arg(long, hide = true, value_name = "W")]
+        title_boost_weight: Option<f32>,
     },
 }
 
@@ -662,6 +667,32 @@ mod tests {
     fn embed_overlap_mode_rejects_unknown_value() {
         let result = Cli::try_parse_from(["grans", "embed", "--overlap-mode", "bogus"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn benchmark_quality_title_boost_weight_parses_and_defaults_to_none() {
+        let cli = Cli::try_parse_from([
+            "grans", "benchmark", "quality", "--file", "golden.json",
+        ])
+        .unwrap();
+        let Commands::Benchmark { action: BenchmarkAction::Quality { title_boost_weight, .. } } =
+            &cli.command
+        else {
+            panic!("expected benchmark quality subcommand");
+        };
+        assert_eq!(*title_boost_weight, None);
+
+        let cli = Cli::try_parse_from([
+            "grans", "benchmark", "quality", "--file", "golden.json",
+            "--title-boost-weight", "0.3",
+        ])
+        .unwrap();
+        let Commands::Benchmark { action: BenchmarkAction::Quality { title_boost_weight, .. } } =
+            &cli.command
+        else {
+            panic!("expected benchmark quality subcommand");
+        };
+        assert_eq!(*title_boost_weight, Some(0.3));
     }
 
     #[test]

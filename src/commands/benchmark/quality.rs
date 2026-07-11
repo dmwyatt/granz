@@ -19,6 +19,7 @@ use super::perf::percentile;
 use super::retriever::Retriever;
 use crate::cli::args::QualityMode;
 use crate::output::format::OutputMode;
+use crate::query::adjust::RankingConfig;
 
 /// CLI arguments for the quality benchmark.
 pub struct QualityArgs<'a> {
@@ -33,6 +34,9 @@ pub struct QualityArgs<'a> {
     pub db: Option<&'a Path>,
     /// Write per-query rerank candidates as JSONL here, when given.
     pub dump_candidates: Option<&'a Path>,
+    /// Ranking adjustment weights (defaults with any experiment-flag
+    /// overrides applied).
+    pub ranking: RankingConfig,
 }
 
 /// A single test query from the benchmark file.
@@ -164,7 +168,7 @@ pub(super) fn run_quality_benchmark(
 
     let mut runs = Vec::with_capacity(modes.len());
     for mode in modes {
-        let retriever = Retriever::build(mode, conn)?;
+        let retriever = Retriever::build(mode, conn, args.ranking)?;
         runs.push(run_queries(
             |q| match dump.as_mut() {
                 Some(writer) => {
@@ -224,13 +228,14 @@ fn record_runs(runs: &[ModeRun], args: &QualityArgs) -> Result<()> {
         None => crate::db::connection::default_db_path()?.display().to_string(),
     };
 
+    let note = ranking_note(&args.ranking, args.note);
     let ctx = super::ledger::RecordContext {
         benchmarks_dir: &benchmarks_dir,
         date: &date,
         set: &set,
         binary: &binary,
         db: &db,
-        note: args.note,
+        note: note.as_deref().or(args.note),
     };
     for run in runs {
         let run_path = super::ledger::record_run(&ctx, run)?;
@@ -241,6 +246,20 @@ fn record_runs(runs: &[ModeRun], args: &QualityArgs) -> Result<()> {
         benchmarks_dir.join("ledger.jsonl").display()
     );
     Ok(())
+}
+
+/// Ledger note with non-default ranking weights appended, so recorded
+/// override runs stay distinguishable from default runs. None when the
+/// weights are the defaults (the caller keeps the plain note).
+fn ranking_note(ranking: &RankingConfig, note: Option<&str>) -> Option<String> {
+    if ranking.title_boost_weight == RankingConfig::default().title_boost_weight {
+        return None;
+    }
+    let tag = format!("title-boost-weight={}", ranking.title_boost_weight);
+    Some(match note {
+        Some(note) => format!("{note} [{tag}]"),
+        None => tag,
+    })
 }
 
 /// Parse and validate a benchmark file's contents.
@@ -462,6 +481,23 @@ mod tests {
             }
         ]
     }"#;
+
+    #[test]
+    fn ranking_note_tags_non_default_weights() {
+        let default = RankingConfig::default();
+        assert_eq!(ranking_note(&default, None), None);
+        assert_eq!(ranking_note(&default, Some("phase5")), None);
+
+        let overridden = RankingConfig { title_boost_weight: 0.5, ..Default::default() };
+        assert_eq!(
+            ranking_note(&overridden, None).as_deref(),
+            Some("title-boost-weight=0.5")
+        );
+        assert_eq!(
+            ranking_note(&overridden, Some("phase5")).as_deref(),
+            Some("phase5 [title-boost-weight=0.5]")
+        );
+    }
 
     #[test]
     fn parse_v2_file_prefers_id_matching() {

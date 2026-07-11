@@ -47,6 +47,7 @@ pub fn run(
             record,
             note,
             dump_candidates,
+            title_boost_weight,
         } => {
             let args = quality::QualityArgs {
                 file,
@@ -58,6 +59,8 @@ pub fn run(
                 note: note.as_deref(),
                 db: db_path,
                 dump_candidates: dump_candidates.as_deref(),
+                ranking: crate::query::adjust::RankingConfig::default()
+                    .with_overrides(*title_boost_weight),
             };
             quality::run_quality_benchmark(conn, &args, output_mode)
         }

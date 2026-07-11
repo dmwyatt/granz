@@ -1,10 +1,11 @@
 //! --dump-candidates output: per-query rerank candidates as JSONL.
 //!
 //! One line per query: the query text and every reranked candidate with its
-//! fusion components (fused rank, RRF score, passage, rerank score). Used
-//! for offline ranking experiments (e.g. blend-weight sweeps). Dumps carry
-//! real meeting content, so they belong outside the repo, alongside the
-//! golden set.
+//! fusion components (fused rank, RRF score, passage, rerank score) plus the
+//! document's title and created_at, so dumps are self-contained inputs for
+//! offline ranking experiments (e.g. blend-weight or boost sweeps). Dumps
+//! carry real meeting content, so they belong outside the repo, alongside
+//! the golden set.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -60,6 +61,8 @@ mod tests {
             fused_rank,
             fused_score: 0.016,
             passage: format!("Title {id}\n\nchunk text"),
+            title: Some(format!("Title {id}")),
+            created_at: Some("2026-01-02T10:00:00Z".to_string()),
             rerank_score: 0.9,
         }
     }
@@ -85,6 +88,8 @@ mod tests {
         assert_eq!(first["candidates"][0]["fused_rank"], 1);
         assert_eq!(first["candidates"][0]["fused_score"], 0.016);
         assert_eq!(first["candidates"][0]["passage"], "Title doc-a\n\nchunk text");
+        assert_eq!(first["candidates"][0]["title"], "Title doc-a");
+        assert_eq!(first["candidates"][0]["created_at"], "2026-01-02T10:00:00Z");
         assert!((first["candidates"][0]["rerank_score"].as_f64().unwrap() - 0.9).abs() < 1e-6);
 
         let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();

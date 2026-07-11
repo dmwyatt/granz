@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -351,13 +353,27 @@ pub fn get_meetings_by_ids(conn: &Connection, ids: &[String]) -> Result<Vec<Docu
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let mut by_id: std::collections::HashMap<String, Document> = rows
+    let mut by_id: HashMap<String, Document> = rows
         .into_iter()
         .map(row_to_document)
         .filter_map(|d| d.id.clone().map(|id| (id, d)))
         .collect();
 
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
+/// Count of non-deleted documents per normalized title, keyed by
+/// `lower(trim(title))`. SQLite's `lower()` is ASCII-only; Rust-side
+/// lookups must normalize with `trim` + `to_ascii_lowercase` to match.
+/// Empty titles carry no series signal and are excluded.
+pub fn title_series_counts(conn: &Connection) -> Result<HashMap<String, u32>> {
+    let mut stmt = conn.prepare(
+        "SELECT lower(trim(title)), COUNT(*) FROM documents
+         WHERE deleted_at IS NULL AND title IS NOT NULL AND trim(title) <> ''
+         GROUP BY lower(trim(title))",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
 fn append_date_filter(
@@ -832,5 +848,32 @@ mod tests {
         // With include_deleted: both returned
         let results = search_meetings(&conn, "AI", true, false, false, false, None, true).unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_title_series_counts_groups_normalized_titles_and_skips_deleted() {
+        let state = serde_json::json!({
+            "documents": {
+                "doc-1": {"id": "doc-1", "title": "Weekly Standup", "created_at": "2026-01-05T10:00:00Z"},
+                "doc-2": {"id": "doc-2", "title": "  weekly standup ", "created_at": "2026-01-12T10:00:00Z"},
+                "doc-3": {"id": "doc-3", "title": "Weekly Standup", "created_at": "2026-01-19T10:00:00Z", "deleted_at": "2026-02-01T00:00:00Z"},
+                "doc-4": {"id": "doc-4", "title": "Planning", "created_at": "2026-01-06T10:00:00Z"},
+                "doc-5": {"id": "doc-5", "title": "", "created_at": "2026-01-07T10:00:00Z"}
+            }
+        });
+        let conn = build_test_db(&state);
+
+        let counts = title_series_counts(&conn).unwrap();
+
+        assert_eq!(counts.get("weekly standup"), Some(&2));
+        assert_eq!(counts.get("planning"), Some(&1));
+        // Empty titles carry no series signal and are excluded entirely.
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn test_title_series_counts_empty_db() {
+        let conn = build_test_db(&serde_json::json!({"documents": {}}));
+        assert!(title_series_counts(&conn).unwrap().is_empty());
     }
 }

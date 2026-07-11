@@ -17,6 +17,7 @@ use crate::embed::model::{Embedder, FastEmbedModel};
 use crate::embed::rerank::{FastEmbedReranker, RerankModel, Reranker};
 use crate::embed::search::SemanticSearchResult;
 use crate::embed::{ensure_embeddings, EmbeddingIndex, DEFAULT_BATCH_SIZE};
+use crate::query::adjust::{RankingConfig, RankingContext};
 use crate::query::filter::SearchTarget;
 use crate::query::rerank::RerankCandidate;
 
@@ -38,17 +39,19 @@ pub enum Retriever<'a> {
         embedder: FastEmbedModel,
         index: EmbeddingIndex,
         reranker: Box<FastEmbedReranker>,
+        ctx: RankingContext,
+        cfg: RankingConfig,
     },
 }
 
 impl<'a> Retriever<'a> {
     /// Build the retriever for a mode. For semantic, hybrid, and rerank
-    /// modes, the models and index are loaded once here so per-query
-    /// latency measures search, not one-time setup. The embedding spec
-    /// resolves from the database's stored metadata, so a snapshot
-    /// embedded with a variant scheme is benchmarked as-is instead of
-    /// being silently re-embedded with this binary's defaults.
-    pub fn build(mode: QualityMode, conn: &'a Connection) -> Result<Self> {
+    /// modes, the models, index, and ranking context are loaded once here
+    /// so per-query latency measures search, not one-time setup. The
+    /// embedding spec resolves from the database's stored metadata, so a
+    /// snapshot embedded with a variant scheme is benchmarked as-is
+    /// instead of being silently re-embedded with this binary's defaults.
+    pub fn build(mode: QualityMode, conn: &'a Connection, cfg: RankingConfig) -> Result<Self> {
         match mode {
             QualityMode::Fts => Ok(Retriever::Fts { conn }),
             QualityMode::Semantic => {
@@ -72,7 +75,8 @@ impl<'a> Retriever<'a> {
                     _ => RerankModel::BgeBase,
                 };
                 let reranker = Box::new(FastEmbedReranker::new(model)?);
-                Ok(Retriever::HybridRerank { conn, embedder, index, reranker })
+                let ctx = RankingContext::load(conn)?;
+                Ok(Retriever::HybridRerank { conn, embedder, index, reranker, ctx, cfg })
             }
         }
     }
@@ -88,8 +92,8 @@ impl<'a> Retriever<'a> {
             Retriever::Hybrid { conn, embedder, index } => {
                 retrieve_hybrid(conn, embedder, index, query)
             }
-            Retriever::HybridRerank { conn, embedder, index, reranker } => {
-                retrieve_hybrid_rerank(conn, embedder, index, reranker.as_ref(), query)
+            Retriever::HybridRerank { conn, embedder, index, reranker, ctx, cfg } => {
+                retrieve_hybrid_rerank(conn, embedder, index, reranker.as_ref(), query, ctx, cfg)
             }
         }
     }
@@ -98,9 +102,17 @@ impl<'a> Retriever<'a> {
     /// score) for modes with a rerank stage; `None` for the others.
     pub fn retrieve_detailed(&self, query: &str) -> Result<Option<Vec<RerankCandidate>>> {
         match self {
-            Retriever::HybridRerank { conn, embedder, index, reranker } => Ok(Some(
-                retrieve_hybrid_rerank_detailed(conn, embedder, index, reranker.as_ref(), query)?,
-            )),
+            Retriever::HybridRerank { conn, embedder, index, reranker, ctx, cfg } => {
+                Ok(Some(retrieve_hybrid_rerank_detailed(
+                    conn,
+                    embedder,
+                    index,
+                    reranker.as_ref(),
+                    query,
+                    ctx,
+                    cfg,
+                )?))
+            }
             _ => Ok(None),
         }
     }
@@ -152,11 +164,13 @@ fn retrieve_hybrid_rerank_detailed(
     index: &EmbeddingIndex,
     reranker: &dyn Reranker,
     query: &str,
+    ctx: &RankingContext,
+    cfg: &RankingConfig,
 ) -> Result<Vec<RerankCandidate>> {
     let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
     let ranking =
         crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
-    crate::query::rerank::rerank_hybrid_detailed(conn, reranker, query, &ranking)
+    crate::query::rerank::rerank_hybrid_detailed(conn, reranker, query, &ranking, ctx, cfg)
 }
 
 /// Reranked hybrid retrieval in production result shape (the
@@ -167,8 +181,10 @@ fn retrieve_hybrid_rerank(
     index: &EmbeddingIndex,
     reranker: &dyn Reranker,
     query: &str,
+    ctx: &RankingContext,
+    cfg: &RankingConfig,
 ) -> Result<Vec<RankedDoc>> {
-    Ok(retrieve_hybrid_rerank_detailed(conn, embedder, index, reranker, query)?
+    Ok(retrieve_hybrid_rerank_detailed(conn, embedder, index, reranker, query, ctx, cfg)?
         .into_iter()
         .map(|c| RankedDoc {
             document_id: c.document_id,
@@ -193,6 +209,12 @@ fn to_ranked(results: Vec<SemanticSearchResult>) -> Vec<RankedDoc> {
 mod tests {
     use super::*;
     use crate::db::test_fixtures::{build_test_db, meetings_state};
+
+    /// Boost-free config so these tests pin fusion + cross-encoder
+    /// behavior independent of the adopted default weights.
+    fn no_boost() -> RankingConfig {
+        RankingConfig { title_boost_weight: 0.0, ..Default::default() }
+    }
 
     #[test]
     fn fts_retriever_returns_matching_documents() {
@@ -290,7 +312,7 @@ mod tests {
         let embedder = MockEmbedder { dim: 2, max_length: 512 };
 
         let ranked =
-            retrieve_hybrid_rerank(&conn, &embedder, &index, &MockReranker, "standup").unwrap();
+            retrieve_hybrid_rerank(&conn, &embedder, &index, &MockReranker, "standup", &RankingContext::default(), &no_boost()).unwrap();
 
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].document_id, "doc-1");
@@ -326,7 +348,7 @@ mod tests {
         let embedder = MockEmbedder { dim: 2, max_length: 512 };
 
         let detailed =
-            retrieve_hybrid_rerank_detailed(&conn, &embedder, &index, &MockReranker, "standup")
+            retrieve_hybrid_rerank_detailed(&conn, &embedder, &index, &MockReranker, "standup", &RankingContext::default(), &no_boost())
                 .unwrap();
 
         assert_eq!(detailed.len(), 2);
@@ -359,7 +381,7 @@ mod tests {
         let embedder = MockEmbedder { dim: 2, max_length: 512 };
 
         let ranked =
-            retrieve_hybrid_rerank(&conn, &embedder, &index, &MockReranker, "zebra xylophone")
+            retrieve_hybrid_rerank(&conn, &embedder, &index, &MockReranker, "zebra xylophone", &RankingContext::default(), &no_boost())
                 .unwrap();
 
         assert!(ranked.is_empty());
