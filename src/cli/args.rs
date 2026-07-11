@@ -333,6 +333,12 @@ pub enum BenchmarkAction {
         /// Note stored with the ledger entry
         #[arg(long, requires = "record")]
         note: Option<String>,
+
+        /// Write each query's reranked candidates (fused rank, RRF score,
+        /// passage, rerank score) as JSONL, for offline ranking experiments
+        /// (rerank modes only)
+        #[arg(long, value_name = "PATH", conflicts_with = "compare")]
+        dump_candidates: Option<std::path::PathBuf>,
     },
 }
 
@@ -613,6 +619,22 @@ mod tests {
             "fts",
             "--compare",
             "fts,semantic",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn benchmark_quality_dump_candidates_conflicts_with_compare() {
+        let result = Cli::try_parse_from([
+            "grans",
+            "benchmark",
+            "quality",
+            "--file",
+            "golden.json",
+            "--compare",
+            "rerank-jina,rerank-bge",
+            "--dump-candidates",
+            "dump.jsonl",
         ]);
         assert!(result.is_err());
     }
