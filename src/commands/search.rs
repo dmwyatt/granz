@@ -249,7 +249,9 @@ fn hybrid_search(
     }
 
     let embedder = crate::embed::model::FastEmbedModel::new()?;
-    let index = crate::embed::ensure_embeddings(conn, &embedder, crate::embed::DEFAULT_BATCH_SIZE)?;
+    let spec = crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
+    let index =
+        crate::embed::ensure_embeddings(conn, &embedder, crate::embed::DEFAULT_BATCH_SIZE, &spec)?;
 
     let ranking = crate::query::hybrid::hybrid_ranked(
         conn,
@@ -589,7 +591,10 @@ fn context_window_search(
 /// re-embedding run. Returns false when the user declines (the search
 /// should stop). `yes` skips the prompt.
 fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Result<bool> {
-    let status = crate::embed::get_embedding_status(conn, crate::embed::model::MODEL_NAME)?;
+    // Resolve via the model constant: this path must not load the ONNX
+    // model just to count pending chunks.
+    let spec = crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
+    let status = crate::embed::get_embedding_status(conn, crate::embed::model::MODEL_NAME, &spec)?;
     let needs_full_reembed = status.orphaned_chunks > 0
         || status.legacy_max_length_warning
         || status.model_changed_warning;
