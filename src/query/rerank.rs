@@ -1,0 +1,196 @@
+//! Cross-encoder rerank stage for hybrid search.
+//!
+//! Takes the top fused candidates from [`crate::query::hybrid`], builds a
+//! (title + best chunk) passage per document, and reorders them by
+//! cross-encoder relevance. The reranker score is the user-facing score
+//! for hybrid results.
+
+use anyhow::Result;
+use rusqlite::Connection;
+
+use crate::embed::rerank::Reranker;
+use crate::query::hybrid::HybridRanking;
+
+/// How many top fused candidates the reranker scores. Documents fused
+/// below this cutoff are dropped from reranked results.
+pub const RERANK_POOL: usize = 50;
+
+/// A reranked document with its relevance score.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RerankedDoc {
+    pub document_id: String,
+    pub score: f32,
+}
+
+/// Build the passage the reranker judges for one document: the title and
+/// the best-matching chunk, whichever exist.
+fn build_passage(title: Option<&str>, best_chunk: Option<&str>) -> String {
+    match (title, best_chunk) {
+        (Some(t), Some(c)) => format!("{t}\n\n{c}"),
+        (Some(t), None) => t.to_string(),
+        (None, Some(c)) => c.to_string(),
+        (None, None) => String::new(),
+    }
+}
+
+/// Score `(document_id, passage)` candidates against the query and sort
+/// best-first. Ties keep the candidates' input (fused) order.
+pub fn rerank_candidates(
+    reranker: &dyn Reranker,
+    query: &str,
+    candidates: &[(String, String)],
+) -> Result<Vec<RerankedDoc>> {
+    let passages: Vec<&str> = candidates.iter().map(|(_, p)| p.as_str()).collect();
+    let scores = reranker.rerank(query, &passages)?;
+
+    let mut reranked: Vec<RerankedDoc> = candidates
+        .iter()
+        .zip(scores)
+        .map(|((id, _), score)| RerankedDoc { document_id: id.clone(), score })
+        .collect();
+    // Stable sort: equal scores keep the fused order.
+    reranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(reranked)
+}
+
+/// Rerank the top [`RERANK_POOL`] fused candidates of a hybrid ranking:
+/// fetch titles, build passages, score with the cross-encoder.
+pub fn rerank_hybrid(
+    conn: &Connection,
+    reranker: &dyn Reranker,
+    query: &str,
+    ranking: &HybridRanking,
+) -> Result<Vec<RerankedDoc>> {
+    let pool_ids: Vec<String> = ranking
+        .fused
+        .iter()
+        .take(RERANK_POOL)
+        .map(|d| d.document_id.clone())
+        .collect();
+    let docs = crate::db::meetings::get_meetings_by_ids(conn, &pool_ids)?;
+
+    let candidates: Vec<(String, String)> = docs
+        .into_iter()
+        .filter_map(|doc| doc.id.map(|id| (id, doc.title)))
+        .map(|(id, title)| {
+            let passage =
+                build_passage(title.as_deref(), ranking.best_chunks.get(&id).map(String::as_str));
+            (id, passage)
+        })
+        .collect();
+
+    rerank_candidates(reranker, query, &candidates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_fixtures::build_test_db;
+    use crate::embed::rerank::MockReranker;
+    use crate::query::fusion::FusedDoc;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn passage_combines_title_and_chunk() {
+        assert_eq!(build_passage(Some("Title"), Some("chunk text")), "Title\n\nchunk text");
+        assert_eq!(build_passage(Some("Title"), None), "Title");
+        assert_eq!(build_passage(None, Some("chunk text")), "chunk text");
+        assert_eq!(build_passage(None, None), "");
+    }
+
+    #[test]
+    fn candidates_sort_by_score_descending() {
+        // MockReranker scores by query occurrences: 0, 2, 1.
+        let candidates = vec![
+            ("doc-a".to_string(), "nothing here".to_string()),
+            ("doc-b".to_string(), "kumquat kumquat".to_string()),
+            ("doc-c".to_string(), "kumquat".to_string()),
+        ];
+
+        let reranked = rerank_candidates(&MockReranker, "kumquat", &candidates).unwrap();
+
+        let ids: Vec<&str> = reranked.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-b", "doc-c", "doc-a"]);
+        assert_eq!(reranked[0].score, 2.0);
+        assert_eq!(reranked[2].score, 0.0);
+    }
+
+    #[test]
+    fn tied_candidates_keep_input_order() {
+        let candidates = vec![
+            ("doc-first".to_string(), "kumquat".to_string()),
+            ("doc-second".to_string(), "kumquat".to_string()),
+        ];
+
+        let reranked = rerank_candidates(&MockReranker, "kumquat", &candidates).unwrap();
+
+        let ids: Vec<&str> = reranked.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-first", "doc-second"]);
+    }
+
+    #[test]
+    fn empty_candidates_rerank_to_empty() {
+        let reranked = rerank_candidates(&MockReranker, "kumquat", &[]).unwrap();
+        assert!(reranked.is_empty());
+    }
+
+    fn fused(ids: &[&str]) -> Vec<FusedDoc> {
+        ids.iter()
+            .map(|id| FusedDoc { document_id: id.to_string(), score: 0.0 })
+            .collect()
+    }
+
+    #[test]
+    fn hybrid_rerank_scores_titles_and_chunks() {
+        // doc-chunk matches the query twice via its chunk; doc-title once
+        // via its title; doc-none not at all. Fused order is the reverse
+        // of relevance so reordering is observable.
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-none": {"id": "doc-none", "title": "Unrelated", "created_at": "2026-01-01T10:00:00Z"},
+                "doc-title": {"id": "doc-title", "title": "Kumquat sync", "created_at": "2026-01-02T10:00:00Z"},
+                "doc-chunk": {"id": "doc-chunk", "title": "Planning", "created_at": "2026-01-03T10:00:00Z"}
+            }
+        }));
+        let ranking = HybridRanking {
+            fused: fused(&["doc-none", "doc-title", "doc-chunk"]),
+            best_chunks: HashMap::from([(
+                "doc-chunk".to_string(),
+                "kumquat kumquat".to_string(),
+            )]),
+        };
+
+        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+
+        let ids: Vec<&str> = reranked.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-chunk", "doc-title", "doc-none"]);
+    }
+
+    #[test]
+    fn hybrid_rerank_considers_only_the_pool() {
+        // 60 fused documents; the strongest match sits below the pool
+        // cutoff, so it must not appear in the reranked output.
+        let mut docs = serde_json::Map::new();
+        for i in 0..60 {
+            let id = format!("doc-{i:02}");
+            docs.insert(
+                id.clone(),
+                json!({"id": id, "title": format!("Meeting {i}"), "created_at": "2026-01-01T10:00:00Z"}),
+            );
+        }
+        let conn = build_test_db(&json!({ "documents": docs }));
+
+        let ids: Vec<String> = (0..60).map(|i| format!("doc-{i:02}")).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let ranking = HybridRanking {
+            fused: fused(&id_refs),
+            best_chunks: HashMap::from([("doc-59".to_string(), "kumquat".to_string())]),
+        };
+
+        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking).unwrap();
+
+        assert_eq!(reranked.len(), RERANK_POOL);
+        assert!(reranked.iter().all(|d| d.document_id != "doc-59"));
+    }
+}
