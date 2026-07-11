@@ -4,7 +4,8 @@
 //! scoring (metrics.rs) applies k. Lists reflect current production
 //! behavior for the mode: FTS is ranked by bm25 with a recency tiebreak,
 //! semantic by best-chunk cosine score, hybrid by RRF over both, and the
-//! rerank modes by cross-encoder score over the top of the fused pool.
+//! rerank modes by cross-encoder score blended with the fusion prior over
+//! the top of the fused pool.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -16,6 +17,7 @@ use crate::embed::rerank::{FastEmbedReranker, RerankModel, Reranker};
 use crate::embed::search::SemanticSearchResult;
 use crate::embed::{ensure_embeddings, EmbeddingIndex, DEFAULT_BATCH_SIZE};
 use crate::query::filter::SearchTarget;
+use crate::query::rerank::RerankCandidate;
 
 pub enum Retriever<'a> {
     Fts {
@@ -84,6 +86,17 @@ impl<'a> Retriever<'a> {
             }
         }
     }
+
+    /// Per-candidate rerank detail (fused rank, RRF score, passage, rerank
+    /// score) for modes with a rerank stage; `None` for the others.
+    pub fn retrieve_detailed(&self, query: &str) -> Result<Option<Vec<RerankCandidate>>> {
+        match self {
+            Retriever::HybridRerank { conn, embedder, index, reranker } => Ok(Some(
+                retrieve_hybrid_rerank_detailed(conn, embedder, index, reranker.as_ref(), query)?,
+            )),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// FTS keyword search over the same targets `grans search` uses by default
@@ -123,8 +136,23 @@ fn retrieve_hybrid(
         .collect())
 }
 
-/// Reranked hybrid retrieval over the same default targets: production
-/// fusion, then the cross-encoder reorders the top candidates (the
+/// Reranked hybrid retrieval over the same default targets, with each
+/// candidate's fusion components: production fusion, then the
+/// cross-encoder scores the top candidates.
+fn retrieve_hybrid_rerank_detailed(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    index: &EmbeddingIndex,
+    reranker: &dyn Reranker,
+    query: &str,
+) -> Result<Vec<RerankCandidate>> {
+    let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
+    let ranking =
+        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
+    crate::query::rerank::rerank_hybrid_detailed(conn, reranker, query, &ranking)
+}
+
+/// Reranked hybrid retrieval in production result shape (the
 /// `grans search --hybrid` default path).
 fn retrieve_hybrid_rerank(
     conn: &Connection,
@@ -133,15 +161,11 @@ fn retrieve_hybrid_rerank(
     reranker: &dyn Reranker,
     query: &str,
 ) -> Result<Vec<RankedDoc>> {
-    let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
-    let ranking =
-        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
-    let reranked = crate::query::rerank::rerank_hybrid(conn, reranker, query, &ranking)?;
-    Ok(reranked
+    Ok(retrieve_hybrid_rerank_detailed(conn, embedder, index, reranker, query)?
         .into_iter()
-        .map(|d| RankedDoc {
-            document_id: d.document_id,
-            score: Some(d.score),
+        .map(|c| RankedDoc {
+            document_id: c.document_id,
+            score: Some(c.rerank_score),
         })
         .collect())
 }
@@ -266,6 +290,56 @@ mod tests {
         assert_eq!(ranked[0].score, Some(3.0));
         assert_eq!(ranked[1].document_id, "doc-2");
         assert_eq!(ranked[1].score, Some(1.0));
+    }
+
+    #[test]
+    fn hybrid_rerank_detailed_carries_fusion_components() {
+        use crate::embed::model::MockEmbedder;
+        use crate::embed::rerank::MockReranker;
+        use crate::embed::store::StoredVector;
+
+        // Same setup as the reorder test: fusion puts doc-2 first, the
+        // cross-encoder reverses that, so doc-1 must carry fused_rank 2.
+        let conn = build_test_db(&meetings_state());
+        let stored = |doc_id: &str, text: &str, vector: Vec<f32>| StoredVector {
+            chunk_id: 0,
+            document_id: doc_id.to_string(),
+            source_type: "transcript_window".to_string(),
+            text: text.to_string(),
+            vector,
+            metadata_json: None,
+        };
+        let index = EmbeddingIndex {
+            vectors: vec![
+                stored("doc-1", "standup standup standup", vec![1.0, 0.0]),
+                stored("doc-2", "planning", vec![0.0, 1.0]),
+            ],
+            stats: None,
+        };
+        let embedder = MockEmbedder { dim: 2, max_length: 512 };
+
+        let detailed =
+            retrieve_hybrid_rerank_detailed(&conn, &embedder, &index, &MockReranker, "standup")
+                .unwrap();
+
+        assert_eq!(detailed.len(), 2);
+        assert_eq!(detailed[0].document_id, "doc-1");
+        assert_eq!(detailed[0].fused_rank, 2);
+        assert_eq!(detailed[0].rerank_score, 3.0);
+        assert!(detailed[0].fused_score > 0.0);
+        assert!(detailed[0].passage.contains("standup standup standup"));
+        assert_eq!(detailed[1].document_id, "doc-2");
+        assert_eq!(detailed[1].fused_rank, 1);
+    }
+
+    #[test]
+    fn non_rerank_retriever_has_no_candidate_detail() {
+        let conn = build_test_db(&meetings_state());
+        let retriever = Retriever::Fts { conn: &conn };
+
+        let detailed = retriever.retrieve_detailed("machine learning").unwrap();
+
+        assert!(detailed.is_none());
     }
 
     #[test]

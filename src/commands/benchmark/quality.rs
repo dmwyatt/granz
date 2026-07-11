@@ -31,6 +31,8 @@ pub struct QualityArgs<'a> {
     pub note: Option<&'a str>,
     /// --db override, when given; the default database path otherwise applies.
     pub db: Option<&'a Path>,
+    /// Write per-query rerank candidates as JSONL here, when given.
+    pub dump_candidates: Option<&'a Path>,
 }
 
 /// A single test query from the benchmark file.
@@ -152,16 +154,44 @@ pub(super) fn run_quality_benchmark(
     let title_map = build_title_map(conn)?;
     let modes = resolve_modes(args.mode, args.compare)?;
 
+    let mut dump = match args.dump_candidates {
+        Some(path) => {
+            ensure_dump_modes(&modes)?;
+            Some(super::dump::CandidateDumpWriter::create(path)?)
+        }
+        None => None,
+    };
+
     let mut runs = Vec::with_capacity(modes.len());
     for mode in modes {
         let retriever = Retriever::build(mode, conn)?;
         runs.push(run_queries(
-            |q| retriever.retrieve(q),
+            |q| match dump.as_mut() {
+                Some(writer) => {
+                    let detailed = retriever
+                        .retrieve_detailed(q)?
+                        .context("rerank modes always produce candidate detail")?;
+                    writer.write_query(q, &detailed)?;
+                    Ok(detailed
+                        .into_iter()
+                        .map(|c| RankedDoc {
+                            document_id: c.document_id,
+                            score: Some(c.rerank_score),
+                        })
+                        .collect())
+                }
+                None => retriever.retrieve(q),
+            },
             &queries,
             &title_map,
             mode,
             args.k,
         )?);
+    }
+
+    if let (Some(writer), Some(path)) = (dump.take(), args.dump_candidates) {
+        writer.finish()?;
+        eprintln!("Candidate dump written: {}", path.display());
     }
 
     let comparisons = pairwise_comparisons(&runs);
@@ -235,14 +265,14 @@ fn parse_benchmark(content: &str) -> Result<Vec<BenchmarkQuery>> {
 
 /// Run every query through one retrieval function and score the results.
 fn run_queries<F>(
-    retrieve: F,
+    mut retrieve: F,
     queries: &[BenchmarkQuery],
     title_map: &HashMap<String, String>,
     mode: QualityMode,
     k: usize,
 ) -> Result<ModeRun>
 where
-    F: Fn(&str) -> Result<Vec<RankedDoc>>,
+    F: FnMut(&str) -> Result<Vec<RankedDoc>>,
 {
     let mut outcomes = Vec::with_capacity(queries.len());
     for bq in queries {
@@ -324,6 +354,20 @@ fn latency_stats(outcomes: &[QueryOutcome]) -> LatencyStats {
         avg_ms: latencies.iter().sum::<f64>() / latencies.len() as f64,
         p50_ms: percentile(&latencies, 50.0),
     }
+}
+
+/// --dump-candidates needs per-candidate rerank detail, which only the
+/// rerank modes produce.
+fn ensure_dump_modes(modes: &[QualityMode]) -> Result<()> {
+    for mode in modes {
+        if !matches!(mode, QualityMode::RerankJina | QualityMode::RerankBge) {
+            bail!(
+                "--dump-candidates requires a rerank mode, got --mode {}",
+                mode.as_str()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The modes to run: the --compare list when given (validated), else the
@@ -461,6 +505,20 @@ mod tests {
         assert_eq!(matching_summary(&["id", "id"]), "id");
         assert_eq!(matching_summary(&["title"]), "title");
         assert_eq!(matching_summary(&["id", "title"]), "mixed");
+    }
+
+    #[test]
+    fn dump_modes_accepts_rerank_modes() {
+        assert!(ensure_dump_modes(&[QualityMode::RerankJina]).is_ok());
+        assert!(ensure_dump_modes(&[QualityMode::RerankBge]).is_ok());
+    }
+
+    #[test]
+    fn dump_modes_rejects_modes_without_rerank_detail() {
+        for mode in [QualityMode::Fts, QualityMode::Semantic, QualityMode::Hybrid] {
+            let err = ensure_dump_modes(&[mode]).unwrap_err();
+            assert!(err.to_string().contains("requires a rerank mode"));
+        }
     }
 
     #[test]

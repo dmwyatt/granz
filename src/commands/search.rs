@@ -50,7 +50,7 @@ impl SearchMode {
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         hybrid: bool,
-        rerank: bool,
+        fast: bool,
         min_score: Option<f32>,
         semantic: bool,
         context: usize,
@@ -64,7 +64,7 @@ impl SearchMode {
             SearchMode::Hybrid {
                 targets: SearchTarget::parse_list(in_targets),
                 meeting_filter: meeting_filter.map(String::from),
-                rerank,
+                rerank: !fast,
                 min_score,
                 yes,
                 limit,
@@ -228,7 +228,8 @@ fn keyword_search(
 }
 
 /// Run keyword and semantic retrieval, fuse the rankings, rerank the top
-/// candidates when requested, and display the resulting meetings.
+/// candidates (unless skipped via --fast), and display the resulting
+/// meetings.
 #[allow(clippy::too_many_arguments)]
 fn hybrid_search(
     conn: &Connection,
@@ -866,7 +867,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_cli_args_hybrid_takes_priority_without_rerank_by_default() {
+    fn from_cli_args_hybrid_takes_priority_and_reranks_by_default() {
         let mode = SearchMode::from_cli_args(
             true, false, None, true, 5, "titles,notes", Some("standup"), None, true, 10,
         );
@@ -883,7 +884,7 @@ mod tests {
                 assert!(targets.contains(&SearchTarget::Titles));
                 assert!(targets.contains(&SearchTarget::Notes));
                 assert_eq!(meeting_filter.as_deref(), Some("standup"));
-                assert!(!rerank);
+                assert!(rerank);
                 assert_eq!(min_score, None);
                 assert!(yes);
                 assert_eq!(limit, 10);
@@ -893,11 +894,11 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_args_rerank_opts_in() {
+    fn from_cli_args_fast_skips_rerank() {
         let mode =
             SearchMode::from_cli_args(true, true, None, false, 0, "titles", None, None, false, 10);
         match mode {
-            SearchMode::Hybrid { rerank, .. } => assert!(rerank),
+            SearchMode::Hybrid { rerank, .. } => assert!(!rerank),
             _ => panic!("Expected Hybrid variant"),
         }
     }
@@ -905,7 +906,7 @@ mod tests {
     #[test]
     fn from_cli_args_min_score_threads_to_hybrid() {
         let mode = SearchMode::from_cli_args(
-            true, true, Some(0.4), false, 0, "titles", None, None, false, 10,
+            true, false, Some(0.4), false, 0, "titles", None, None, false, 10,
         );
         match mode {
             SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),

@@ -1,5 +1,6 @@
 //! Benchmark commands: search performance and quality measurement.
 
+mod dump;
 mod ledger;
 mod metrics;
 mod perf;
@@ -45,6 +46,7 @@ pub fn run(
             detail,
             record,
             note,
+            dump_candidates,
         } => {
             let args = quality::QualityArgs {
                 file,
@@ -55,6 +57,7 @@ pub fn run(
                 record: *record,
                 note: note.as_deref(),
                 db: db_path,
+                dump_candidates: dump_candidates.as_deref(),
             };
             quality::run_quality_benchmark(conn, &args, output_mode)
         }
