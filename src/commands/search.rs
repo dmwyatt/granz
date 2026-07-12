@@ -16,7 +16,7 @@ use crate::commands::search_common::{print_shaped_cards, shape_and_page};
 use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::{matches_meeting_filter, SearchTarget};
+use crate::query::filter::SearchTarget;
 
 /// Threshold for prompting before embedding during a search.
 const EMBED_WARN_THRESHOLD: usize = 200;
@@ -88,6 +88,7 @@ pub fn search(
         &index,
         query,
         &opts.targets,
+        opts.meeting_filter.as_deref(),
         date_range.as_ref(),
         include_deleted,
     )?;
@@ -124,14 +125,6 @@ pub fn search(
         .filter_map(|(id, score)| doc_by_id.remove(&id).map(|doc| (doc, score)))
         .collect();
 
-    let filter_lower = opts.meeting_filter.as_deref().map(str::to_lowercase);
-    let filtered: Vec<(Document, Option<f32>)> = ordered_docs
-        .into_iter()
-        .filter(|(doc, _)| {
-            filter_lower.as_deref().is_none_or(|f| matches_meeting_filter(doc, f))
-        })
-        .collect();
-
     let tokens = crate::query::fts::parse_query(query);
     let evidence_opts = crate::query::evidence::EvidenceOptions {
         max_matches: opts.matches,
@@ -140,7 +133,7 @@ pub fn search(
     };
     let (shaped, _) = shape_and_page(
         conn,
-        filtered,
+        ordered_docs,
         |doc, score| {
             let doc_id = doc.id.as_deref().unwrap_or_default();
             crate::query::evidence::RankingFacts {

@@ -46,17 +46,15 @@ pub fn semantic_source_filter(targets: &[SearchTarget]) -> Option<Vec<&'static s
     Some(types)
 }
 
+/// True when the title or id contains the lowercased filter.
+pub fn meeting_filter_matches(filter_lower: &str, title: Option<&str>, id: Option<&str>) -> bool {
+    title.map(|t| t.to_lowercase().contains(filter_lower)).unwrap_or(false)
+        || id.map(|i| i.to_lowercase().contains(filter_lower)).unwrap_or(false)
+}
+
 /// True when the document's title or id contains the lowercased filter.
 pub fn matches_meeting_filter(doc: &Document, filter_lower: &str) -> bool {
-    doc.title
-        .as_ref()
-        .map(|t| t.to_lowercase().contains(filter_lower))
-        .unwrap_or(false)
-        || doc
-            .id
-            .as_ref()
-            .map(|id| id.to_lowercase().contains(filter_lower))
-            .unwrap_or(false)
+    meeting_filter_matches(filter_lower, doc.title.as_deref(), doc.id.as_deref())
 }
 
 /// Keep only documents whose title or id contains `filter` (case-insensitive).
