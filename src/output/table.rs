@@ -454,7 +454,7 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     }
 }
 
-fn format_date_short(s: &str, tz: &FixedOffset) -> String {
+pub(super) fn format_date_short(s: &str, tz: &FixedOffset) -> String {
     // Try to parse and format nicely, fallback to raw string
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         dt.with_timezone(tz).format("%Y-%m-%d %H:%M").to_string()
@@ -465,7 +465,7 @@ fn format_date_short(s: &str, tz: &FixedOffset) -> String {
     }
 }
 
-fn format_time_only(s: &str, tz: &FixedOffset) -> String {
+pub(super) fn format_time_only(s: &str, tz: &FixedOffset) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         dt.with_timezone(tz).format("%H:%M:%S").to_string()
     } else {
