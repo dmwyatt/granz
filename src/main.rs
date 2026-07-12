@@ -107,6 +107,7 @@ fn main() -> Result<()> {
             hybrid: _,
             fast,
             min_score,
+            matches,
             context,
             meeting,
             from,
@@ -128,6 +129,7 @@ fn main() -> Result<()> {
                 speaker.as_ref(),
                 *yes,
                 *limit,
+                *matches,
             );
             let date_range = query::dates::build_date_range(
                 from.as_deref(),

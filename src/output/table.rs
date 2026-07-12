@@ -48,12 +48,6 @@ fn colored_score(score: f32) -> String {
     }
 }
 
-/// Format a meeting row prefixed with its relevance score (reranked hybrid
-/// search results).
-pub fn format_scored_meeting_row(doc: &Document, score: f32, tz: &FixedOffset) -> String {
-    format!("{} {}", colored_score(score), format_meeting_row(doc, tz))
-}
-
 /// Format a meeting detail view for TTY.
 pub fn format_meeting_detail(doc: &Document, tz: &FixedOffset) -> String {
     let mut lines = Vec::new();

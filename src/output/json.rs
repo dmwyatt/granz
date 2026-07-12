@@ -22,23 +22,6 @@ pub fn format_meeting_detail(doc: &Document) -> String {
     to_json(doc)
 }
 
-/// A document with its reranker relevance score.
-#[derive(Debug, Serialize)]
-struct ScoredMeetingJson<'a> {
-    score: f32,
-    #[serde(flatten)]
-    document: &'a Document,
-}
-
-/// Format reranked hybrid results as JSON: each document plus its score.
-pub fn format_scored_meetings(results: &[(Document, f32)]) -> String {
-    let items: Vec<ScoredMeetingJson> = results
-        .iter()
-        .map(|(doc, score)| ScoredMeetingJson { score: *score, document: doc })
-        .collect();
-    to_json(&items)
-}
-
 /// JSON-serializable context window.
 #[derive(Debug, Serialize)]
 pub struct ContextWindowJson {
