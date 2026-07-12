@@ -19,6 +19,8 @@ pub enum SearchMode {
         targets: Vec<SearchTarget>,
         meeting_filter: Option<String>,
         limit: usize,
+        /// Match snippets shown per meeting card.
+        matches: usize,
     },
     ContextWindow {
         targets: Vec<SearchTarget>,
@@ -72,6 +74,7 @@ impl SearchMode {
                 targets: SearchTarget::parse_list(in_targets),
                 meeting_filter: meeting_filter.map(String::from),
                 limit,
+                matches,
             }
         } else {
             SearchMode::Hybrid {
@@ -120,12 +123,14 @@ pub fn search(
             targets,
             meeting_filter,
             limit,
+            matches,
         } => keyword_search(
             conn,
             query,
             &targets,
             meeting_filter.as_deref(),
             limit,
+            matches,
             date_range,
             include_deleted,
             ctx,
@@ -182,12 +187,18 @@ fn apply_limit_mixed<A, B>(mut a: Vec<A>, mut b: Vec<B>, limit: usize) -> (Vec<A
     (a, b)
 }
 
+/// Run plain FTS retrieval and display the resulting meetings as shaped
+/// cards. Keyword results carry no rerank score and no semantic chunk;
+/// content matches show lexical evidence and title-only matches show a
+/// bare title card.
+#[allow(clippy::too_many_arguments)]
 fn keyword_search(
     conn: &Connection,
     query: &str,
     targets: &[SearchTarget],
     meeting_filter: Option<&str>,
     limit: usize,
+    matches: usize,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
@@ -209,8 +220,27 @@ fn keyword_search(
     )?;
 
     let results = filter_by_meeting(results, meeting_filter);
-    render_meeting_list(results, query, limit, ctx);
+    let total = results.len();
+    let page = apply_limit(results, limit);
 
+    let tokens = crate::query::fts::parse_query(query);
+    let limits = crate::query::evidence::EvidenceLimits {
+        max_matches: matches,
+        ..Default::default()
+    };
+    let shaped = page
+        .iter()
+        .map(|doc| {
+            let facts = crate::query::evidence::RankingFacts {
+                keyword: true,
+                best_chunk: None,
+                score: None,
+            };
+            crate::query::evidence::shape_meeting(conn, doc, &tokens, &facts, &limits)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    render_shaped_meeting_list(&shaped, query, total, limit, ctx);
     Ok(())
 }
 
@@ -391,42 +421,6 @@ fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Ve
     };
     let filter_lower = filter.to_lowercase();
     results.into_iter().filter(|doc| matches_meeting_filter(doc, &filter_lower)).collect()
-}
-
-/// Print a ranked meeting list, honoring the output mode and result limit.
-fn render_meeting_list(results: Vec<Document>, query: &str, limit: usize, ctx: &RunContext) {
-    let total = results.len();
-    let results = apply_limit(results, limit);
-
-    let refs: Vec<_> = results.iter().collect();
-
-    match ctx.output_mode {
-        OutputMode::Json => {
-            println!("{}", crate::output::json::format_meetings(&refs));
-        }
-        OutputMode::Tty => {
-            if results.is_empty() {
-                println!("No meetings found matching \"{}\".", query);
-                return;
-            }
-            if total > results.len() {
-                println!(
-                    "Found {} meeting(s) matching \"{}\" (showing {}):\n",
-                    total,
-                    query,
-                    results.len()
-                );
-            } else {
-                println!("Found {} meeting(s) matching \"{}\":\n", results.len(), query);
-            }
-            for doc in &results {
-                println!("{}", crate::output::table::format_meeting_row(doc, &ctx.tz));
-            }
-            if total > results.len() {
-                println!("\nUse --limit 0 to show all {} results.", total);
-            }
-        }
-    }
 }
 
 fn context_window_search(
@@ -763,13 +757,26 @@ mod tests {
                 targets,
                 meeting_filter,
                 limit,
+                matches,
             } => {
                 assert_eq!(targets.len(), 2);
                 assert!(targets.contains(&SearchTarget::Titles));
                 assert!(targets.contains(&SearchTarget::Notes));
                 assert_eq!(meeting_filter.as_deref(), Some("standup"));
                 assert_eq!(limit, 10);
+                assert_eq!(matches, 1);
             }
+            _ => panic!("Expected Keyword variant"),
+        }
+    }
+
+    #[test]
+    fn from_cli_args_matches_threads_to_keyword() {
+        let mode = SearchMode::from_cli_args(
+            false, None, true, 0, "titles", None, None, false, 10, 4,
+        );
+        match mode {
+            SearchMode::Keyword { matches, .. } => assert_eq!(matches, 4),
             _ => panic!("Expected Keyword variant"),
         }
     }

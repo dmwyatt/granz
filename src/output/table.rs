@@ -360,7 +360,6 @@ pub(super) fn format_time_only(s: &str, tz: &FixedOffset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_fixtures::{build_test_db, meetings_state};
     use crate::query::search::TextSegment;
 
     fn utc() -> FixedOffset {

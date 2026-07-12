@@ -105,9 +105,10 @@ fn meetings_search_with_date_filter() {
         .unwrap();
 
     assert!(output.status.success());
-    let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(docs.len(), 1);
-    assert_eq!(docs[0]["title"], "Gamma Sprint Planning");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let meetings = result["meetings"].as_array().unwrap();
+    assert_eq!(meetings.len(), 1);
+    assert_eq!(meetings[0]["title"], "Gamma Sprint Planning");
 }
 
 #[test]

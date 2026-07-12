@@ -144,8 +144,71 @@ fn meetings_search_notes_no_match() {
         .unwrap();
 
     assert!(output.status.success());
-    let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(docs.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["total_meetings"], 0);
+    assert!(result["meetings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn keyword_search_json_is_shaped_with_evidence() {
+    let env = TestEnv::with_fixture();
+    // "milestones" appears in doc-alpha notes; the keyword path renders the
+    // same shaped cards as the hybrid default.
+    let output = env
+        .cmd_json()
+        .args(["search", "milestones", "--keyword", "--in", "notes"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let meetings = result["meetings"].as_array().unwrap();
+    assert_eq!(meetings.len(), 1);
+
+    let m = &meetings[0];
+    assert_eq!(m["id"], "doc-alpha");
+    assert!(m["score"].is_null(), "keyword results carry no rerank score");
+    let signals: Vec<&str> =
+        m["signals"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    assert!(signals.contains(&"keyword"));
+    assert!(!signals.contains(&"semantic"));
+
+    assert!(m["total_matches"].as_u64().unwrap() >= 1);
+    let snippet = m["matches"][0]["snippet"].as_str().unwrap();
+    assert!(snippet.to_lowercase().contains("milestones"));
+    assert!(!m["matches"][0]["highlights"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn keyword_search_matches_flag_shows_more_snippets() {
+    let env = TestEnv::with_fixture();
+    // "timeline" has three match sites in doc-alpha: a panel section, a
+    // notes paragraph, and a transcript utterance.
+    let output = env
+        .cmd_json()
+        .args(["search", "timeline", "--keyword", "--matches", "3"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let meetings = result["meetings"].as_array().unwrap();
+    let alpha = meetings.iter().find(|m| m["id"] == "doc-alpha").unwrap();
+    assert!(
+        alpha["matches"].as_array().unwrap().len() > 1,
+        "expected multiple excerpted matches for doc-alpha, got: {alpha}"
+    );
+}
+
+#[test]
+fn keyword_search_tty_shows_match_evidence() {
+    let env = TestEnv::with_fixture();
+    env.cmd()
+        .args(["search", "milestones", "--keyword", "--in", "notes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("your notes"))
+        .stdout(predicate::str::contains("milestones"));
 }
 
 // --- Multi-target search ---
@@ -175,8 +238,9 @@ fn keyword_search_respects_limit() {
         .unwrap();
 
     assert!(output.status.success());
-    let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(docs.len(), 1);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["meetings"].as_array().unwrap().len(), 1);
+    assert!(result["total_meetings"].as_u64().unwrap() >= 2);
 }
 
 #[test]
@@ -190,8 +254,8 @@ fn keyword_search_limit_zero_returns_all() {
         .unwrap();
 
     assert!(output.status.success());
-    let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(docs.len() >= 2);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["meetings"].as_array().unwrap().len() >= 2);
 }
 
 #[test]
