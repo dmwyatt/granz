@@ -163,7 +163,9 @@ fn collapse_line(m: &ShapedMeeting) -> Option<String> {
         .as_slice()
     {
         [] => String::new(),
-        labels => format!(" in {}", labels.join(" and ")),
+        [one] => format!(" in {one}"),
+        [a, b] => format!(" in {a} and {b}"),
+        [head @ .., last] => format!(" in {}, and {last}", head.join(", ")),
     };
     Some(format!("+{hidden} more {noun}{sources}"))
 }
@@ -284,6 +286,24 @@ mod tests {
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
         assert!(
             out.contains("    +3 more matches in your notes and transcript"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn collapse_line_lists_three_sources_with_commas() {
+        // --matches 0 collapses everything, so all three sources can appear.
+        let mut m = base_meeting();
+        m.matches.clear();
+        m.total_matches = 5;
+        m.remaining_sources = vec![
+            EvidenceSource::Panel,
+            EvidenceSource::Notes,
+            EvidenceSource::Transcript,
+        ];
+        let out = strip(&format_shaped_meeting(&m, 1, &utc()));
+        assert!(
+            out.contains("    +5 more matches in AI notes, your notes, and transcript"),
             "got:\n{out}"
         );
     }

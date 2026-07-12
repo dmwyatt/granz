@@ -63,6 +63,17 @@ pub fn collect_document_evidence(
     tokens: &[FtsToken],
     limits: &EvidenceLimits,
 ) -> Result<DocumentEvidence> {
+    // An empty query matches nothing, mirroring the FTS empty-phrase
+    // behavior; without this, matches_all_tokens is vacuously true and
+    // every site in the document would count as a match.
+    if tokens.is_empty() {
+        return Ok(DocumentEvidence {
+            matches: Vec::new(),
+            total: 0,
+            remaining_sources: Vec::new(),
+        });
+    }
+
     let mut sites = Vec::new();
 
     if let Some(doc_id) = doc.id.as_deref() {
@@ -123,7 +134,9 @@ pub fn shape_meeting(
         title: doc.title.as_deref().map(|t| title_matches(t, tokens)).unwrap_or(false),
     };
 
-    let (matches, total, remaining_sources) = if !evidence.matches.is_empty() {
+    // Tier on whether lexical evidence exists, not on whether any was
+    // excerpted: --matches 0 keeps matches empty while total still counts.
+    let (matches, total, remaining_sources) = if evidence.total > 0 {
         (evidence.matches, evidence.total, evidence.remaining_sources)
     } else if let Some(m) = facts.best_chunk.and_then(|c| chunk_evidence(c, tokens, limits)) {
         (vec![m], 1, Vec::new())
@@ -468,6 +481,44 @@ mod tests {
         assert!(shaped.signals.keyword);
         assert!(!shaped.signals.semantic);
         assert_eq!(shaped.score, None);
+    }
+
+    #[test]
+    fn matches_zero_keeps_lexical_count_and_never_falls_back_to_the_chunk() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let chunk = best_chunk("some semantic chunk", "transcript_window", None);
+        let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
+        let limits = EvidenceLimits { max_matches: 0, max_chars: 160 };
+
+        let shaped =
+            shape_meeting(&conn, &doc, &parse_query("kumquat"), &facts, &limits).unwrap();
+
+        // Headers-only: no snippets, but the real lexical count and its
+        // sources survive for the collapse line, and the semantic chunk
+        // does not stand in.
+        assert!(shaped.matches.is_empty());
+        assert_eq!(shaped.total_matches, 5);
+        assert_eq!(
+            shaped.remaining_sources,
+            vec![
+                EvidenceSource::Panel,
+                EvidenceSource::Notes,
+                EvidenceSource::Transcript
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_query_yields_no_lexical_evidence() {
+        // An empty query matches nothing lexically (mirroring the FTS
+        // empty-phrase behavior), rather than vacuously matching every
+        // site.
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let ev = collect(&conn, &doc, "", 3);
+        assert_eq!(ev.total, 0);
+        assert!(ev.matches.is_empty());
     }
 
     #[test]
