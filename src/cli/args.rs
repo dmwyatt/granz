@@ -40,39 +40,31 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     // === Daily Use Commands ===
-    /// Search meetings, transcripts, and notes
+    /// Search meetings, transcripts, and notes (ranked discovery)
     ///
-    /// Runs hybrid search by default: keyword and semantic results are fused,
-    /// then the top candidates are reranked with a cross-encoder. The first
-    /// search downloads the embedding and reranker models, and a search may
-    /// prompt before embedding new content (--yes accepts). Force plain
-    /// keyword search with --keyword, or skip reranking with --fast.
+    /// Fuses keyword and semantic rankings, then reranks the top candidates
+    /// with a cross-encoder (--fast skips the rerank stage). Results are the
+    /// best few meetings for the query, not a complete list; when you need
+    /// every meeting containing exact words, or matches attributed to a
+    /// speaker, use `grans grep`. The first search downloads the embedding
+    /// and reranker models, and a search may prompt before embedding new
+    /// content (--yes accepts).
     #[command(visible_alias = "s")]
     Search {
         /// Search query; words match in any order, "quoted phrases" must match exactly
         query: String,
 
         /// Search targets: titles, transcripts, notes, panels (comma-separated)
-        #[arg(long, rename_all = "lowercase", default_value = "titles,transcripts,notes,panels")]
+        #[arg(long, rename_all = "lowercase", default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
         r#in: String,
 
-        /// Force keyword (FTS) search instead of the hybrid default
-        #[arg(long, conflicts_with = "hybrid")]
-        keyword: bool,
-
-        /// Hybrid search: fuse keyword and semantic rankings and rerank the
-        /// top candidates with a cross-encoder (the default; flag kept for
-        /// compatibility)
-        #[arg(long)]
-        hybrid: bool,
-
-        /// Skip the cross-encoder rerank stage of hybrid search
+        /// Skip the cross-encoder rerank stage
         /// (fusion order only; faster, but no relevance scores)
-        #[arg(long, conflicts_with = "keyword")]
+        #[arg(long)]
         fast: bool,
 
-        /// Minimum reranker relevance score (0-1) for hybrid results
-        #[arg(long, conflicts_with_all = ["fast", "keyword"])]
+        /// Minimum reranker relevance score (0-1)
+        #[arg(long, conflicts_with = "fast")]
         min_score: Option<f32>,
 
         /// Maximum match snippets shown per meeting in search results
@@ -80,7 +72,7 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         matches: usize,
 
-        /// Context shown around each match snippet: utterances for transcripts, sections for AI notes, paragraphs for notes (0 = disabled). Works with any mode
+        /// Context shown around each match snippet: utterances for transcripts, sections for AI notes, paragraphs for notes (0 = disabled)
         #[arg(long, default_value = "0")]
         context: usize,
 
@@ -100,15 +92,65 @@ pub enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Filter matches by speaker: "me" (your utterances) or "other" (others' utterances); only meetings where that speaker's utterances match survive. Works with any mode
-        #[arg(long, value_parser = parse_speaker_filter)]
-        speaker: Option<SpeakerFilter>,
-
         /// Skip embedding confirmation prompt
         #[arg(long, short = 'y')]
         yes: bool,
 
         /// Maximum number of results to return (0 = no limit)
+        #[arg(long, default_value = "10")]
+        limit: usize,
+
+        /// Include soft-deleted meetings in results
+        #[arg(long)]
+        include_deleted: bool,
+    },
+
+    /// List every meeting containing the given words
+    ///
+    /// Complete lexical lookup over the local full-text index: the reported
+    /// count is a fact about your synced meetings, and --limit only trims
+    /// how many are shown. Words match in any order; "quoted phrases" must
+    /// match exactly. Never loads models and never prompts. Use
+    /// --speaker to require the match in a specific speaker's utterances.
+    /// For ranked discovery by meaning, use `grans search`.
+    #[command(visible_alias = "g")]
+    Grep {
+        /// Words to look up; words match in any order, "quoted phrases" must match exactly
+        query: String,
+
+        /// Search targets: titles, transcripts, notes, panels (comma-separated)
+        #[arg(long, rename_all = "lowercase", default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
+        r#in: String,
+
+        /// Maximum match snippets shown per meeting (0 = headers only)
+        #[arg(long, default_value = "1")]
+        matches: usize,
+
+        /// Context shown around each match snippet: utterances for transcripts, sections for AI notes, paragraphs for notes (0 = disabled)
+        #[arg(long, default_value = "0")]
+        context: usize,
+
+        /// Limit to a specific meeting (ID or title substring)
+        #[arg(long)]
+        meeting: Option<String>,
+
+        /// Filter from date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Filter to date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Relative date filter, overrides --from/--to [today, yesterday, this-week, last-week, this-month, last-month]
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Filter matches by speaker: "me" (your utterances) or "other" (others' utterances); only meetings where that speaker's utterances match survive. Requires transcripts in --in
+        #[arg(long, value_parser = parse_speaker_filter)]
+        speaker: Option<SpeakerFilter>,
+
+        /// Maximum number of meetings to show (0 = no limit)
         #[arg(long, default_value = "10")]
         limit: usize,
 
@@ -282,14 +324,14 @@ pub enum Commands {
 /// the hybrid pipeline phases land.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QualityMode {
-    /// FTS5 keyword search (current production behavior)
+    /// FTS5 keyword search (the grep verb's retrieval)
     Fts,
     /// Semantic search over embeddings
     Semantic,
-    /// RRF fusion of FTS and semantic rankings (--hybrid --fast)
+    /// RRF fusion of FTS and semantic rankings (what `search --fast` shows)
     Hybrid,
     /// Fusion + jina-reranker-v1-turbo-en cross-encoder blended with the
-    /// fusion prior (the --hybrid default)
+    /// fusion prior (the full search pipeline)
     RerankJina,
     /// Fusion + bge-reranker-base cross-encoder
     RerankBge,
@@ -616,21 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn search_keyword_flag_parses() {
-        let cli = Cli::try_parse_from(["grans", "search", "q", "--keyword"]).unwrap();
-        let Commands::Search { keyword, .. } = &cli.command else {
-            panic!("expected search subcommand");
-        };
-        assert!(*keyword);
-    }
-
-    #[test]
-    fn search_keyword_conflicts_with_hybrid() {
-        let result = Cli::try_parse_from(["grans", "search", "q", "--keyword", "--hybrid"]);
-        assert!(result.is_err(), "--keyword --hybrid should conflict");
-    }
-
-    #[test]
     fn search_semantic_flag_is_rejected() {
         // The standalone semantic retrieval mode was removed (#59); the flag
         // must fail parsing rather than silently doing something else.
@@ -639,41 +666,45 @@ mod tests {
     }
 
     #[test]
-    fn search_hybrid_flag_still_accepted() {
-        let cli = Cli::try_parse_from(["grans", "search", "q", "--hybrid"]).unwrap();
-        let Commands::Search { hybrid, .. } = &cli.command else {
-            panic!("expected search subcommand");
-        };
-        assert!(*hybrid);
+    fn search_keyword_flag_is_rejected() {
+        // Plain lexical lookup is the grep verb now (#65); the flag must
+        // fail parsing rather than silently doing something else.
+        let result = Cli::try_parse_from(["grans", "search", "q", "--keyword"]);
+        assert!(result.is_err(), "--keyword should be an unknown flag");
     }
 
     #[test]
-    fn search_fast_parses_without_hybrid() {
+    fn search_speaker_flag_is_rejected() {
+        // Speaker attribution needs exact transcript matching, which only
+        // grep's complete lookup honors (#65).
+        let result = Cli::try_parse_from(["grans", "search", "q", "--speaker", "me"]);
+        assert!(result.is_err(), "--speaker should be an unknown flag");
+    }
+
+    #[test]
+    fn search_hybrid_flag_is_rejected() {
+        // Hybrid retrieval is search's only behavior; the vestigial flag is
+        // gone (#65).
+        let result = Cli::try_parse_from(["grans", "search", "q", "--hybrid"]);
+        assert!(result.is_err(), "--hybrid should be an unknown flag");
+    }
+
+    #[test]
+    fn search_fast_parses() {
         let cli = Cli::try_parse_from(["grans", "search", "q", "--fast"]).unwrap();
-        let Commands::Search { fast, hybrid, .. } = &cli.command else {
+        let Commands::Search { fast, .. } = &cli.command else {
             panic!("expected search subcommand");
         };
         assert!(*fast);
-        assert!(!*hybrid);
     }
 
     #[test]
-    fn search_fast_conflicts_with_keyword() {
-        let result = Cli::try_parse_from(["grans", "search", "q", "--fast", "--keyword"]);
-        assert!(result.is_err(), "--fast --keyword should conflict");
-    }
-
-    #[test]
-    fn search_context_composes_with_any_mode() {
-        // --context expands cards; it is not a mode and conflicts with
-        // nothing.
+    fn search_context_composes_with_other_flags() {
+        // --context expands cards; it conflicts with nothing.
         for extra in [
-            &["--hybrid"][..],
             &["--fast"][..],
             &["--min-score", "0.4"][..],
             &["--matches", "3"][..],
-            &["--keyword"][..],
-            &["--speaker", "me"][..],
             &[][..],
         ] {
             let mut argv = vec!["grans", "search", "q", "--context", "2"];
@@ -684,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn search_min_score_parses_without_hybrid() {
+    fn search_min_score_parses() {
         let cli =
             Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4"]).unwrap();
         let Commands::Search { min_score, .. } = &cli.command else {
@@ -694,31 +725,67 @@ mod tests {
     }
 
     #[test]
-    fn search_min_score_conflicts_with_fast_and_keyword() {
-        for extra in [&["--fast"][..], &["--keyword"][..]] {
-            let mut argv = vec!["grans", "search", "q", "--min-score", "0.4"];
-            argv.extend_from_slice(extra);
-            let result = Cli::try_parse_from(argv);
-            assert!(result.is_err(), "--min-score {extra:?} should conflict");
-        }
+    fn search_min_score_conflicts_with_fast() {
+        // Only the rerank stage produces the relevance score --min-score
+        // thresholds, and --fast skips that stage.
+        let result =
+            Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4", "--fast"]);
+        assert!(result.is_err(), "--min-score --fast should conflict");
     }
 
     #[test]
-    fn search_speaker_composes_with_any_mode() {
-        // #60: --speaker is an evidence filter, not a mode; it parses
-        // alongside the hybrid default, its flags, and --keyword.
+    fn grep_parses_with_lookup_flags() {
+        let cli = Cli::try_parse_from([
+            "grans", "grep", "kumquat", "--speaker", "me", "--in", "titles,transcripts",
+            "--meeting", "standup", "--context", "2", "--matches", "3", "--limit", "5",
+            "--from", "2026-01-01", "--to", "2026-02-01", "--include-deleted",
+        ])
+        .unwrap();
+        let Commands::Grep {
+            query,
+            speaker,
+            r#in,
+            meeting,
+            context,
+            matches,
+            limit,
+            include_deleted,
+            ..
+        } = &cli.command
+        else {
+            panic!("expected grep subcommand");
+        };
+        assert_eq!(query, "kumquat");
+        assert_eq!(*speaker, Some(SpeakerFilter::Me));
+        assert_eq!(r#in, "titles,transcripts");
+        assert_eq!(meeting.as_deref(), Some("standup"));
+        assert_eq!(*context, 2);
+        assert_eq!(*matches, 3);
+        assert_eq!(*limit, 5);
+        assert!(*include_deleted);
+    }
+
+    #[test]
+    fn grep_visible_alias_g_parses() {
+        let cli = Cli::try_parse_from(["grans", "g", "kumquat"]).unwrap();
+        assert!(matches!(cli.command, Commands::Grep { .. }));
+    }
+
+    #[test]
+    fn grep_rejects_ranked_search_flags() {
+        // Ranked-pipeline flags belong to search; grep never runs models,
+        // so none of them parse here.
         for extra in [
-            &["--hybrid"][..],
             &["--fast"][..],
             &["--min-score", "0.4"][..],
-            &["--matches", "3"][..],
+            &["--yes"][..],
             &["--keyword"][..],
-            &[][..],
+            &["--hybrid"][..],
         ] {
-            let mut argv = vec!["grans", "search", "q", "--speaker", "me"];
+            let mut argv = vec!["grans", "grep", "q"];
             argv.extend_from_slice(extra);
             let result = Cli::try_parse_from(argv);
-            assert!(result.is_ok(), "--speaker {extra:?} should parse");
+            assert!(result.is_err(), "grep {extra:?} should be rejected");
         }
     }
 

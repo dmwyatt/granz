@@ -144,7 +144,7 @@ fn retrieve_hybrid(
 ) -> Result<Vec<RankedDoc>> {
     let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
     let fused =
-        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?
+        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, None, false)?
             .fused;
     Ok(fused
         .into_iter()
@@ -169,12 +169,12 @@ fn retrieve_hybrid_rerank_detailed(
 ) -> Result<Vec<RerankCandidate>> {
     let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
     let ranking =
-        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, false)?;
+        crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, None, false)?;
     crate::query::rerank::rerank_hybrid_detailed(conn, reranker, query, &ranking, ctx, cfg)
 }
 
 /// Reranked hybrid retrieval in production result shape (the
-/// `grans search --hybrid` default path).
+/// `grans search` default path).
 fn retrieve_hybrid_rerank(
     conn: &Connection,
     embedder: &dyn Embedder,

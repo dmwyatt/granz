@@ -376,6 +376,17 @@ pub fn title_series_counts(conn: &Connection) -> Result<HashMap<String, u32>> {
     Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
+/// Every document's (id, title), for building meeting-filter allow sets.
+/// Includes deleted documents: callers intersect with candidate lists that
+/// already honored include_deleted.
+pub fn all_meeting_refs(conn: &Connection) -> Result<Vec<(String, Option<String>)>> {
+    let mut stmt = conn.prepare("SELECT id, title FROM documents")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn append_date_filter(
     sql: &mut String,
     params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,

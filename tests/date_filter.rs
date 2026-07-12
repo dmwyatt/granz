@@ -99,7 +99,7 @@ fn meetings_search_with_date_filter() {
     let output = env
         .cmd_json()
         .args([
-            "search", "Sprint", "--keyword", "--in", "titles", "--from", "2025-08-01",
+            "grep", "Sprint", "--in", "titles", "--from", "2025-08-01",
         ])
         .output()
         .unwrap();
@@ -120,7 +120,7 @@ fn transcripts_search_with_date_filter() {
     let output = env
         .cmd_json()
         .args([
-            "search", "kickoff", "--keyword", "--context", "2", "--from", "2025-07-01",
+            "grep", "kickoff", "--context", "2", "--from", "2025-07-01",
         ])
         .output()
         .unwrap();

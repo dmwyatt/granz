@@ -17,7 +17,7 @@ use rusqlite::Connection;
 
 use cli::args::{AdminAction, Cli, Commands};
 use cli::context::RunContext;
-use commands::search::SearchMode;
+use commands::search::SearchOptions;
 
 fn main() -> Result<()> {
     setup_broken_pipe_handling();
@@ -100,10 +100,6 @@ fn main() -> Result<()> {
         Commands::Search {
             query,
             r#in,
-            keyword,
-            // --hybrid is the default; it only exists so clap can reject it
-            // alongside the forcing flags, so dispatch never consults it
-            hybrid: _,
             fast,
             min_score,
             matches,
@@ -112,22 +108,26 @@ fn main() -> Result<()> {
             from,
             to,
             date,
-            speaker,
             yes,
             limit,
             include_deleted,
         } => {
-            let mode = SearchMode::from_cli_args(
+            let echo = commands::search::FilterEcho {
+                in_targets: r#in.clone(),
+                meeting: meeting.clone(),
+                date: date.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                include_deleted: *include_deleted,
+            };
+            let opts = SearchOptions::from_cli_args(
                 *fast,
                 *min_score,
-                *keyword,
                 *context,
-                r#in,
-                meeting.as_deref(),
-                speaker.as_ref(),
                 *yes,
                 *limit,
                 *matches,
+                echo,
             );
             let date_range = query::dates::build_date_range(
                 from.as_deref(),
@@ -136,7 +136,38 @@ fn main() -> Result<()> {
                 chrono::Utc::now(),
                 &ctx.tz,
             );
-            commands::search::search(&conn, query, mode, date_range, *include_deleted, &ctx)?;
+            commands::search::search(&conn, query, opts, date_range, *include_deleted, &ctx)?;
+        }
+
+        Commands::Grep {
+            query,
+            r#in,
+            matches,
+            context,
+            meeting,
+            from,
+            to,
+            date,
+            speaker,
+            limit,
+            include_deleted,
+        } => {
+            let opts = commands::grep::GrepOptions {
+                targets: query::filter::SearchTarget::parse_list(r#in),
+                meeting_filter: meeting.clone(),
+                limit: *limit,
+                matches: *matches,
+                speaker: speaker.clone(),
+                context: *context,
+            };
+            let date_range = query::dates::build_date_range(
+                from.as_deref(),
+                to.as_deref(),
+                date.as_deref(),
+                chrono::Utc::now(),
+                &ctx.tz,
+            );
+            commands::grep::grep(&conn, query, opts, date_range, *include_deleted, &ctx)?;
         }
 
         Commands::List {

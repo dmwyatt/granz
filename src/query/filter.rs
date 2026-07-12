@@ -1,3 +1,8 @@
+use crate::models::Document;
+
+/// The default `--in` target list for search and grep: every source.
+pub const DEFAULT_SEARCH_TARGETS: &str = "titles,transcripts,notes,panels";
+
 /// Where to search for text matches in meetings.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchTarget {
@@ -42,6 +47,25 @@ pub fn semantic_source_filter(targets: &[SearchTarget]) -> Option<Vec<&'static s
     }
     let types: Vec<&str> = targets.iter().filter_map(|t| t.to_chunk_source_type()).collect();
     Some(types)
+}
+
+/// True when the title or id contains the lowercased filter.
+pub fn meeting_filter_matches(filter_lower: &str, title: Option<&str>, id: Option<&str>) -> bool {
+    title.map(|t| t.to_lowercase().contains(filter_lower)).unwrap_or(false)
+        || id.map(|i| i.to_lowercase().contains(filter_lower)).unwrap_or(false)
+}
+
+/// Keep only documents whose title or id contains `filter` (case-insensitive).
+/// No filter keeps everything.
+pub fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Vec<Document> {
+    let Some(filter) = meeting_filter else {
+        return results;
+    };
+    let filter_lower = filter.to_lowercase();
+    results
+        .into_iter()
+        .filter(|doc| meeting_filter_matches(&filter_lower, doc.title.as_deref(), doc.id.as_deref()))
+        .collect()
 }
 
 #[cfg(test)]

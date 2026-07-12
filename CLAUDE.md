@@ -34,7 +34,7 @@ After making changes, sync data and run queries to verify things work end-to-end
 ```bash
 cargo run -- sync                                 # Fetch latest data from Granola API
 cargo run -- list
-cargo run -- search "test" --keyword --in titles  # FTS path, no models needed
+cargo run -- grep "test" --in titles              # FTS path, no models needed
 cargo run -- search "test" --fast --yes           # hybrid fusion path; a bare search adds the rerank stage, which is slow in debug builds
 cargo run -- browse people list
 ```

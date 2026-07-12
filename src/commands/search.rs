@@ -1,243 +1,108 @@
+//! `grans search`: ranked discovery.
+//!
+//! Hybrid retrieval (FTS and semantic rankings fused with RRF) plus a
+//! cross-encoder rerank (skipped by `--fast`). Results are the best few
+//! meetings for the query, cut from bounded candidate pools, so the output
+//! never claims a corpus total; it cross-links `grans grep` with the
+//! uncapped FTS match count instead.
+
 use std::io::{self, Write};
 
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::models::{Document, SpeakerFilter};
+use crate::commands::search_common::{print_shaped_cards, shape_and_page};
+use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::SearchTarget;
+use crate::query::filter::{SearchTarget, DEFAULT_SEARCH_TARGETS};
 
-/// Threshold for prompting before embedding during hybrid search.
+/// Threshold for prompting before embedding during a search.
 const EMBED_WARN_THRESHOLD: usize = 200;
 
-/// Typed search mode, replacing the old 11-parameter search function.
-/// Each variant carries only the parameters it actually uses.
-pub enum SearchMode {
-    Keyword {
-        targets: Vec<SearchTarget>,
-        meeting_filter: Option<String>,
-        limit: usize,
-        /// Match snippets shown per meeting card.
-        matches: usize,
-        /// Only meetings with matching utterances by this speaker survive.
-        speaker: Option<SpeakerFilter>,
-        /// Neighboring units rendered around each shown match.
-        context: usize,
-    },
-    Hybrid {
-        targets: Vec<SearchTarget>,
-        meeting_filter: Option<String>,
-        rerank: bool,
-        min_score: Option<f32>,
-        yes: bool,
-        limit: usize,
-        /// Match snippets shown per meeting card.
-        matches: usize,
-        /// Only meetings with matching utterances by this speaker survive.
-        speaker: Option<SpeakerFilter>,
-        /// Neighboring units rendered around each shown match.
-        context: usize,
-    },
+/// Raw filter values as given on the command line. The grep cross-link
+/// echoes them verbatim so the suggested command reproduces the count the
+/// footer claims; only filters that change the match count belong here.
+pub struct FilterEcho {
+    /// Raw `--in` value.
+    pub in_targets: String,
+    pub meeting: Option<String>,
+    pub date: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub include_deleted: bool,
 }
 
-impl SearchMode {
-    /// Construct a SearchMode from CLI arguments.
-    ///
-    /// A bare search runs hybrid and --keyword forces plain FTS; --speaker
-    /// (an evidence filter) and --context (card expansion) compose with
-    /// either retrieval mode. --hybrid needs no parameter here: it is the
-    /// default, and clap conflicts keep it from combining with --keyword.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_cli_args(
-        fast: bool,
-        min_score: Option<f32>,
-        keyword: bool,
-        context: usize,
-        in_targets: &str,
-        meeting_filter: Option<&str>,
-        speaker: Option<&SpeakerFilter>,
-        yes: bool,
-        limit: usize,
-        matches: usize,
-    ) -> Self {
-        if keyword {
-            SearchMode::Keyword {
-                targets: SearchTarget::parse_list(in_targets),
-                meeting_filter: meeting_filter.map(String::from),
-                limit,
-                matches,
-                speaker: speaker.cloned(),
-                context,
-            }
-        } else {
-            SearchMode::Hybrid {
-                targets: SearchTarget::parse_list(in_targets),
-                meeting_filter: meeting_filter.map(String::from),
-                rerank: !fast,
-                min_score,
-                yes,
-                limit,
-                matches,
-                speaker: speaker.cloned(),
-                context,
-            }
+impl Default for FilterEcho {
+    fn default() -> Self {
+        FilterEcho {
+            in_targets: DEFAULT_SEARCH_TARGETS.to_string(),
+            meeting: None,
+            date: None,
+            from: None,
+            to: None,
+            include_deleted: false,
         }
     }
 }
 
-/// Unified search entry point. Dispatches to the appropriate handler
-/// based on the SearchMode variant.
-pub fn search(
-    conn: &Connection,
-    query: &str,
-    mode: SearchMode,
-    date_range: Option<DateRange>,
-    include_deleted: bool,
-    ctx: &RunContext,
-) -> Result<()> {
-    match mode {
-        SearchMode::Keyword {
-            targets,
-            meeting_filter,
-            limit,
-            matches,
-            speaker,
-            context,
-        } => keyword_search(
-            conn,
-            query,
-            &targets,
-            meeting_filter.as_deref(),
-            limit,
-            matches,
-            speaker,
-            context,
-            date_range,
-            include_deleted,
-            ctx,
-        ),
-        SearchMode::Hybrid {
-            targets,
-            meeting_filter,
-            rerank,
+/// Options for a ranked search.
+pub struct SearchOptions {
+    pub targets: Vec<SearchTarget>,
+    pub meeting_filter: Option<String>,
+    pub rerank: bool,
+    pub min_score: Option<f32>,
+    pub yes: bool,
+    pub limit: usize,
+    /// Match snippets shown per meeting card.
+    pub matches: usize,
+    /// Neighboring units rendered around each shown match.
+    pub context: usize,
+    /// Raw filter values, echoed into the grep cross-link.
+    pub echo: FilterEcho,
+}
+
+impl SearchOptions {
+    /// Construct SearchOptions from CLI arguments. A bare search reranks;
+    /// --fast keeps fusion order. Targets and the meeting filter derive
+    /// from the raw values in `echo`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_cli_args(
+        fast: bool,
+        min_score: Option<f32>,
+        context: usize,
+        yes: bool,
+        limit: usize,
+        matches: usize,
+        echo: FilterEcho,
+    ) -> Self {
+        SearchOptions {
+            targets: SearchTarget::parse_list(&echo.in_targets),
+            meeting_filter: echo.meeting.clone(),
+            rerank: !fast,
             min_score,
             yes,
             limit,
             matches,
-            speaker,
             context,
-        } => hybrid_search(
-            conn,
-            query,
-            &targets,
-            meeting_filter.as_deref(),
-            rerank,
-            min_score,
-            yes,
-            limit,
-            matches,
-            speaker,
-            context,
-            date_range,
-            include_deleted,
-            ctx,
-        ),
+            echo,
+        }
     }
-}
-
-/// Truncate a vec to `limit` items. A limit of 0 means no limit.
-fn apply_limit<T>(mut items: Vec<T>, limit: usize) -> Vec<T> {
-    if limit > 0 && items.len() > limit {
-        items.truncate(limit);
-    }
-    items
-}
-
-/// Run plain FTS retrieval and display the resulting meetings as shaped
-/// cards. Keyword results carry no rerank score and no semantic chunk;
-/// content matches show lexical evidence and title-only matches show a
-/// bare title card.
-#[allow(clippy::too_many_arguments)]
-fn keyword_search(
-    conn: &Connection,
-    query: &str,
-    targets: &[SearchTarget],
-    meeting_filter: Option<&str>,
-    limit: usize,
-    matches: usize,
-    speaker: Option<SpeakerFilter>,
-    context: usize,
-    date_range: Option<DateRange>,
-    include_deleted: bool,
-    ctx: &RunContext,
-) -> Result<()> {
-    let search_titles = targets.contains(&SearchTarget::Titles);
-    let search_transcripts = targets.contains(&SearchTarget::Transcripts);
-    let search_notes = targets.contains(&SearchTarget::Notes);
-    let search_panels = targets.contains(&SearchTarget::Panels);
-
-    let results = crate::db::meetings::search_meetings(
-        conn,
-        query,
-        search_titles,
-        search_transcripts,
-        search_notes,
-        search_panels,
-        date_range.as_ref(),
-        include_deleted,
-    )?;
-
-    let results = filter_by_meeting(results, meeting_filter);
-    let docs: Vec<(Document, Option<f32>)> =
-        results.into_iter().map(|doc| (doc, None)).collect();
-
-    let tokens = crate::query::fts::parse_query(query);
-    let opts = crate::query::evidence::EvidenceOptions {
-        max_matches: matches,
-        speaker,
-        context,
-        ..Default::default()
-    };
-    let (shaped, total) = shape_and_page(
-        conn,
-        docs,
-        |_, _| crate::query::evidence::RankingFacts {
-            keyword: true,
-            best_chunk: None,
-            score: None,
-        },
-        &tokens,
-        &opts,
-        limit,
-    )?;
-
-    render_shaped_meeting_list(&shaped, query, total, limit, ctx);
-    Ok(())
 }
 
 /// Run keyword and semantic retrieval, fuse the rankings, rerank the top
 /// candidates (unless skipped via --fast), and display the resulting
 /// meetings as shaped cards with match evidence.
-#[allow(clippy::too_many_arguments)]
-fn hybrid_search(
+pub fn search(
     conn: &Connection,
     query: &str,
-    targets: &[SearchTarget],
-    meeting_filter: Option<&str>,
-    rerank: bool,
-    min_score: Option<f32>,
-    yes: bool,
-    limit: usize,
-    matches: usize,
-    speaker: Option<SpeakerFilter>,
-    context: usize,
+    opts: SearchOptions,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
 ) -> Result<()> {
-    if !confirm_embedding_work(conn, yes, ctx)? {
+    if !confirm_embedding_work(conn, opts.yes, ctx)? {
         return Ok(());
     }
 
@@ -251,14 +116,15 @@ fn hybrid_search(
         &embedder,
         &index,
         query,
-        targets,
+        &opts.targets,
+        opts.meeting_filter.as_deref(),
         date_range.as_ref(),
         include_deleted,
     )?;
 
     // Ranked (id, score) pairs; ordering is the pipeline's and is not
     // touched again below.
-    let ordered: Vec<(String, Option<f32>)> = if rerank {
+    let ordered: Vec<(String, Option<f32>)> = if opts.rerank {
         let reranker =
             crate::embed::rerank::FastEmbedReranker::new(crate::embed::rerank::DEFAULT_RERANK_MODEL)?;
         let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
@@ -271,7 +137,7 @@ fn hybrid_search(
             &ranking_ctx,
             &cfg,
         )?;
-        if let Some(min) = min_score {
+        if let Some(min) = opts.min_score {
             reranked.retain(|d| d.score >= min);
         }
         reranked.into_iter().map(|d| (d.document_id, Some(d.score))).collect()
@@ -288,24 +154,15 @@ fn hybrid_search(
         .filter_map(|(id, score)| doc_by_id.remove(&id).map(|doc| (doc, score)))
         .collect();
 
-    let filter_lower = meeting_filter.map(str::to_lowercase);
-    let filtered: Vec<(Document, Option<f32>)> = ordered_docs
-        .into_iter()
-        .filter(|(doc, _)| {
-            filter_lower.as_deref().is_none_or(|f| matches_meeting_filter(doc, f))
-        })
-        .collect();
-
     let tokens = crate::query::fts::parse_query(query);
-    let opts = crate::query::evidence::EvidenceOptions {
-        max_matches: matches,
-        speaker,
-        context,
+    let evidence_opts = crate::query::evidence::EvidenceOptions {
+        max_matches: opts.matches,
+        context: opts.context,
         ..Default::default()
     };
-    let (shaped, total) = shape_and_page(
+    let (shaped, _) = shape_and_page(
         conn,
-        filtered,
+        ordered_docs,
         |doc, score| {
             let doc_id = doc.id.as_deref().unwrap_or_default();
             crate::query::evidence::RankingFacts {
@@ -315,114 +172,90 @@ fn hybrid_search(
             }
         },
         &tokens,
-        &opts,
-        limit,
+        &evidence_opts,
+        opts.limit,
     )?;
 
-    render_shaped_meeting_list(&shaped, query, total, limit, ctx);
+    render_ranked_meeting_list(&shaped, query, ranking.keyword_total, &opts, ctx);
     Ok(())
 }
 
-/// Shape ranked documents into meeting cards, in the order given, and cut
-/// the display page. Returns the page and the total result count.
-///
-/// Without a speaker filter the page is cut first and only displayed cards
-/// are shaped. With one, every candidate is shaped so that meetings whose
-/// evidence the filter eliminates drop out of the count entirely, and the
-/// page is cut from the survivors.
-fn shape_and_page<'a>(
-    conn: &Connection,
-    docs: Vec<(Document, Option<f32>)>,
-    facts_for: impl Fn(&Document, Option<f32>) -> crate::query::evidence::RankingFacts<'a>,
-    tokens: &[crate::query::fts::FtsToken],
-    opts: &crate::query::evidence::EvidenceOptions,
-    limit: usize,
-) -> Result<(Vec<crate::query::shape::ShapedMeeting>, usize)> {
-    let shape = |docs: &[(Document, Option<f32>)]| {
-        docs.iter()
-            .map(|(doc, score)| {
-                let facts = facts_for(doc, *score);
-                crate::query::evidence::shape_meeting(conn, doc, tokens, &facts, opts)
-            })
-            .collect::<Result<Vec<_>>>()
-    };
-
-    if opts.speaker.is_none() {
-        let total = docs.len();
-        let page = apply_limit(docs, limit);
-        Ok((shape(&page)?, total))
-    } else {
-        let survivors: Vec<_> =
-            shape(&docs)?.into_iter().filter(|m| m.total_matches > 0).collect();
-        let total = survivors.len();
-        Ok((apply_limit(survivors, limit), total))
-    }
+/// Header for ranked results: claims only what is shown, never a total.
+fn ranked_header(shown: usize, query: &str) -> String {
+    format!("Top {} match(es) for \"{}\":", shown, query)
 }
 
-/// Print shaped meeting cards, honoring the output mode.
-fn render_shaped_meeting_list(
+/// The grep command that reproduces `keyword_total`: the query plus every
+/// search filter that affects the match count, echoed as given. Flags that
+/// only shape presentation or the ranked pipeline (--limit, --matches,
+/// --context, --fast, --min-score, --yes) are omitted because they do not
+/// change what counts as a match.
+fn grep_command_echo(query: &str, filters: &FilterEcho) -> String {
+    let mut cmd = format!("grans grep \"{}\"", query);
+    if filters.in_targets != DEFAULT_SEARCH_TARGETS {
+        cmd.push_str(&format!(" --in {}", filters.in_targets));
+    }
+    if let Some(meeting) = &filters.meeting {
+        cmd.push_str(&format!(" --meeting \"{}\"", meeting));
+    }
+    if let Some(date) = &filters.date {
+        cmd.push_str(&format!(" --date {}", date));
+    }
+    if let Some(from) = &filters.from {
+        cmd.push_str(&format!(" --from {}", from));
+    }
+    if let Some(to) = &filters.to {
+        cmd.push_str(&format!(" --to {}", to));
+    }
+    if filters.include_deleted {
+        cmd.push_str(" --include-deleted");
+    }
+    cmd
+}
+
+/// Footer cross-linking the complete lookup, backed by the uncapped FTS
+/// count. None when no meeting contains the query's words, in which case
+/// no footer is printed.
+fn grep_cross_link(keyword_total: usize, query: &str, filters: &FilterEcho) -> Option<String> {
+    if keyword_total == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} meeting(s) contain these words; {} lists them all.",
+        keyword_total,
+        grep_command_echo(query, filters)
+    ))
+}
+
+/// Print ranked results, honoring the output mode. The list is a pooled
+/// best-k, so no corpus total is claimed; when the query's words appear
+/// anywhere, the output points at `grans grep` for the complete list.
+fn render_ranked_meeting_list(
     shaped: &[crate::query::shape::ShapedMeeting],
     query: &str,
-    total: usize,
-    limit: usize,
+    keyword_total: usize,
+    opts: &SearchOptions,
     ctx: &RunContext,
 ) {
     match ctx.output_mode {
         OutputMode::Json => {
             println!(
                 "{}",
-                crate::output::json::format_shaped_meetings(shaped, query, total, limit)
+                crate::output::json::format_search_meetings(shaped, query, keyword_total, opts.limit)
             );
         }
         OutputMode::Tty => {
             if shaped.is_empty() {
-                println!("No meetings found matching \"{}\".", query);
-                return;
-            }
-            if total > shaped.len() {
-                println!(
-                    "Found {} meeting(s) matching \"{}\" (showing {}):\n",
-                    total,
-                    query,
-                    shaped.len()
-                );
+                println!("No matches for \"{}\".", query);
             } else {
-                println!("Found {} meeting(s) matching \"{}\":\n", shaped.len(), query);
+                println!("{}\n", ranked_header(shaped.len(), query));
+                print_shaped_cards(shaped, ctx);
             }
-            for (i, meeting) in shaped.iter().enumerate() {
-                println!(
-                    "{}\n",
-                    crate::output::card::format_shaped_meeting(meeting, i + 1, &ctx.tz)
-                );
-            }
-            if total > shaped.len() {
-                println!("Use --limit 0 to show all {} results.", total);
+            if let Some(footer) = grep_cross_link(keyword_total, query, &opts.echo) {
+                println!("{}", footer);
             }
         }
     }
-}
-
-/// True when the document's title or id contains the lowercased filter.
-fn matches_meeting_filter(doc: &Document, filter_lower: &str) -> bool {
-    doc.title
-        .as_ref()
-        .map(|t| t.to_lowercase().contains(filter_lower))
-        .unwrap_or(false)
-        || doc
-            .id
-            .as_ref()
-            .map(|id| id.to_lowercase().contains(filter_lower))
-            .unwrap_or(false)
-}
-
-/// Keep only documents whose title or id contains `filter` (case-insensitive).
-/// No filter keeps everything.
-fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Vec<Document> {
-    let Some(filter) = meeting_filter else {
-        return results;
-    };
-    let filter_lower = filter.to_lowercase();
-    results.into_iter().filter(|doc| matches_meeting_filter(doc, &filter_lower)).collect()
 }
 
 /// Check embedding status and, on a TTY, prompt before a large or full
@@ -485,307 +318,168 @@ fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Res
 mod tests {
     use super::*;
 
-    #[test]
-    fn from_cli_args_defaults_to_hybrid() {
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 0, "titles,notes", None, None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Hybrid {
-                targets,
-                meeting_filter,
-                rerank,
-                min_score,
-                yes,
-                limit,
-                matches,
-                speaker,
-                context,
-            } => {
-                assert_eq!(targets.len(), 2);
-                assert!(targets.contains(&SearchTarget::Titles));
-                assert!(targets.contains(&SearchTarget::Notes));
-                assert!(meeting_filter.is_none());
-                assert!(rerank);
-                assert_eq!(min_score, None);
-                assert!(!yes);
-                assert_eq!(limit, 10);
-                assert_eq!(matches, 1);
-                assert_eq!(speaker, None);
-                assert_eq!(context, 0);
-            }
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    /// Documents in a fixed order with scores, as a ranked pipeline would
-    /// hand them to shaping.
-    fn ranked_docs(conn: &Connection) -> Vec<(Document, Option<f32>)> {
-        let docs = crate::db::meetings::get_meetings_by_ids(
-            &conn,
-            &["doc-c".to_string(), "doc-a".to_string(), "doc-b".to_string()],
-        )
-        .unwrap();
-        let mut by_id: std::collections::HashMap<String, Document> =
-            docs.into_iter().map(|d| (d.id.clone().unwrap(), d)).collect();
-        vec![
-            (by_id.remove("doc-c").unwrap(), Some(0.5)),
-            (by_id.remove("doc-a").unwrap(), Some(0.9)),
-            (by_id.remove("doc-b").unwrap(), None),
-        ]
-    }
-
-    fn plain_facts<'a>(_: &Document, score: Option<f32>) -> crate::query::evidence::RankingFacts<'a> {
-        crate::query::evidence::RankingFacts { keyword: true, best_chunk: None, score }
+    fn echo_with(f: impl FnOnce(&mut FilterEcho)) -> FilterEcho {
+        let mut echo = FilterEcho::default();
+        f(&mut echo);
+        echo
     }
 
     #[test]
-    fn shape_and_page_preserves_ranking_order_and_scores() {
-        // Shaping is presentation-only: the cards must come back in exactly
-        // the order the ranked list was handed in, whatever the db returns.
-        use crate::db::test_fixtures::build_test_db;
-        use serde_json::json;
-
-        let conn = build_test_db(&json!({
-            "documents": {
-                "doc-a": {"id": "doc-a", "title": "Alpha", "created_at": "2026-01-01T10:00:00Z"},
-                "doc-b": {"id": "doc-b", "title": "Beta", "created_at": "2026-01-02T10:00:00Z"},
-                "doc-c": {"id": "doc-c", "title": "Gamma", "created_at": "2026-01-03T10:00:00Z"}
-            }
-        }));
-
-        let (shaped, total) = shape_and_page(
-            &conn,
-            ranked_docs(&conn),
-            plain_facts,
-            &crate::query::fts::parse_query("alpha"),
-            &crate::query::evidence::EvidenceOptions::default(),
+    fn from_cli_args_defaults_rerank_on() {
+        let opts = SearchOptions::from_cli_args(
+            false,
+            None,
             0,
-        )
-        .unwrap();
-
-        assert_eq!(total, 3);
-        let ids: Vec<&str> = shaped.iter().map(|m| m.document_id.as_str()).collect();
-        assert_eq!(ids, vec!["doc-c", "doc-a", "doc-b"]);
-        assert_eq!(shaped[0].score, Some(0.5));
-        assert_eq!(shaped[1].score, Some(0.9));
-        assert_eq!(shaped[2].score, None);
-    }
-
-    #[test]
-    fn shape_and_page_speaker_filter_drops_meetings_and_recounts() {
-        // With a speaker filter, meetings without a matching utterance by
-        // that speaker vanish from both the page and the total, in order.
-        use crate::db::test_fixtures::build_test_db;
-        use serde_json::json;
-
-        let conn = build_test_db(&json!({
-            "documents": {
-                "doc-a": {"id": "doc-a", "title": "Alpha", "created_at": "2026-01-01T10:00:00Z",
-                          "notes_plain": "kumquat in notes only"},
-                "doc-b": {"id": "doc-b", "title": "Beta", "created_at": "2026-01-02T10:00:00Z"},
-                "doc-c": {"id": "doc-c", "title": "Gamma", "created_at": "2026-01-03T10:00:00Z"}
-            },
-            "transcripts": {
-                "doc-b": [
-                    {"id": "u1", "document_id": "doc-b", "text": "the kumquat by me",
-                     "start_timestamp": "2026-01-02T10:01:00Z", "end_timestamp": "2026-01-02T10:01:05Z",
-                     "source": "microphone", "is_final": true}
-                ],
-                "doc-c": [
-                    {"id": "u2", "document_id": "doc-c", "text": "the kumquat by them",
-                     "start_timestamp": "2026-01-03T10:01:00Z", "end_timestamp": "2026-01-03T10:01:05Z",
-                     "source": "system", "is_final": true}
-                ]
-            }
-        }));
-        let opts = crate::query::evidence::EvidenceOptions {
-            speaker: Some(SpeakerFilter::Me),
-            ..Default::default()
-        };
-
-        let (shaped, total) = shape_and_page(
-            &conn,
-            ranked_docs(&conn),
-            plain_facts,
-            &crate::query::fts::parse_query("kumquat"),
-            &opts,
-            0,
-        )
-        .unwrap();
-
-        // doc-c's match is by the other speaker; doc-a's is unattributable
-        // notes evidence. Only doc-b survives.
-        assert_eq!(total, 1);
-        assert_eq!(shaped.len(), 1);
-        assert_eq!(shaped[0].document_id, "doc-b");
-        assert_eq!(shaped[0].score, None);
-        assert_eq!(shaped[0].matches[0].speaker.as_deref(), Some("microphone"));
-    }
-
-    #[test]
-    fn from_cli_args_matches_threads_to_hybrid() {
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 0, "titles", None, None, false, 10, 3,
+            false,
+            10,
+            1,
+            echo_with(|e| e.in_targets = "titles,notes".to_string()),
         );
-        match mode {
-            SearchMode::Hybrid { matches, .. } => assert_eq!(matches, 3),
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_keyword_flag_forces_keyword() {
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 0, "titles,notes", Some("standup"), None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Keyword {
-                targets,
-                meeting_filter,
-                limit,
-                matches,
-                speaker,
-                context,
-            } => {
-                assert_eq!(targets.len(), 2);
-                assert!(targets.contains(&SearchTarget::Titles));
-                assert!(targets.contains(&SearchTarget::Notes));
-                assert_eq!(meeting_filter.as_deref(), Some("standup"));
-                assert_eq!(limit, 10);
-                assert_eq!(matches, 1);
-                assert_eq!(speaker, None);
-                assert_eq!(context, 0);
-            }
-            _ => panic!("Expected Keyword variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_context_threads_to_both_modes() {
-        // --context is a presentation option, not a mode: it no longer
-        // forces the keyword path.
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 3, "titles", None, None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Hybrid { context, .. } => assert_eq!(context, 3),
-            _ => panic!("Expected Hybrid variant"),
-        }
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 2, "titles", None, None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Keyword { context, .. } => assert_eq!(context, 2),
-            _ => panic!("Expected Keyword variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_matches_threads_to_keyword() {
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 0, "titles", None, None, false, 10, 4,
-        );
-        match mode {
-            SearchMode::Keyword { matches, .. } => assert_eq!(matches, 4),
-            _ => panic!("Expected Keyword variant"),
-        }
+        assert_eq!(opts.targets.len(), 2);
+        assert!(opts.targets.contains(&SearchTarget::Titles));
+        assert!(opts.targets.contains(&SearchTarget::Notes));
+        assert!(opts.meeting_filter.is_none());
+        assert!(opts.rerank);
+        assert_eq!(opts.min_score, None);
+        assert!(!opts.yes);
+        assert_eq!(opts.limit, 10);
+        assert_eq!(opts.matches, 1);
+        assert_eq!(opts.context, 0);
     }
 
     #[test]
     fn from_cli_args_fast_skips_rerank() {
-        let mode = SearchMode::from_cli_args(
-            true, None, false, 0, "titles", None, None, false, 10, 1,
+        let opts =
+            SearchOptions::from_cli_args(true, None, 0, false, 10, 1, FilterEcho::default());
+        assert!(!opts.rerank);
+    }
+
+    #[test]
+    fn from_cli_args_min_score_threads() {
+        let opts = SearchOptions::from_cli_args(
+            false,
+            Some(0.4),
+            0,
+            false,
+            10,
+            1,
+            FilterEcho::default(),
         );
-        match mode {
-            SearchMode::Hybrid { rerank, .. } => assert!(!rerank),
-            _ => panic!("Expected Hybrid variant"),
-        }
+        assert_eq!(opts.min_score, Some(0.4));
     }
 
     #[test]
-    fn from_cli_args_min_score_threads_to_hybrid() {
-        let mode = SearchMode::from_cli_args(
-            false, Some(0.4), false, 0, "titles", None, None, false, 10, 1,
+    fn from_cli_args_meeting_filter_threads() {
+        let opts = SearchOptions::from_cli_args(
+            false,
+            None,
+            0,
+            false,
+            10,
+            1,
+            echo_with(|e| e.meeting = Some("daily".to_string())),
         );
-        match mode {
-            SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),
-            _ => panic!("Expected Hybrid variant"),
-        }
+        assert_eq!(opts.meeting_filter.as_deref(), Some("daily"));
     }
 
     #[test]
-    fn from_cli_args_speaker_stays_on_the_hybrid_default() {
-        // #60: a bare --speaker used to silently route to the keyword path
-        // (which then dropped the filter); it now composes with hybrid.
-        let speaker = SpeakerFilter::Me;
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 0, "transcripts", None, Some(&speaker), false, 10, 1,
+    fn from_cli_args_matches_and_context_thread() {
+        let opts =
+            SearchOptions::from_cli_args(false, None, 3, false, 10, 4, FilterEcho::default());
+        assert_eq!(opts.context, 3);
+        assert_eq!(opts.matches, 4);
+    }
+
+    #[test]
+    fn ranked_header_claims_only_the_shown_count() {
+        assert_eq!(ranked_header(7, "budget"), "Top 7 match(es) for \"budget\":");
+    }
+
+    #[test]
+    fn grep_cross_link_suppressed_when_nothing_matches_the_words() {
+        assert_eq!(grep_cross_link(0, "budget", &FilterEcho::default()), None);
+    }
+
+    #[test]
+    fn grep_cross_link_bare_default_echoes_plain_grep() {
+        assert_eq!(
+            grep_cross_link(312, "budget", &FilterEcho::default()).as_deref(),
+            Some("312 meeting(s) contain these words; grans grep \"budget\" lists them all.")
         );
-        match mode {
-            SearchMode::Hybrid { speaker, .. } => assert_eq!(speaker, Some(SpeakerFilter::Me)),
-            _ => panic!("Expected Hybrid variant"),
-        }
     }
 
     #[test]
-    fn from_cli_args_speaker_threads_to_keyword() {
-        let speaker = SpeakerFilter::Other;
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 0, "transcripts", None, Some(&speaker), false, 10, 1,
+    fn grep_command_echo_omits_the_default_target_list() {
+        assert_eq!(
+            grep_command_echo("budget", &FilterEcho::default()),
+            "grans grep \"budget\""
         );
-        match mode {
-            SearchMode::Keyword { speaker, .. } => {
-                assert_eq!(speaker, Some(SpeakerFilter::Other));
-            }
-            _ => panic!("Expected Keyword variant"),
-        }
     }
 
     #[test]
-    fn from_cli_args_meeting_filter_threads_to_hybrid() {
-        let mode =
-            SearchMode::from_cli_args(false, None, false, 0, "transcripts", Some("daily"), None, false, 10, 1);
-        match mode {
-            SearchMode::Hybrid {
-                meeting_filter, ..
-            } => {
-                assert_eq!(meeting_filter.as_deref(), Some("daily"));
-            }
-            _ => panic!("Expected Hybrid variant"),
-        }
+    fn grep_command_echo_echoes_a_non_default_in_list() {
+        let echo = echo_with(|e| e.in_targets = "titles,notes".to_string());
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --in titles,notes"
+        );
     }
 
     #[test]
-    fn from_cli_args_meeting_filter_threads_to_keyword() {
-        let mode =
-            SearchMode::from_cli_args(false, None, true, 0, "transcripts", Some("daily"), None, false, 10, 1);
-        match mode {
-            SearchMode::Keyword {
-                meeting_filter, ..
-            } => {
-                assert_eq!(meeting_filter.as_deref(), Some("daily"));
-            }
-            _ => panic!("Expected Keyword variant"),
-        }
+    fn grep_command_echo_quotes_the_meeting_filter() {
+        let echo = echo_with(|e| e.meeting = Some("Weekly Standup".to_string()));
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --meeting \"Weekly Standup\""
+        );
     }
 
     #[test]
-    fn apply_limit_zero_means_no_limit() {
-        let items = vec![1, 2, 3, 4, 5];
-        assert_eq!(apply_limit(items, 0), vec![1, 2, 3, 4, 5]);
+    fn grep_command_echo_echoes_the_raw_date_flag() {
+        let echo = echo_with(|e| e.date = Some("last-week".to_string()));
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --date last-week"
+        );
     }
 
     #[test]
-    fn apply_limit_truncates() {
-        let items = vec![1, 2, 3, 4, 5];
-        assert_eq!(apply_limit(items, 3), vec![1, 2, 3]);
+    fn grep_command_echo_echoes_raw_from_and_to() {
+        let echo = echo_with(|e| {
+            e.from = Some("2026-01-01".to_string());
+            e.to = Some("3d".to_string());
+        });
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --from 2026-01-01 --to 3d"
+        );
     }
 
     #[test]
-    fn apply_limit_noop_when_under() {
-        let items = vec![1, 2, 3];
-        assert_eq!(apply_limit(items, 10), vec![1, 2, 3]);
+    fn grep_command_echo_echoes_include_deleted() {
+        let echo = echo_with(|e| e.include_deleted = true);
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --include-deleted"
+        );
     }
 
+    #[test]
+    fn grep_command_echo_combines_every_count_affecting_filter() {
+        let echo = FilterEcho {
+            in_targets: "transcripts".to_string(),
+            meeting: Some("Weekly Standup".to_string()),
+            date: Some("last-week".to_string()),
+            from: None,
+            to: None,
+            include_deleted: true,
+        };
+        assert_eq!(
+            grep_cross_link(41, "budget", &echo).as_deref(),
+            Some(
+                "41 meeting(s) contain these words; grans grep \"budget\" --in transcripts \
+                 --meeting \"Weekly Standup\" --date last-week --include-deleted lists them all."
+            )
+        );
+    }
 }

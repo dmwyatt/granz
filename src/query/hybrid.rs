@@ -2,8 +2,8 @@
 //!
 //! Both retrievers run over the same query; their document-level ranked
 //! lists are truncated to a candidate pool and fused by rank (see
-//! [`crate::query::fusion`]). Used by `grans search --hybrid` and the
-//! quality benchmark's hybrid mode.
+//! [`crate::query::fusion`]). Used by `grans search` and the quality
+//! benchmark's hybrid mode.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::embed::model::Embedder;
 use crate::embed::EmbeddingIndex;
 use crate::query::dates::DateRange;
-use crate::query::filter::{semantic_source_filter, SearchTarget};
+use crate::query::filter::{meeting_filter_matches, semantic_source_filter, SearchTarget};
 use crate::query::fusion::{reciprocal_rank_fusion, FusedDoc, RRF_K};
 
 /// How many top documents each retriever contributes to fusion.
@@ -39,19 +39,33 @@ pub struct HybridRanking {
     pub fused: Vec<FusedDoc>,
     pub best_chunks: HashMap<String, BestChunk>,
     pub keyword_ids: HashSet<String>,
+    /// Uncapped FTS match count, taken before fusion truncates the FTS
+    /// list to the candidate pool: the number of meetings `grans grep`
+    /// would report for the same query and filters.
+    pub keyword_total: usize,
 }
 
 /// Run FTS and semantic retrieval for `query` and fuse the rankings.
 /// Fused documents come back best first.
+///
+/// `meeting_filter` (case-insensitive substring of document title or id)
+/// restricts both candidate lists before fusion truncates them to the
+/// pool, so ranking happens within the requested meeting rather than
+/// intersecting it with the global top candidates.
+#[allow(clippy::too_many_arguments)]
 pub fn hybrid_ranked(
     conn: &Connection,
     embedder: &dyn Embedder,
     index: &EmbeddingIndex,
     query: &str,
     targets: &[SearchTarget],
+    meeting_filter: Option<&str>,
     date_range: Option<&DateRange>,
     include_deleted: bool,
 ) -> Result<HybridRanking> {
+    let allowed = meeting_filter.map(|f| allowed_meeting_ids(conn, f)).transpose()?;
+    let is_allowed = |id: &str| allowed.as_ref().is_none_or(|set| set.contains(id));
+
     let fts_docs = crate::db::meetings::search_meetings(
         conn,
         query,
@@ -62,7 +76,8 @@ pub fn hybrid_ranked(
         date_range,
         include_deleted,
     )?;
-    let fts_ids: Vec<String> = fts_docs.into_iter().filter_map(|d| d.id).collect();
+    let fts_ids: Vec<String> =
+        fts_docs.into_iter().filter_map(|d| d.id).filter(|id| is_allowed(id)).collect();
 
     // No limit: the per-document best chunks must cover every candidate,
     // including FTS-only documents outside the semantic top of the pool.
@@ -82,6 +97,9 @@ pub fn hybrid_ranked(
     let mut semantic_ids = Vec::with_capacity(semantic_results.len());
     let mut best_chunks = HashMap::with_capacity(semantic_results.len());
     for r in semantic_results {
+        if !is_allowed(&r.document_id) {
+            continue;
+        }
         semantic_ids.push(r.document_id.clone());
         best_chunks.insert(
             r.document_id,
@@ -94,11 +112,23 @@ pub fn hybrid_ranked(
     }
 
     let keyword_ids: HashSet<String> = fts_ids.iter().cloned().collect();
+    let keyword_total = fts_ids.len();
     Ok(HybridRanking {
         fused: fuse_candidates(fts_ids, semantic_ids),
         best_chunks,
         keyword_ids,
+        keyword_total,
     })
+}
+
+/// Ids of documents whose title or id contains `filter`, case-insensitive.
+fn allowed_meeting_ids(conn: &Connection, filter: &str) -> Result<HashSet<String>> {
+    let filter_lower = filter.to_lowercase();
+    Ok(crate::db::meetings::all_meeting_refs(conn)?
+        .into_iter()
+        .filter(|(id, title)| meeting_filter_matches(&filter_lower, title.as_deref(), Some(id)))
+        .map(|(id, _)| id)
+        .collect())
 }
 
 /// Truncate each ranked id list to the candidate pool and fuse with RRF.
@@ -186,7 +216,7 @@ mod tests {
         let index = hybrid_index();
 
         let fused =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
                 .unwrap()
                 .fused;
 
@@ -211,7 +241,7 @@ mod tests {
         let targets = SearchTarget::parse_list("titles");
 
         let fused =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &targets, None, false)
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &targets, None, None, false)
                 .unwrap()
                 .fused;
 
@@ -235,7 +265,7 @@ mod tests {
         };
 
         let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
                 .unwrap();
 
         assert_eq!(
@@ -260,7 +290,7 @@ mod tests {
         let index = hybrid_index();
 
         let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
                 .unwrap();
 
         // Both kumquat-titled docs come from FTS; the semantic-only doc
@@ -271,12 +301,190 @@ mod tests {
     }
 
     #[test]
+    fn keyword_total_counts_fts_matches_beyond_the_pool() {
+        // 120 kumquat-titled docs: fusion truncates the FTS list to the
+        // candidate pool, but keyword_total reports the uncapped corpus
+        // count backing the grep cross-link.
+        let mut docs = serde_json::Map::new();
+        for i in 0..120 {
+            let id = format!("doc-{i:03}");
+            docs.insert(
+                id.clone(),
+                json!({
+                    "id": id,
+                    "title": format!("Kumquat filler {i:03}"),
+                    "created_at": format!("2026-03-01T{:02}:{:02}:00Z", i / 60, i % 60),
+                }),
+            );
+        }
+        let conn = build_test_db(&json!({ "documents": docs }));
+        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+
+        let ranking =
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
+                .unwrap();
+
+        assert_eq!(ranking.keyword_total, 120);
+        assert_eq!(ranking.fused.len(), CANDIDATE_POOL);
+    }
+
+    /// 120 kumquat filler docs plus one older "beta" doc that FTS ranks
+    /// last, beyond the candidate pool.
+    fn pooled_state_with_beta_target() -> serde_json::Value {
+        let mut docs = serde_json::Map::new();
+        for i in 0..120 {
+            let id = format!("doc-{i:03}");
+            docs.insert(
+                id.clone(),
+                json!({
+                    "id": id,
+                    "title": format!("Kumquat filler {i:03}"),
+                    "created_at": format!("2026-03-01T{:02}:{:02}:00Z", i / 60, i % 60),
+                }),
+            );
+        }
+        docs.insert(
+            "doc-beta-target".to_string(),
+            json!({
+                "id": "doc-beta-target",
+                "title": "Kumquat beta target",
+                "created_at": "2026-01-01T00:00:00Z",
+            }),
+        );
+        json!({ "documents": docs })
+    }
+
+    #[test]
+    fn meeting_filter_restricts_fts_candidates_before_pooling() {
+        // Regression for #65: --meeting used to be applied after the caps,
+        // intersecting the requested meeting with the global top of the
+        // pool. The beta doc ranks 121st in FTS (past CANDIDATE_POOL), so
+        // only a pushdown before truncation can surface it.
+        let conn = build_test_db(&pooled_state_with_beta_target());
+        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+
+        let ranking = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            Some("beta"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let ids: Vec<&str> = ranking.fused.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-beta-target"]);
+        assert_eq!(ranking.keyword_total, 1);
+
+        // Sanity: without the filter the beta doc is truncated out.
+        let unfiltered = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(!unfiltered
+            .fused
+            .iter()
+            .any(|d| d.document_id == "doc-beta-target"));
+    }
+
+    #[test]
+    fn meeting_filter_applies_to_semantic_candidates() {
+        // "doc-sem" only surfaces through the semantic list; the meeting
+        // filter must gate that list too.
+        let conn = build_test_db(&hybrid_state());
+        let index = hybrid_index();
+
+        let ranking = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            Some("unrelated"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let ids: Vec<&str> = ranking.fused.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-sem"]);
+        // Nothing FTS-matched survives the filter.
+        assert_eq!(ranking.keyword_total, 0);
+        // Excluded documents contribute no best chunks.
+        assert!(!ranking.best_chunks.contains_key("doc-both"));
+    }
+
+    #[test]
+    fn meeting_filter_matches_title_case_insensitively_and_by_id() {
+        let conn = build_test_db(&hybrid_state());
+        let index = hybrid_index();
+
+        // Title substring, different case.
+        let by_title = hybrid_ranked(
+            &conn, &FixedEmbedder, &index, "kumquat", &all_targets(), Some("SYNC A"), None, false,
+        )
+        .unwrap();
+        let ids: Vec<&str> = by_title.fused.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-both"]);
+
+        // Id substring.
+        let by_id = hybrid_ranked(
+            &conn, &FixedEmbedder, &index, "kumquat", &all_targets(), Some("doc-fts"), None, false,
+        )
+        .unwrap();
+        let ids: Vec<&str> = by_id.fused.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["doc-fts"]);
+    }
+
+    #[test]
+    fn keyword_total_agrees_with_the_grep_side_count() {
+        // keyword_total backs the footer that promises what grep will
+        // report, but the two counts are computed on different paths:
+        // hybrid_ranked filters ids against an allowed set, grep filters
+        // documents with filter_by_meeting. Pin their agreement.
+        let conn = build_test_db(&hybrid_state());
+        let index = hybrid_index();
+
+        for filter in [None, Some("sync"), Some("sync a"), Some("nowhere")] {
+            let ranking = hybrid_ranked(
+                &conn,
+                &FixedEmbedder,
+                &index,
+                "kumquat",
+                &all_targets(),
+                filter,
+                None,
+                false,
+            )
+            .unwrap();
+
+            let grep_docs = crate::db::meetings::search_meetings(
+                &conn, "kumquat", true, true, true, true, None, false,
+            )
+            .unwrap();
+            let grep_count = crate::query::filter::filter_by_meeting(grep_docs, filter).len();
+
+            assert_eq!(ranking.keyword_total, grep_count, "filter {filter:?}");
+        }
+    }
+
+    #[test]
     fn no_matches_fuse_to_empty() {
         let conn = build_test_db(&hybrid_state());
         let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
 
         let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "zyzzyva", &all_targets(), None, false)
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "zyzzyva", &all_targets(), None, None, false)
                 .unwrap();
 
         assert!(ranking.fused.is_empty());

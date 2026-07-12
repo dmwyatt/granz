@@ -193,7 +193,7 @@ fn meetings_show_transcript_no_transcript_errors() {
 fn meetings_search_by_title() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "Alpha", "--keyword", "--in", "titles"])
+        .args(["grep", "Alpha", "--in", "titles"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Project Alpha Kickoff"));
@@ -203,7 +203,7 @@ fn meetings_search_by_title() {
 fn meetings_search_by_notes() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "benchmarks", "--keyword", "--in", "notes"])
+        .args(["grep", "benchmarks", "--in", "notes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Beta Feature Review"));
@@ -213,7 +213,7 @@ fn meetings_search_by_notes() {
 fn meetings_search_by_transcripts() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "prototype", "--keyword", "--in", "transcripts"])
+        .args(["grep", "prototype", "--in", "transcripts"])
         .assert()
         .success()
         .stdout(predicate::str::contains("doc-alpha").or(predicate::str::contains("doc-beta")));
@@ -225,7 +225,7 @@ fn meetings_search_by_transcripts() {
 fn transcripts_search_finds_match() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "deadline", "--keyword", "--context", "2"])
+        .args(["grep", "deadline", "--context", "2"])
         .assert()
         .success()
         .stdout(predicate::str::contains("deadline"));
@@ -236,7 +236,7 @@ fn transcripts_search_json_has_context_units() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "deadline", "--keyword", "--context", "1"])
+        .args(["grep", "deadline", "--context", "1"])
         .output()
         .unwrap();
 
@@ -254,7 +254,7 @@ fn transcripts_search_within_meeting() {
     let env = TestEnv::with_fixture();
     // Search for "prototype" but restrict to doc-beta
     env.cmd()
-        .args(["search", "prototype", "--keyword", "--context", "2", "--meeting", "Beta"])
+        .args(["grep", "prototype", "--context", "2", "--meeting", "Beta"])
         .assert()
         .success()
         .stdout(predicate::str::contains("prototype").or(predicate::str::contains("staging")));
