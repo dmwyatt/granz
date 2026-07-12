@@ -3,9 +3,6 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::models::TranscriptUtterance;
-use crate::query::dates::DateRange;
-use crate::query::fts::{matches_all_tokens, parse_query, sanitize_fts_query};
-use crate::query::search::ContextWindow;
 
 /// Raw SQLite row for a transcript utterance.
 pub(crate) struct TranscriptUtteranceRow {
@@ -35,90 +32,6 @@ pub(crate) fn row_to_utterance(row: TranscriptUtteranceRow) -> TranscriptUtteran
     }
 }
 
-pub fn search_transcripts(
-    conn: &Connection,
-    query: &str,
-    meeting: Option<&str>,
-    context_size: usize,
-    date_range: Option<&DateRange>,
-    include_deleted: bool,
-) -> Result<Vec<(String, Vec<ContextWindow>)>> {
-    let matching_doc_ids = find_matching_documents(conn, query, meeting, date_range, include_deleted)?;
-
-    let mut results = Vec::new();
-    for (doc_id, doc_title) in &matching_doc_ids {
-        let utterances = load_transcript(conn, doc_id)?;
-        if utterances.is_empty() {
-            continue;
-        }
-
-        let windows = build_context_windows(&utterances, query, context_size);
-        if !windows.is_empty() {
-            results.push((doc_title.clone(), windows));
-        }
-    }
-
-    Ok(results)
-}
-
-fn find_matching_documents(
-    conn: &Connection,
-    query: &str,
-    meeting: Option<&str>,
-    date_range: Option<&DateRange>,
-    include_deleted: bool,
-) -> Result<Vec<(String, String)>> {
-    let fts_query = sanitize_fts_query(query);
-    let deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
-
-    // MATERIALIZED stops the query flattener from pulling bm25() into the
-    // aggregate context, where FTS5 auxiliary functions cannot run.
-    let mut sql = format!(
-        "WITH hits AS MATERIALIZED (
-         SELECT tu.document_id AS doc_id, COALESCE(d.title, '(untitled)') AS title,
-                d.created_at AS created_at, bm25(transcript_fts) AS score
-         FROM transcript_fts
-         JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid
-         JOIN documents d ON tu.document_id = d.id
-         WHERE transcript_fts MATCH ?1{}",
-        deleted_filter
-    );
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query)];
-
-    if let Some(meeting_q) = meeting {
-        sql.push_str(" AND (d.id = ?2 OR d.id LIKE ?3 OR d.title LIKE ?3 COLLATE NOCASE)");
-        let pattern = format!("%{}%", meeting_q);
-        params.push(Box::new(meeting_q.to_string()));
-        params.push(Box::new(pattern));
-    }
-
-    if let Some(range) = date_range {
-        if let Some(start) = &range.start {
-            sql.push_str(" AND d.created_at >= ?");
-            params.push(Box::new(start.to_rfc3339()));
-        }
-        if let Some(end) = &range.end {
-            sql.push_str(" AND d.created_at < ?");
-            params.push(Box::new(end.to_rfc3339()));
-        }
-    }
-
-    // A document's rank is its best-matching utterance; bm25 is
-    // lower-is-better, recency breaks ties.
-    sql.push_str(
-        ") SELECT doc_id, title FROM hits GROUP BY doc_id ORDER BY MIN(score) ASC, created_at DESC",
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
 /// Load all transcript utterances for a document, ordered by timestamp.
 ///
 /// Note: `source` and `is_final` may be None for historical transcripts synced before
@@ -142,47 +55,6 @@ pub fn load_transcript(conn: &Connection, document_id: &str) -> Result<Vec<Trans
     })?;
 
     Ok(rows.filter_map(|r| r.ok()).map(row_to_utterance).collect())
-}
-
-fn build_context_windows(
-    utterances: &[TranscriptUtterance],
-    query: &str,
-    context_size: usize,
-) -> Vec<ContextWindow> {
-    let tokens = parse_query(query);
-    let mut results = Vec::new();
-
-    for (i, utt) in utterances.iter().enumerate() {
-        let text = match &utt.text {
-            Some(t) => t,
-            None => continue,
-        };
-
-        if !matches_all_tokens(text, &tokens) {
-            continue;
-        }
-
-        let before_start = i.saturating_sub(context_size);
-        let after_end = (i + 1 + context_size).min(utterances.len());
-
-        let before: Vec<TranscriptUtterance> = utterances[before_start..i]
-            .iter()
-            .cloned()
-            .collect();
-        let matched = utt.clone();
-        let after: Vec<TranscriptUtterance> = utterances[i + 1..after_end]
-            .iter()
-            .cloned()
-            .collect();
-
-        results.push(ContextWindow {
-            before,
-            matched,
-            after,
-        });
-    }
-
-    results
 }
 
 /// Document info for transcript sync
@@ -414,108 +286,6 @@ mod tests {
     use crate::db::test_fixtures::{build_test_db, transcripts_state};
 
     #[test]
-    fn test_search_transcripts_basic() {
-        let conn = build_test_db(&transcripts_state());
-        let results = search_transcripts(&conn, "neural networks", None, 1, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        let (title, windows) = &results[0];
-        assert_eq!(title, "AI Meeting");
-        assert_eq!(windows.len(), 1);
-        assert_eq!(
-            windows[0].matched.text.as_deref(),
-            Some("Let's talk about neural networks today")
-        );
-    }
-
-    #[test]
-    fn test_search_transcripts_context() {
-        let conn = build_test_db(&transcripts_state());
-        let results = search_transcripts(&conn, "neural networks", None, 1, None, false).unwrap();
-        let (_, windows) = &results[0];
-        assert_eq!(windows[0].before.len(), 1);
-        assert_eq!(
-            windows[0].before[0].text.as_deref(),
-            Some("Hello everyone")
-        );
-        assert_eq!(windows[0].after.len(), 1);
-        assert_eq!(windows[0].after[0].text.as_deref(), Some("Great idea"));
-    }
-
-    #[test]
-    fn test_search_transcripts_orders_by_relevance_then_recency() {
-        // Regression: matches were ordered by created_at DESC, so a passing
-        // mention in a newer meeting outranked the meeting about the topic.
-        // Filler rows keep the term under half the corpus so BM25 IDF stays
-        // positive.
-        let conn = build_test_db(&serde_json::json!({
-            "documents": {
-                "doc-relevant": {"id": "doc-relevant", "title": "Relevant Meeting", "created_at": "2026-01-10T10:00:00Z"},
-                "doc-mention": {"id": "doc-mention", "title": "Passing Mention", "created_at": "2026-01-20T10:00:00Z"}
-            },
-            "transcripts": {
-                "doc-relevant": [
-                    {"id": "r1", "document_id": "doc-relevant", "text": "kubernetes migration steps kubernetes cluster upgrades and kubernetes networking"}
-                ],
-                "doc-mention": [
-                    {"id": "m1", "document_id": "doc-mention", "text": "someone mentioned kubernetes briefly while we mostly discussed the quarterly budget review"},
-                    {"id": "m2", "document_id": "doc-mention", "text": "budget planning discussion continued"},
-                    {"id": "m3", "document_id": "doc-mention", "text": "then we walked through the offsite agenda"}
-                ]
-            }
-        }));
-        let results = search_transcripts(&conn, "kubernetes", None, 0, None, false).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "Relevant Meeting");
-        assert_eq!(results[1].0, "Passing Mention");
-    }
-
-    #[test]
-    fn test_search_transcripts_multi_word_matches_any_order() {
-        // Regression: phrase-quoting meant reversed word order never matched,
-        // and the context-window filter required the full query as a substring.
-        let conn = build_test_db(&transcripts_state());
-        let results = search_transcripts(&conn, "networks neural", None, 0, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "AI Meeting");
-        assert_eq!(
-            results[0].1[0].matched.text.as_deref(),
-            Some("Let's talk about neural networks today")
-        );
-    }
-
-    #[test]
-    fn test_search_transcripts_no_match() {
-        let conn = build_test_db(&transcripts_state());
-        let results =
-            search_transcripts(&conn, "quantum computing", None, 1, None, false).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_search_transcripts_filter_by_meeting() {
-        let conn = build_test_db(&transcripts_state());
-        // "neural" appears in both doc-1 and doc-2, but filter by meeting
-        let results =
-            search_transcripts(&conn, "neural", Some("AI Meeting"), 0, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "AI Meeting");
-    }
-
-    #[test]
-    fn test_search_transcripts_with_date_range() {
-        let conn = build_test_db(&transcripts_state());
-        use chrono::{TimeZone, Utc};
-        let range = DateRange {
-            start: Some(Utc.with_ymd_and_hms(2026, 1, 21, 0, 0, 0).unwrap()),
-            end: Some(Utc.with_ymd_and_hms(2026, 1, 22, 0, 0, 0).unwrap()),
-        };
-        let results =
-            search_transcripts(&conn, "neural", None, 0, Some(&range), false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "Other Meeting");
-    }
-
-    #[test]
     fn test_find_documents_without_transcripts() {
         let conn = build_test_db(&transcripts_state());
         // transcripts_state has doc-1 and doc-2, both with transcripts
@@ -662,9 +432,17 @@ mod tests {
     fn test_insert_transcript_from_api_updates_fts_index() {
         let conn = build_test_db(&transcripts_state());
 
+        let fts_count = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM transcript_fts WHERE transcript_fts MATCH ?1",
+                [format!("\"{query}\"")],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
         // transcripts_state has doc-1 with text "neural networks" - verify it's searchable
-        let old_search = search_transcripts(&conn, "neural networks", None, 0, None, false).unwrap();
-        assert_eq!(old_search.len(), 1, "Should find 'neural networks' before replacement");
+        assert_eq!(fts_count("neural networks"), 1, "Should find 'neural networks' before replacement");
 
         // Replace with completely different text
         let utterances = vec![
@@ -683,16 +461,14 @@ mod tests {
         insert_transcript_from_api(&conn, "doc-1", &utterances).unwrap();
 
         // OLD text should NOT be searchable anymore (FTS index should be cleaned)
-        let old_search_after = search_transcripts(&conn, "neural networks", Some("doc-1"), 0, None, false).unwrap();
-        assert!(
-            old_search_after.is_empty(),
+        assert_eq!(
+            fts_count("neural networks"),
+            0,
             "Should NOT find 'neural networks' after replacement - FTS index has stale entries"
         );
 
         // NEW text SHOULD be searchable
-        let new_search = search_transcripts(&conn, "quantum computing", None, 0, None, false).unwrap();
-        assert_eq!(new_search.len(), 1, "Should find 'quantum computing' after replacement");
-        assert_eq!(new_search[0].0, "AI Meeting");
+        assert_eq!(fts_count("quantum computing"), 1, "Should find 'quantum computing' after replacement");
     }
 
     #[test]

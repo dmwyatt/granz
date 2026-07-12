@@ -15,7 +15,8 @@ use crate::models::{Document, SpeakerFilter};
 use crate::query::fts::{matches_all_tokens, FtsToken};
 use crate::query::hybrid::BestChunk;
 use crate::query::shape::{
-    excerpt_around_match, title_matches, EvidenceSource, MatchEvidence, ShapedMeeting, Signals,
+    excerpt_around_match, title_matches, ContextUnit, EvidenceSource, MatchEvidence,
+    ShapedMeeting, Signals,
 };
 use crate::query::text::{split_into_paragraphs, split_markdown_sections, strip_panel_footer};
 
@@ -30,11 +31,15 @@ pub struct EvidenceOptions {
     /// evidence; panel and notes sites have no speaker to attribute and are
     /// excluded, and the semantic and title fallback tiers are disabled.
     pub speaker: Option<SpeakerFilter>,
+    /// Neighboring units captured around each excerpted match (`--context`).
+    /// When non-zero the matched unit is excerpted in full rather than
+    /// windowed, since the point is to read the match in place.
+    pub context: usize,
 }
 
 impl Default for EvidenceOptions {
     fn default() -> Self {
-        Self { max_matches: 1, max_chars: 160, speaker: None }
+        Self { max_matches: 1, max_chars: 160, speaker: None, context: 0 }
     }
 }
 
@@ -49,14 +54,16 @@ pub struct DocumentEvidence {
     pub remaining_sources: Vec<EvidenceSource>,
 }
 
-/// A match site before excerpting: the source, the matched text, and its
-/// display metadata.
+/// A match site before excerpting: the source, the matched text, its
+/// display metadata, and its neighbors when context capture is on.
 struct Site {
     source: EvidenceSource,
     text: String,
     speaker: Option<String>,
     timestamp: Option<String>,
     section: Option<String>,
+    context_before: Vec<ContextUnit>,
+    context_after: Vec<ContextUnit>,
 }
 
 /// Collect every lexical match site for `doc` and excerpt the first
@@ -83,13 +90,17 @@ pub fn collect_document_evidence(
     // A speaker filter restricts evidence to attributable transcript sites.
     if opts.speaker.is_none() {
         if let Some(doc_id) = doc.id.as_deref() {
-            collect_panel_sites(conn, doc_id, tokens, &mut sites)?;
+            collect_panel_sites(conn, doc_id, tokens, opts.context, &mut sites)?;
         }
-        collect_notes_sites(doc.notes_plain.as_deref(), tokens, &mut sites);
+        collect_notes_sites(doc.notes_plain.as_deref(), tokens, opts.context, &mut sites);
     }
     if let Some(doc_id) = doc.id.as_deref() {
-        collect_transcript_sites(conn, doc_id, tokens, opts.speaker.as_ref(), &mut sites)?;
+        collect_transcript_sites(conn, doc_id, tokens, opts, &mut sites)?;
     }
+
+    // Context expansion shows the matched unit whole; the window cap only
+    // applies to the compact snippet view.
+    let width = if opts.context > 0 { usize::MAX } else { opts.max_chars };
 
     let total = sites.len();
     let mut matches = Vec::new();
@@ -98,10 +109,12 @@ pub fn collect_document_evidence(
         if i < opts.max_matches {
             matches.push(MatchEvidence {
                 source: site.source,
-                excerpt: excerpt_around_match(&site.text, tokens, opts.max_chars),
+                excerpt: excerpt_around_match(&site.text, tokens, width),
                 speaker: site.speaker,
                 timestamp: site.timestamp,
                 section: site.section,
+                context_before: site.context_before,
+                context_after: site.context_after,
             });
         } else if !remaining_sources.contains(&site.source) {
             remaining_sources.push(site.source);
@@ -187,14 +200,36 @@ fn chunk_evidence(
         speaker: None,
         timestamp: None,
         section: chunk.section_heading.clone(),
+        // A chunk has no site location, so it cannot expand with context.
+        context_before: Vec::new(),
+        context_after: Vec::new(),
     })
 }
 
+/// The `context_size` units on each side of index `i`, as context units.
+fn neighbors_of<T>(
+    units: &[T],
+    i: usize,
+    context_size: usize,
+    to_unit: impl Fn(&T) -> ContextUnit,
+) -> (Vec<ContextUnit>, Vec<ContextUnit>) {
+    if context_size == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let start = i.saturating_sub(context_size);
+    let end = (i + 1 + context_size).min(units.len());
+    let before = units[start..i].iter().map(&to_unit).collect();
+    let after = units[i + 1..end].iter().map(&to_unit).collect();
+    (before, after)
+}
+
 /// Panel sections whose body contains every token, in panel order.
+/// Neighboring sections stay within the same panel.
 fn collect_panel_sites(
     conn: &Connection,
     doc_id: &str,
     tokens: &[FtsToken],
+    context_size: usize,
     sites: &mut Vec<Site>,
 ) -> Result<()> {
     for panel in crate::db::panels::load_panels(conn, doc_id)? {
@@ -202,14 +237,24 @@ fn collect_panel_sites(
             continue;
         };
         let cleaned = strip_panel_footer(markdown);
-        for (heading, body) in split_markdown_sections(cleaned) {
+        let sections: Vec<(Option<&str>, &str)> = split_markdown_sections(cleaned);
+        for (i, (heading, body)) in sections.iter().enumerate() {
             if matches_all_tokens(body, tokens) {
+                let (context_before, context_after) =
+                    neighbors_of(&sections, i, context_size, |(h, b)| ContextUnit {
+                        text: crate::query::shape::normalize_whitespace(b),
+                        speaker: None,
+                        timestamp: None,
+                        section: h.map(String::from),
+                    });
                 sites.push(Site {
                     source: EvidenceSource::Panel,
                     text: body.to_string(),
                     speaker: None,
                     timestamp: None,
                     section: heading.map(String::from),
+                    context_before,
+                    context_after,
                 });
             }
         }
@@ -218,48 +263,78 @@ fn collect_panel_sites(
 }
 
 /// Notes paragraphs that contain every token, in document order.
-fn collect_notes_sites(notes_plain: Option<&str>, tokens: &[FtsToken], sites: &mut Vec<Site>) {
+fn collect_notes_sites(
+    notes_plain: Option<&str>,
+    tokens: &[FtsToken],
+    context_size: usize,
+    sites: &mut Vec<Site>,
+) {
     let Some(notes) = notes_plain.filter(|n| !n.trim().is_empty()) else {
         return;
     };
-    for para in split_into_paragraphs(notes) {
+    let paras: Vec<&str> = split_into_paragraphs(notes);
+    for (i, para) in paras.iter().enumerate() {
         if matches_all_tokens(para, tokens) {
+            let (context_before, context_after) =
+                neighbors_of(&paras, i, context_size, |p| ContextUnit {
+                    text: crate::query::shape::normalize_whitespace(p),
+                    speaker: None,
+                    timestamp: None,
+                    section: None,
+                });
             sites.push(Site {
                 source: EvidenceSource::Notes,
                 text: para.to_string(),
                 speaker: None,
                 timestamp: None,
                 section: None,
+                context_before,
+                context_after,
             });
         }
     }
 }
 
 /// Transcript utterances that contain every token, in time order. With a
-/// speaker filter, only that speaker's utterances count.
+/// speaker filter, only that speaker's utterances count as matches, but
+/// context neighbors are unfiltered: the point of context is to read the
+/// conversation around the match.
 fn collect_transcript_sites(
     conn: &Connection,
     doc_id: &str,
     tokens: &[FtsToken],
-    speaker: Option<&SpeakerFilter>,
+    opts: &EvidenceOptions,
     sites: &mut Vec<Site>,
 ) -> Result<()> {
-    for utt in crate::db::transcripts::load_transcript(conn, doc_id)? {
-        let Some(text) = utt.text.filter(|t| !t.is_empty()) else {
-            continue;
-        };
-        if let Some(filter) = speaker {
+    let utterances: Vec<crate::models::TranscriptUtterance> =
+        crate::db::transcripts::load_transcript(conn, doc_id)?
+            .into_iter()
+            .filter(|u| u.text.as_deref().is_some_and(|t| !t.is_empty()))
+            .collect();
+
+    for (i, utt) in utterances.iter().enumerate() {
+        if let Some(filter) = &opts.speaker {
             if !filter.matches(utt.source.as_deref()) {
                 continue;
             }
         }
-        if matches_all_tokens(&text, tokens) {
+        let text = utt.text.as_deref().unwrap_or_default();
+        if matches_all_tokens(text, tokens) {
+            let (context_before, context_after) =
+                neighbors_of(&utterances, i, opts.context, |u| ContextUnit {
+                    text: crate::query::shape::normalize_whitespace(u.text.as_deref().unwrap_or_default()),
+                    speaker: u.source.clone(),
+                    timestamp: u.start_timestamp.clone(),
+                    section: None,
+                });
             sites.push(Site {
                 source: EvidenceSource::Transcript,
-                text,
-                speaker: utt.source,
-                timestamp: utt.start_timestamp,
+                text: text.to_string(),
+                speaker: utt.source.clone(),
+                timestamp: utt.start_timestamp.clone(),
                 section: None,
+                context_before,
+                context_after,
             });
         }
     }
@@ -318,7 +393,7 @@ mod tests {
         query: &str,
         max_matches: usize,
     ) -> DocumentEvidence {
-        let limits = EvidenceOptions { max_matches, max_chars: 160, speaker: None };
+        let limits = EvidenceOptions { max_matches, ..Default::default() };
         collect_document_evidence(conn, doc, &parse_query(query), &limits).unwrap()
     }
 
@@ -509,7 +584,7 @@ mod tests {
         let doc = load_doc(&conn, "doc-1");
         let chunk = best_chunk("some semantic chunk", "transcript_window", None);
         let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
-        let limits = EvidenceOptions { max_matches: 0, max_chars: 160, speaker: None };
+        let limits = EvidenceOptions { max_matches: 0, ..Default::default() };
 
         let shaped =
             shape_meeting(&conn, &doc, &parse_query("kumquat"), &facts, &limits).unwrap();
@@ -539,6 +614,115 @@ mod tests {
         let ev = collect(&conn, &doc, "", 3);
         assert_eq!(ev.total, 0);
         assert!(ev.matches.is_empty());
+    }
+
+    // --- context capture ---
+
+    fn collect_with_context(
+        conn: &Connection,
+        doc: &Document,
+        query: &str,
+        context: usize,
+    ) -> DocumentEvidence {
+        let opts =
+            EvidenceOptions { max_matches: 10, context, ..Default::default() };
+        collect_document_evidence(conn, doc, &parse_query(query), &opts).unwrap()
+    }
+
+    #[test]
+    fn context_zero_captures_no_neighbors() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let ev = collect(&conn, &doc, "kumquat", 5);
+        assert!(ev.matches.iter().all(|m| m.context_before.is_empty()
+            && m.context_after.is_empty()));
+    }
+
+    #[test]
+    fn context_captures_transcript_neighbors_with_metadata() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        // "question" matches only u3; with context 1 its neighbor is u2.
+        let ev = collect_with_context(&conn, &doc, "question", 1);
+        assert_eq!(ev.total, 1);
+        let m = &ev.matches[0];
+        assert_eq!(m.context_before.len(), 1);
+        assert_eq!(m.context_before[0].text, "Nothing relevant here.");
+        assert_eq!(m.context_before[0].speaker.as_deref(), Some("system"));
+        assert_eq!(
+            m.context_before[0].timestamp.as_deref(),
+            Some("2026-01-20T10:02:00Z")
+        );
+        assert!(m.context_after.is_empty(), "u3 is the last utterance");
+    }
+
+    #[test]
+    fn context_captures_notes_paragraph_neighbors() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        // "Second kumquat mention in notes." is the last of three paragraphs.
+        let ev = collect_with_context(&conn, &doc, "second mention", 1);
+        assert_eq!(ev.total, 1);
+        let m = &ev.matches[0];
+        assert_eq!(m.source, EvidenceSource::Notes);
+        assert_eq!(m.context_before.len(), 1);
+        assert_eq!(m.context_before[0].text, "Unrelated paragraph.");
+        assert!(m.context_after.is_empty());
+    }
+
+    #[test]
+    fn context_captures_panel_section_neighbors_with_headings() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        // "rollout next week" matches the Decisions section; its neighbor is
+        // the Action Items section of the same panel.
+        let ev = collect_with_context(&conn, &doc, "rollout next week", 1);
+        assert_eq!(ev.total, 1);
+        let m = &ev.matches[0];
+        assert_eq!(m.source, EvidenceSource::Panel);
+        assert_eq!(m.context_after.len(), 1);
+        assert_eq!(m.context_after[0].section.as_deref(), Some("Action Items"));
+        assert!(m.context_after[0].text.contains("Unrelated item"));
+    }
+
+    #[test]
+    fn context_excerpts_the_matched_unit_in_full() {
+        let long_para = format!("kumquat {}", "filler words ".repeat(40));
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-l": {"id": "doc-l", "title": "Long", "created_at": "2026-01-01T00:00:00Z",
+                          "notes_plain": long_para}
+            }
+        }));
+        let doc = load_doc(&conn, "doc-l");
+
+        let windowed = collect_with_context(&conn, &doc, "kumquat", 0);
+        assert!(windowed.matches[0].excerpt.text.contains('…'));
+
+        let full = collect_with_context(&conn, &doc, "kumquat", 2);
+        assert!(!full.matches[0].excerpt.text.contains('…'));
+        assert_eq!(full.matches[0].excerpt.text, long_para.trim().split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    fn speaker_filtered_match_keeps_unfiltered_context() {
+        // Context is the conversation around the match; it is not filtered
+        // by speaker even when the match itself is.
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let opts = EvidenceOptions {
+            max_matches: 10,
+            context: 1,
+            speaker: Some(crate::models::SpeakerFilter::Me),
+            ..Default::default()
+        };
+        let ev =
+            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        // Only u1 (microphone) matches; its neighbor u2 is by the other
+        // speaker and still appears as context.
+        assert_eq!(ev.total, 1);
+        assert_eq!(ev.matches[0].context_after.len(), 1);
+        assert_eq!(ev.matches[0].context_after[0].speaker.as_deref(), Some("system"));
     }
 
     // --- speaker filter ---

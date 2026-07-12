@@ -3,122 +3,116 @@ mod common;
 use common::TestEnv;
 use predicates::prelude::*;
 
-// --- FTS5 transcript search (using search --context) ---
+// --- --context: card expansion on the keyword path ---
 
 #[test]
-fn transcript_search_single_word() {
+fn context_search_single_word() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "kickoff", "--context", "2"])
+        .args(["search", "kickoff", "--keyword", "--context", "2", "--in", "transcripts"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let windows = result["transcript_results"].as_array().unwrap();
-    assert!(!windows.is_empty());
+    let meetings = result["meetings"].as_array().unwrap();
+    assert!(!meetings.is_empty());
 
-    let matched_text = windows[0]["matched"]["text"].as_str().unwrap();
-    assert!(matched_text.to_lowercase().contains("kickoff"));
+    let snippet = meetings[0]["matches"][0]["snippet"].as_str().unwrap();
+    assert!(snippet.to_lowercase().contains("kickoff"));
 }
 
 #[test]
-fn transcript_search_phrase() {
+fn context_search_phrase() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "resource allocation", "--context", "2"])
+        .args(["search", "resource allocation", "--keyword", "--context", "2", "--in", "transcripts"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let windows = result["transcript_results"].as_array().unwrap();
-    assert!(!windows.is_empty());
+    let meetings = result["meetings"].as_array().unwrap();
+    assert!(!meetings.is_empty());
 
-    let matched_text = windows[0]["matched"]["text"].as_str().unwrap();
-    assert!(matched_text.contains("resource allocation"));
+    let snippet = meetings[0]["matches"][0]["snippet"].as_str().unwrap();
+    assert!(snippet.contains("resource allocation"));
 }
 
 #[test]
-fn transcript_search_no_match_returns_empty() {
+fn context_search_no_match_returns_empty() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "xyzzyplughnotaword", "--context", "2"])
+        .args(["search", "xyzzyplughnotaword", "--keyword", "--context", "2"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    // No transcript_results key (or empty) means no matches
-    let count = result.get("transcript_results")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(count, 0);
+    assert_eq!(result["total_meetings"], 0);
 }
 
 #[test]
-fn transcript_search_context_window_has_before_and_after() {
+fn context_search_has_before_and_after_units() {
     let env = TestEnv::with_fixture();
+    // "timeline" is in utt-a2 (index 1) of doc-alpha's transcript: 1
+    // utterance before, 2 after at context 2. Evidence priority puts the
+    // panel and notes sites first, so find the transcript match.
     let output = env
         .cmd_json()
-        .args(["search", "timeline", "--context", "2"])
+        .args(["search", "timeline", "--keyword", "--context", "2", "--matches", "5"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let windows = result["transcript_results"].as_array().unwrap();
-    assert!(!windows.is_empty());
-
-    let window = &windows[0];
-    // The matched utterance is "Today we will discuss the project timeline."
-    // With context=2, we should have before and/or after entries
-    let before = window["before"].as_array().unwrap();
-    let after = window["after"].as_array().unwrap();
-    // "timeline" is in utt-a2 (index 1), so there should be 1 before (utt-a1) and 2 after
-    assert!(!before.is_empty() || !after.is_empty());
+    let matches = result["meetings"][0]["matches"].as_array().unwrap();
+    let m = matches
+        .iter()
+        .find(|m| m["source"] == "transcript")
+        .unwrap_or_else(|| panic!("no transcript match in: {result}"));
+    assert_eq!(m["context_before"].as_array().unwrap().len(), 1);
+    assert_eq!(m["context_after"].as_array().unwrap().len(), 2);
+    // Transcript neighbors carry speaker and timestamp.
+    assert_eq!(m["context_after"][0]["speaker"], "other");
+    assert!(m["context_after"][0]["timestamp"].is_string());
 }
 
 #[test]
-fn transcript_search_within_specific_meeting() {
+fn context_search_within_specific_meeting() {
     let env = TestEnv::with_fixture();
 
     // "latency" only appears in doc-beta transcript
     let output = env
         .cmd_json()
-        .args(["search", "latency", "--context", "2", "--meeting", "Beta"])
+        .args(["search", "latency", "--keyword", "--context", "2", "--meeting", "Beta"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let windows = result["transcript_results"].as_array().unwrap();
-    assert!(!windows.is_empty());
-    assert_eq!(windows[0]["document_id"], "doc-beta");
+    let meetings = result["meetings"].as_array().unwrap();
+    assert!(!meetings.is_empty());
+    assert_eq!(meetings[0]["id"], "doc-beta");
 }
 
 #[test]
-fn transcript_search_restricted_to_wrong_meeting_returns_empty() {
+fn context_search_restricted_to_wrong_meeting_returns_empty() {
     let env = TestEnv::with_fixture();
 
     // "latency" is only in doc-beta, so searching within "Alpha" should yield nothing
     let output = env
         .cmd_json()
-        .args(["search", "latency", "--context", "2", "--meeting", "Alpha"])
+        .args(["search", "latency", "--keyword", "--context", "2", "--meeting", "Alpha"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let count = result.get("transcript_results")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(count, 0);
+    assert_eq!(result["total_meetings"], 0);
 }
 
 // --- FTS5 notes search (via search --in notes) ---
@@ -313,18 +307,17 @@ fn speaker_filter_me_matches_nothing_in_all_system_fixture() {
 }
 
 #[test]
-fn context_search_respects_limit() {
+fn context_search_limit_counts_meetings() {
     let env = TestEnv::with_fixture();
     // "prototype" matches in both doc-alpha and doc-beta transcripts.
-    // --context 1 --limit 1 should return only 1 context window.
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--context", "1", "--limit", "1"])
+        .args(["search", "prototype", "--keyword", "--context", "1", "--limit", "1"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let windows = result["transcript_results"].as_array().unwrap();
-    assert_eq!(windows.len(), 1);
+    assert_eq!(result["meetings"].as_array().unwrap().len(), 1);
+    assert_eq!(result["total_meetings"], 2);
 }

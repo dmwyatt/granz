@@ -23,13 +23,8 @@ pub enum SearchMode {
         matches: usize,
         /// Only meetings with matching utterances by this speaker survive.
         speaker: Option<SpeakerFilter>,
-    },
-    ContextWindow {
-        targets: Vec<SearchTarget>,
-        context_size: usize,
-        meeting_filter: Option<String>,
-        speaker_filter: Option<SpeakerFilter>,
-        limit: usize,
+        /// Neighboring units rendered around each shown match.
+        context: usize,
     },
     Hybrid {
         targets: Vec<SearchTarget>,
@@ -42,16 +37,18 @@ pub enum SearchMode {
         matches: usize,
         /// Only meetings with matching utterances by this speaker survive.
         speaker: Option<SpeakerFilter>,
+        /// Neighboring units rendered around each shown match.
+        context: usize,
     },
 }
 
 impl SearchMode {
     /// Construct a SearchMode from CLI arguments.
     ///
-    /// A bare search runs hybrid. --context and --keyword force their modes;
-    /// --speaker filters match evidence and composes with either retrieval
-    /// mode. --hybrid needs no parameter here: it is the default, and clap
-    /// conflicts keep it from combining with forcing flags.
+    /// A bare search runs hybrid and --keyword forces plain FTS; --speaker
+    /// (an evidence filter) and --context (card expansion) compose with
+    /// either retrieval mode. --hybrid needs no parameter here: it is the
+    /// default, and clap conflicts keep it from combining with --keyword.
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         fast: bool,
@@ -65,21 +62,14 @@ impl SearchMode {
         limit: usize,
         matches: usize,
     ) -> Self {
-        if context > 0 {
-            SearchMode::ContextWindow {
-                targets: SearchTarget::parse_list(in_targets),
-                context_size: context,
-                meeting_filter: meeting_filter.map(String::from),
-                speaker_filter: speaker.cloned(),
-                limit,
-            }
-        } else if keyword {
+        if keyword {
             SearchMode::Keyword {
                 targets: SearchTarget::parse_list(in_targets),
                 meeting_filter: meeting_filter.map(String::from),
                 limit,
                 matches,
                 speaker: speaker.cloned(),
+                context,
             }
         } else {
             SearchMode::Hybrid {
@@ -91,6 +81,7 @@ impl SearchMode {
                 limit,
                 matches,
                 speaker: speaker.cloned(),
+                context,
             }
         }
     }
@@ -107,30 +98,13 @@ pub fn search(
     ctx: &RunContext,
 ) -> Result<()> {
     match mode {
-        SearchMode::ContextWindow {
-            targets,
-            context_size,
-            meeting_filter,
-            speaker_filter,
-            limit,
-        } => context_window_search(
-            conn,
-            query,
-            &targets,
-            meeting_filter.as_deref(),
-            context_size,
-            limit,
-            date_range,
-            speaker_filter.as_ref(),
-            include_deleted,
-            ctx,
-        ),
         SearchMode::Keyword {
             targets,
             meeting_filter,
             limit,
             matches,
             speaker,
+            context,
         } => keyword_search(
             conn,
             query,
@@ -139,6 +113,7 @@ pub fn search(
             limit,
             matches,
             speaker,
+            context,
             date_range,
             include_deleted,
             ctx,
@@ -152,6 +127,7 @@ pub fn search(
             limit,
             matches,
             speaker,
+            context,
         } => hybrid_search(
             conn,
             query,
@@ -163,6 +139,7 @@ pub fn search(
             limit,
             matches,
             speaker,
+            context,
             date_range,
             include_deleted,
             ctx,
@@ -178,25 +155,6 @@ fn apply_limit<T>(mut items: Vec<T>, limit: usize) -> Vec<T> {
     items
 }
 
-/// Truncate two vecs to a combined `limit`, taking from the first vec first.
-/// A limit of 0 means no limit.
-fn apply_limit_mixed<A, B>(mut a: Vec<A>, mut b: Vec<B>, limit: usize) -> (Vec<A>, Vec<B>) {
-    if limit == 0 {
-        return (a, b);
-    }
-    let total = a.len() + b.len();
-    if total <= limit {
-        return (a, b);
-    }
-    if a.len() >= limit {
-        a.truncate(limit);
-        b.clear();
-    } else {
-        b.truncate(limit - a.len());
-    }
-    (a, b)
-}
-
 /// Run plain FTS retrieval and display the resulting meetings as shaped
 /// cards. Keyword results carry no rerank score and no semantic chunk;
 /// content matches show lexical evidence and title-only matches show a
@@ -210,6 +168,7 @@ fn keyword_search(
     limit: usize,
     matches: usize,
     speaker: Option<SpeakerFilter>,
+    context: usize,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
@@ -238,6 +197,7 @@ fn keyword_search(
     let opts = crate::query::evidence::EvidenceOptions {
         max_matches: matches,
         speaker,
+        context,
         ..Default::default()
     };
     let (shaped, total) = shape_and_page(
@@ -272,6 +232,7 @@ fn hybrid_search(
     limit: usize,
     matches: usize,
     speaker: Option<SpeakerFilter>,
+    context: usize,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
@@ -339,6 +300,7 @@ fn hybrid_search(
     let opts = crate::query::evidence::EvidenceOptions {
         max_matches: matches,
         speaker,
+        context,
         ..Default::default()
     };
     let (shaped, total) = shape_and_page(
@@ -463,182 +425,6 @@ fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Ve
     results.into_iter().filter(|doc| matches_meeting_filter(doc, &filter_lower)).collect()
 }
 
-fn context_window_search(
-    conn: &Connection,
-    query: &str,
-    targets: &[SearchTarget],
-    meeting_filter: Option<&str>,
-    context_size: usize,
-    limit: usize,
-    date_range: Option<DateRange>,
-    speaker_filter: Option<&SpeakerFilter>,
-    include_deleted: bool,
-    ctx: &RunContext,
-) -> Result<()> {
-    let search_transcripts = targets.contains(&SearchTarget::Transcripts);
-    let search_panels = targets.contains(&SearchTarget::Panels);
-    let search_notes = targets.contains(&SearchTarget::Notes);
-    let titles_only =
-        targets.contains(&SearchTarget::Titles) && !search_transcripts && !search_panels && !search_notes;
-
-    if titles_only {
-        if ctx.output_mode == OutputMode::Tty {
-            eprintln!("Context search does not support titles. Try: --in transcripts,panels,notes");
-        }
-        return Ok(());
-    }
-
-    // Collect transcript context windows
-    let mut tty_blocks: Vec<(String, String)> = Vec::new(); // (title, formatted_body)
-    let mut json_windows: Vec<crate::output::json::ContextWindowJson> = Vec::new();
-    let mut text_json_windows: Vec<crate::output::json::TextContextWindowJson> = Vec::new();
-
-    if search_transcripts {
-        let results = crate::db::transcripts::search_transcripts(
-            conn,
-            query,
-            meeting_filter,
-            context_size,
-            date_range.as_ref(),
-            include_deleted,
-        )?;
-        for (doc_title, windows) in &results {
-            for w in windows {
-                // Apply speaker filter: skip windows where the matched utterance doesn't pass
-                if let Some(filter) = speaker_filter {
-                    if !filter.matches(w.matched.source.as_deref()) {
-                        continue;
-                    }
-                }
-                match ctx.output_mode {
-                    OutputMode::Json => {
-                        json_windows.push(crate::output::json::ContextWindowJson::from_window(
-                            w, doc_title,
-                        ));
-                    }
-                    OutputMode::Tty => {
-                        tty_blocks.push((
-                            doc_title.clone(),
-                            crate::output::table::format_context_window(w, None, &ctx.tz),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // Collect panel context windows
-    if search_panels {
-        let results = crate::db::panels::search_panels_with_context(
-            conn,
-            query,
-            meeting_filter,
-            context_size,
-            date_range.as_ref(),
-            include_deleted,
-        )?;
-        for (doc_id, doc_title, windows) in &results {
-            for w in windows {
-                match ctx.output_mode {
-                    OutputMode::Json => {
-                        text_json_windows.push(
-                            crate::output::json::TextContextWindowJson::from_window(
-                                w, doc_id, doc_title, "panel",
-                            ),
-                        );
-                    }
-                    OutputMode::Tty => {
-                        tty_blocks.push((
-                            doc_title.clone(),
-                            crate::output::table::format_text_context_window(w, None),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // Collect notes context windows
-    if search_notes {
-        let results = crate::db::notes::search_notes_with_context(
-            conn,
-            query,
-            meeting_filter,
-            context_size,
-            date_range.as_ref(),
-            include_deleted,
-        )?;
-        for (doc_id, doc_title, windows) in &results {
-            for w in windows {
-                match ctx.output_mode {
-                    OutputMode::Json => {
-                        text_json_windows.push(
-                            crate::output::json::TextContextWindowJson::from_window(
-                                w, doc_id, doc_title, "notes",
-                            ),
-                        );
-                    }
-                    OutputMode::Tty => {
-                        tty_blocks.push((
-                            doc_title.clone(),
-                            crate::output::table::format_text_context_window(w, None),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    match ctx.output_mode {
-        OutputMode::Json => {
-            let (json_windows, text_json_windows) =
-                apply_limit_mixed(json_windows, text_json_windows, limit);
-            println!(
-                "{}",
-                crate::output::json::format_mixed_context_windows(&json_windows, &text_json_windows)
-            );
-        }
-        OutputMode::Tty => {
-            use colored::Colorize;
-
-            if tty_blocks.is_empty() {
-                println!("No context matches found for \"{}\".", query);
-                return Ok(());
-            }
-            let total = tty_blocks.len();
-            let tty_blocks = apply_limit(tty_blocks, limit);
-            let shown = tty_blocks.len();
-            if total > shown {
-                println!(
-                    "Found {} match(es) for \"{}\" (showing {}):\n",
-                    total.to_string().cyan().bold(),
-                    query,
-                    shown.to_string().cyan().bold()
-                );
-            } else {
-                println!(
-                    "Found {} match(es) for \"{}\":\n",
-                    shown.to_string().cyan().bold(),
-                    query
-                );
-            }
-            for (i, (title, body)) in tty_blocks.iter().enumerate() {
-                println!(
-                    "{}",
-                    crate::output::table::format_search_separator(i + 1, shown, title)
-                );
-                println!("{}", body);
-                println!();
-            }
-            if total > shown {
-                println!("Use --limit 0 to show all {} results.", total);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Check embedding status and, on a TTY, prompt before a large or full
 /// re-embedding run. Returns false when the user declines (the search
 /// should stop). `yes` skips the prompt.
@@ -714,6 +500,7 @@ mod tests {
                 limit,
                 matches,
                 speaker,
+                context,
             } => {
                 assert_eq!(targets.len(), 2);
                 assert!(targets.contains(&SearchTarget::Titles));
@@ -725,6 +512,7 @@ mod tests {
                 assert_eq!(limit, 10);
                 assert_eq!(matches, 1);
                 assert_eq!(speaker, None);
+                assert_eq!(context, 0);
             }
             _ => panic!("Expected Hybrid variant"),
         }
@@ -858,6 +646,7 @@ mod tests {
                 limit,
                 matches,
                 speaker,
+                context,
             } => {
                 assert_eq!(targets.len(), 2);
                 assert!(targets.contains(&SearchTarget::Titles));
@@ -866,7 +655,28 @@ mod tests {
                 assert_eq!(limit, 10);
                 assert_eq!(matches, 1);
                 assert_eq!(speaker, None);
+                assert_eq!(context, 0);
             }
+            _ => panic!("Expected Keyword variant"),
+        }
+    }
+
+    #[test]
+    fn from_cli_args_context_threads_to_both_modes() {
+        // --context is a presentation option, not a mode: it no longer
+        // forces the keyword path.
+        let mode = SearchMode::from_cli_args(
+            false, None, false, 3, "titles", None, None, false, 10, 1,
+        );
+        match mode {
+            SearchMode::Hybrid { context, .. } => assert_eq!(context, 3),
+            _ => panic!("Expected Hybrid variant"),
+        }
+        let mode = SearchMode::from_cli_args(
+            false, None, true, 2, "titles", None, None, false, 10, 1,
+        );
+        match mode {
+            SearchMode::Keyword { context, .. } => assert_eq!(context, 2),
             _ => panic!("Expected Keyword variant"),
         }
     }
@@ -901,28 +711,6 @@ mod tests {
         match mode {
             SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),
             _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_context_forces_context_window() {
-        let mode = SearchMode::from_cli_args(false, None, false, 3, "titles,notes", Some("standup"), None, false, 10, 1);
-        match mode {
-            SearchMode::ContextWindow {
-                targets,
-                context_size,
-                meeting_filter,
-                limit,
-                ..
-            } => {
-                assert_eq!(context_size, 3);
-                assert_eq!(meeting_filter.as_deref(), Some("standup"));
-                assert_eq!(targets.len(), 2);
-                assert!(targets.contains(&SearchTarget::Titles));
-                assert!(targets.contains(&SearchTarget::Notes));
-                assert_eq!(limit, 10);
-            }
-            _ => panic!("Expected ContextWindow variant"),
         }
     }
 
@@ -983,34 +771,6 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_args_meeting_filter_threads_to_context_window() {
-        let mode =
-            SearchMode::from_cli_args(false, None, false, 5, "titles", Some("retro"), None, false, 10, 1);
-        match mode {
-            SearchMode::ContextWindow {
-                meeting_filter, ..
-            } => {
-                assert_eq!(meeting_filter.as_deref(), Some("retro"));
-            }
-            _ => panic!("Expected ContextWindow variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_speaker_filter_threads_to_context_window() {
-        let speaker = SpeakerFilter::Me;
-        let mode = SearchMode::from_cli_args(false, None, false, 3, "transcripts", None, Some(&speaker), false, 10, 1);
-        match mode {
-            SearchMode::ContextWindow {
-                speaker_filter, ..
-            } => {
-                assert_eq!(speaker_filter, Some(SpeakerFilter::Me));
-            }
-            _ => panic!("Expected ContextWindow variant"),
-        }
-    }
-
-    #[test]
     fn apply_limit_zero_means_no_limit() {
         let items = vec![1, 2, 3, 4, 5];
         assert_eq!(apply_limit(items, 0), vec![1, 2, 3, 4, 5]);
@@ -1028,39 +788,4 @@ mod tests {
         assert_eq!(apply_limit(items, 10), vec![1, 2, 3]);
     }
 
-    #[test]
-    fn apply_limit_mixed_zero_means_no_limit() {
-        let a = vec![1, 2, 3];
-        let b = vec![4, 5, 6];
-        let (ra, rb) = apply_limit_mixed(a, b, 0);
-        assert_eq!(ra, vec![1, 2, 3]);
-        assert_eq!(rb, vec![4, 5, 6]);
-    }
-
-    #[test]
-    fn apply_limit_mixed_truncates_second_first() {
-        let a = vec![1, 2, 3];
-        let b = vec![4, 5, 6];
-        let (ra, rb) = apply_limit_mixed(a, b, 4);
-        assert_eq!(ra, vec![1, 2, 3]);
-        assert_eq!(rb, vec![4]);
-    }
-
-    #[test]
-    fn apply_limit_mixed_truncates_both() {
-        let a = vec![1, 2, 3];
-        let b = vec![4, 5, 6];
-        let (ra, rb) = apply_limit_mixed(a, b, 2);
-        assert_eq!(ra, vec![1, 2]);
-        assert!(rb.is_empty());
-    }
-
-    #[test]
-    fn apply_limit_mixed_noop_when_under() {
-        let a = vec![1, 2];
-        let b = vec![3];
-        let (ra, rb) = apply_limit_mixed(a, b, 10);
-        assert_eq!(ra, vec![1, 2]);
-        assert_eq!(rb, vec![3]);
-    }
 }

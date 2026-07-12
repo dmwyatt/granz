@@ -38,6 +38,24 @@ pub struct MatchEvidence {
     pub timestamp: Option<String>,
     /// Section heading for panel evidence.
     pub section: Option<String>,
+    /// Neighboring units before the match, oldest first (`--context`).
+    pub context_before: Vec<ContextUnit>,
+    /// Neighboring units after the match (`--context`).
+    pub context_after: Vec<ContextUnit>,
+}
+
+/// A neighboring content unit shown around a match under `--context`: an
+/// utterance for transcript evidence, a section for panel evidence, a
+/// paragraph for notes evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextUnit {
+    pub text: String,
+    /// Raw utterance source for transcript neighbors.
+    pub speaker: Option<String>,
+    /// ISO start timestamp for transcript neighbors.
+    pub timestamp: Option<String>,
+    /// Section heading for panel neighbors.
+    pub section: Option<String>,
 }
 
 /// Which retrieval signals surfaced a meeting.
@@ -75,7 +93,7 @@ pub struct ShapedMeeting {
 /// reported as a highlight span. When no token occurs in the text (semantic
 /// evidence), the window starts at the beginning and highlights are empty.
 pub fn excerpt_around_match(text: &str, tokens: &[FtsToken], max_chars: usize) -> Excerpt {
-    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalize_whitespace(text);
     let chars: Vec<char> = normalized.chars().collect();
 
     let first_match = tokens
@@ -107,6 +125,12 @@ pub fn excerpt_around_match(text: &str, tokens: &[FtsToken], max_chars: usize) -
     highlights.dedup();
 
     Excerpt { text, highlights }
+}
+
+/// Collapse all whitespace runs (including newlines) to single spaces, the
+/// single-line form every snippet and context unit renders in.
+pub fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// True when every query token appears in the title (the FTS title-tier
