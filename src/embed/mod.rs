@@ -541,34 +541,6 @@ fn filter_results_by_date(
         .collect())
 }
 
-/// Run a semantic search: ensure embeddings, embed query, rank results.
-/// Returns a tuple of (results, total_count) where total_count is the number of matches
-/// before applying the limit.
-/// `source_type_filter`: if `Some`, only search vectors of these source types.
-/// `None` means search all source types.
-pub fn semantic_search(
-    conn: &Connection,
-    query: &str,
-    date_range: Option<&crate::query::dates::DateRange>,
-    limit: usize,
-    source_type_filter: Option<&[&str]>,
-    include_deleted: bool,
-) -> Result<(Vec<SemanticSearchResult>, usize)> {
-    let embedder = model::FastEmbedModel::new()?;
-    let spec = config::EmbedSpec::resolve_stored(conn, embedder.max_length());
-    let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE, &spec)?;
-    semantic_search_with_index(
-        conn,
-        &embedder,
-        &index,
-        query,
-        date_range,
-        limit,
-        source_type_filter,
-        include_deleted,
-    )
-}
-
 /// Run a semantic search against an already-loaded embedder and index.
 /// Callers that issue many queries (hybrid search, benchmarks) load the
 /// model and index once and reuse them here.

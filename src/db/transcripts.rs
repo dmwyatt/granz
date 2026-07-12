@@ -185,50 +185,6 @@ fn build_context_windows(
     results
 }
 
-/// Build a context window from semantic search result indices.
-///
-/// This is used to display context around semantic search matches. The window_start_idx
-/// and window_end_idx represent the range of utterances that were embedded together.
-/// We center on the middle utterance of that window and add additional_context
-/// utterances before and after.
-pub fn build_context_window_from_indices(
-    utterances: &[TranscriptUtterance],
-    window_start_idx: usize,
-    window_end_idx: usize,
-    additional_context: usize,
-) -> Option<ContextWindow> {
-    if utterances.is_empty() {
-        return None;
-    }
-
-    // Clamp indices to valid range
-    let start = window_start_idx.min(utterances.len().saturating_sub(1));
-    let end = window_end_idx.min(utterances.len().saturating_sub(1));
-
-    // Find the center of the matched window
-    let center_idx = (start + end) / 2;
-
-    // Calculate context bounds
-    let before_start = center_idx.saturating_sub(additional_context);
-    let after_end = (center_idx + 1 + additional_context).min(utterances.len());
-
-    let before: Vec<TranscriptUtterance> = utterances[before_start..center_idx]
-        .iter()
-        .cloned()
-        .collect();
-    let matched = utterances[center_idx].clone();
-    let after: Vec<TranscriptUtterance> = utterances[center_idx + 1..after_end]
-        .iter()
-        .cloned()
-        .collect();
-
-    Some(ContextWindow {
-        before,
-        matched,
-        after,
-    })
-}
-
 /// Document info for transcript sync
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentWithoutTranscript {
@@ -848,98 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_context_window_from_indices_basic() {
-        use crate::models::TranscriptUtterance;
-
-        let utterances: Vec<TranscriptUtterance> = (0..10)
-            .map(|i| TranscriptUtterance {
-                id: Some(format!("u{}", i)),
-                document_id: Some("doc1".to_string()),
-                start_timestamp: Some(format!("2026-01-01T10:{:02}:00Z", i)),
-                end_timestamp: None,
-                text: Some(format!("Utterance {}", i)),
-                source: None,
-                is_final: None,
-                extra: Default::default(),
-            })
-            .collect();
-
-        // Window from index 3 to 6, additional context of 2
-        // Center is (3+6)/2 = 4
-        // Before: 2, 3 (idx 4 - 2 to idx 4)
-        // Matched: 4
-        // After: 5, 6 (idx 5 to idx 4 + 1 + 2 = 7)
-        let window = build_context_window_from_indices(&utterances, 3, 6, 2).unwrap();
-
-        assert_eq!(window.before.len(), 2);
-        assert_eq!(window.before[0].text.as_deref(), Some("Utterance 2"));
-        assert_eq!(window.before[1].text.as_deref(), Some("Utterance 3"));
-        assert_eq!(window.matched.text.as_deref(), Some("Utterance 4"));
-        assert_eq!(window.after.len(), 2);
-        assert_eq!(window.after[0].text.as_deref(), Some("Utterance 5"));
-        assert_eq!(window.after[1].text.as_deref(), Some("Utterance 6"));
-    }
-
-    #[test]
-    fn test_build_context_window_from_indices_at_start() {
-        use crate::models::TranscriptUtterance;
-
-        let utterances: Vec<TranscriptUtterance> = (0..5)
-            .map(|i| TranscriptUtterance {
-                id: Some(format!("u{}", i)),
-                document_id: Some("doc1".to_string()),
-                start_timestamp: None,
-                end_timestamp: None,
-                text: Some(format!("Utterance {}", i)),
-                source: None,
-                is_final: None,
-                extra: Default::default(),
-            })
-            .collect();
-
-        // Window at start, center = 0, context = 2
-        let window = build_context_window_from_indices(&utterances, 0, 1, 2).unwrap();
-
-        // Center = (0+1)/2 = 0, so before is empty
-        assert!(window.before.is_empty());
-        assert_eq!(window.matched.text.as_deref(), Some("Utterance 0"));
-        assert_eq!(window.after.len(), 2);
-    }
-
-    #[test]
-    fn test_build_context_window_from_indices_at_end() {
-        use crate::models::TranscriptUtterance;
-
-        let utterances: Vec<TranscriptUtterance> = (0..5)
-            .map(|i| TranscriptUtterance {
-                id: Some(format!("u{}", i)),
-                document_id: Some("doc1".to_string()),
-                start_timestamp: None,
-                end_timestamp: None,
-                text: Some(format!("Utterance {}", i)),
-                source: None,
-                is_final: None,
-                extra: Default::default(),
-            })
-            .collect();
-
-        // Window at end, center = 4, context = 2
-        let window = build_context_window_from_indices(&utterances, 3, 4, 2).unwrap();
-
-        // Center = (3+4)/2 = 3
-        assert_eq!(window.before.len(), 2);
-        assert_eq!(window.matched.text.as_deref(), Some("Utterance 3"));
-        assert_eq!(window.after.len(), 1); // Only utterance 4 is after
-    }
-
-    #[test]
-    fn test_build_context_window_from_indices_empty() {
-        let utterances: Vec<TranscriptUtterance> = vec![];
-        let result = build_context_window_from_indices(&utterances, 0, 0, 2);
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn test_log_transcript_sync_failure_insert() {
         let conn = build_test_db(&transcripts_state());
 
@@ -1096,30 +960,6 @@ mod tests {
 
         // Only count failures for documents created since 2026-01-24
         assert_eq!(count_transcript_sync_failures(&conn, Some("2026-01-24T00:00:00Z")).unwrap(), 2);
-    }
-
-    #[test]
-    fn test_build_context_window_from_indices_out_of_bounds() {
-        use crate::models::TranscriptUtterance;
-
-        let utterances: Vec<TranscriptUtterance> = (0..3)
-            .map(|i| TranscriptUtterance {
-                id: Some(format!("u{}", i)),
-                document_id: Some("doc1".to_string()),
-                start_timestamp: None,
-                end_timestamp: None,
-                text: Some(format!("Utterance {}", i)),
-                source: None,
-                is_final: None,
-                extra: Default::default(),
-            })
-            .collect();
-
-        // Out of bounds indices should be clamped
-        let window = build_context_window_from_indices(&utterances, 100, 200, 1).unwrap();
-
-        // Center should be clamped to last valid index (2)
-        assert_eq!(window.matched.text.as_deref(), Some("Utterance 2"));
     }
 
     #[test]

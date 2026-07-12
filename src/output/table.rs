@@ -1,8 +1,6 @@
 use chrono::FixedOffset;
 use colored::Colorize;
-use rusqlite::Connection;
 
-use crate::embed::search::SemanticSearchResult;
 use crate::models::{
     Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe, TranscriptUtterance,
 };
@@ -34,18 +32,6 @@ pub fn format_meeting_row(doc: &Document, tz: &FixedOffset) -> String {
         .to_string();
 
     format!("{} {} {}", id, date, title)
-}
-
-/// Color a relevance score by band: strong green, medium yellow, weak dimmed.
-fn colored_score(score: f32) -> String {
-    let score_str = format!("{:.2}", score);
-    if score > 0.8 {
-        score_str.green().bold().to_string()
-    } else if score > 0.6 {
-        score_str.yellow().to_string()
-    } else {
-        score_str.dimmed().to_string()
-    }
 }
 
 /// Format a meeting detail view for TTY.
@@ -282,17 +268,12 @@ const SEPARATOR_WIDTH: usize = 60;
 /// Format a search result separator with index, total, and title.
 ///
 /// Produces output like: `── [1/3] Team Standup ──────────────────────`
-/// When score is provided: `── [1/3] Team Standup (0.85) ───────────────`
-pub fn format_search_separator(index: usize, total: usize, title: &str, score: Option<f32>) -> String {
+pub fn format_search_separator(index: usize, total: usize, title: &str) -> String {
     let counter = format!("[{}/{}]", index, total);
-    let score_part = match score {
-        Some(s) => format!(" ({:.2})", s),
-        None => String::new(),
-    };
 
-    // "── " is 3 display columns (each ─ is 1 column), then counter, space, title, score, space
+    // "── " is 3 display columns (each ─ is 1 column), then counter, space, title, space
     let prefix_cols = 3; // "── " = 2 dashes + 1 space
-    let content_cols = prefix_cols + counter.len() + 1 + title.len() + score_part.len() + 1;
+    let content_cols = prefix_cols + counter.len() + 1 + title.len() + 1;
     let trail_dashes = if content_cols < SEPARATOR_WIDTH {
         SEPARATOR_WIDTH - content_cols
     } else {
@@ -300,76 +281,12 @@ pub fn format_search_separator(index: usize, total: usize, title: &str, score: O
     };
 
     format!(
-        "{}{} {}{} {}",
+        "{}{} {} {}",
         "── ".cyan(),
         counter.cyan().bold(),
         title.bold(),
-        score_part,
         "─".repeat(trail_dashes).cyan()
     )
-}
-
-/// Format a semantic search result for TTY display.
-pub fn format_semantic_result(result: &SemanticSearchResult, conn: &Connection, tz: &FixedOffset) -> String {
-    let score_colored = colored_score(result.score);
-
-    let (title, date) = lookup_document_meta(conn, &result.document_id, tz);
-    let title_str = title.bold().to_string();
-    let date_str = date.dimmed().to_string();
-    let id_prefix_len = 8.min(result.document_id.len());
-    let id_str = format!("[{}]", &result.document_id[..id_prefix_len]).dimmed().to_string();
-
-    let snippet = truncate_text(&result.matched_text, 80);
-    let snippet_line = format!("      {} \"{}\"", "\u{21b3}".dimmed(), snippet.dimmed());
-
-    let context_line = result.match_context.as_ref().map(|ctx| {
-        format!("      {} {}", "*".dimmed(), ctx.dimmed())
-    });
-
-    match context_line {
-        Some(ctx) => format!("{} {} {} {}\n{}\n{}", score_colored, id_str, date_str, title_str, snippet_line, ctx),
-        None => format!("{} {} {} {}\n{}", score_colored, id_str, date_str, title_str, snippet_line),
-    }
-}
-
-/// Format a context window with a score header for semantic search results.
-pub fn format_context_window_with_score(
-    window: &ContextWindow,
-    doc_title: Option<&str>,
-    score: f32,
-    tz: &FixedOffset,
-) -> String {
-    let mut lines = Vec::new();
-
-    // Header with meeting title and score (skipped when title is None,
-    // since the caller uses format_search_separator instead)
-    if let Some(title) = doc_title {
-        let score_str = format!("({:.2})", score);
-        let score_colored = if score > 0.8 {
-            score_str.green().bold().to_string()
-        } else if score > 0.6 {
-            score_str.yellow().to_string()
-        } else {
-            score_str.dimmed().to_string()
-        };
-        lines.push(format!(
-            "{} {}  {}",
-            "Meeting:".dimmed(),
-            title.bold(),
-            score_colored
-        ));
-    }
-
-    // Context utterances
-    for utt in &window.before {
-        lines.push(format_utterance(utt, false, tz));
-    }
-    lines.push(format_utterance(&window.matched, true, tz));
-    for utt in &window.after {
-        lines.push(format_utterance(utt, false, tz));
-    }
-
-    lines.join("\n")
 }
 
 /// Format a text-based context window (panels/notes) for TTY.
@@ -421,33 +338,6 @@ fn format_text_segment(seg: &crate::query::search::TextSegment, highlight: bool)
     lines.join("\n")
 }
 
-fn lookup_document_meta(conn: &Connection, doc_id: &str, tz: &FixedOffset) -> (String, String) {
-    let result: Option<(String, String)> = conn
-        .query_row(
-            "SELECT COALESCE(title, '(untitled)'), COALESCE(created_at, '') FROM documents WHERE id = ?1",
-            [doc_id],
-            |row| {
-                let title: String = row.get(0)?;
-                let date: String = row.get(1)?;
-                Ok((title, format_date_short(&date, tz)))
-            },
-        )
-        .ok();
-
-    result.unwrap_or_else(|| ("(unknown)".to_string(), String::new()))
-}
-
-fn truncate_text(text: &str, max_len: usize) -> String {
-    // Collapse newlines and whitespace
-    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= max_len {
-        collapsed
-    } else {
-        let truncated: String = collapsed.chars().take(max_len).collect();
-        format!("{}...", truncated)
-    }
-}
-
 pub(super) fn format_date_short(s: &str, tz: &FixedOffset) -> String {
     // Try to parse and format nicely, fallback to raw string
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
@@ -471,7 +361,6 @@ pub(super) fn format_time_only(s: &str, tz: &FixedOffset) -> String {
 mod tests {
     use super::*;
     use crate::db::test_fixtures::{build_test_db, meetings_state};
-    use crate::embed::search::SemanticSearchResult;
     use crate::query::search::TextSegment;
 
     fn utc() -> FixedOffset {
@@ -480,24 +369,15 @@ mod tests {
 
     #[test]
     fn format_search_separator_contains_counter_and_title() {
-        let output = format_search_separator(1, 3, "Team Standup", None);
+        let output = format_search_separator(1, 3, "Team Standup");
         let plain = strip_ansi_escapes::strip_str(&output);
         assert!(plain.contains("[1/3]"), "Expected [1/3] counter, got: {}", plain);
         assert!(plain.contains("Team Standup"), "Expected title, got: {}", plain);
     }
 
     #[test]
-    fn format_search_separator_with_score_includes_score() {
-        let output = format_search_separator(2, 5, "Project Kickoff", Some(0.85));
-        let plain = strip_ansi_escapes::strip_str(&output);
-        assert!(plain.contains("[2/5]"), "Expected [2/5] counter, got: {}", plain);
-        assert!(plain.contains("Project Kickoff"), "Expected title, got: {}", plain);
-        assert!(plain.contains("(0.85)"), "Expected score, got: {}", plain);
-    }
-
-    #[test]
     fn format_search_separator_pads_with_trailing_dashes() {
-        let output = format_search_separator(1, 1, "Short", None);
+        let output = format_search_separator(1, 1, "Short");
         let plain = strip_ansi_escapes::strip_str(&output);
         // Should have trailing ─ chars to fill to SEPARATOR_WIDTH
         let dash_count = plain.chars().filter(|c| *c == '─').count();
@@ -507,7 +387,7 @@ mod tests {
     #[test]
     fn format_search_separator_handles_long_title() {
         let long_title = "A".repeat(100);
-        let output = format_search_separator(1, 1, &long_title, None);
+        let output = format_search_separator(1, 1, &long_title);
         let plain = strip_ansi_escapes::strip_str(&output);
         // Should still have at least 3 trailing dashes
         assert!(plain.contains(&long_title), "Expected long title, got: {}", plain);
@@ -515,58 +395,6 @@ mod tests {
         let trailing = plain.rsplit("── ").next().unwrap_or("");
         let trailing_dashes: String = trailing.chars().filter(|c| *c == '─').collect();
         assert!(trailing_dashes.len() >= 3, "Expected at least 3 trailing dashes for long title");
-    }
-
-    #[test]
-    fn format_semantic_result_includes_document_id_prefix() {
-        let conn = build_test_db(&meetings_state());
-        let result = SemanticSearchResult {
-            document_id: "doc-1".to_string(),
-            score: 0.85,
-            source_type: "transcript".to_string(),
-            matched_text: "Hello everyone".to_string(),
-            window_start_idx: None,
-            window_end_idx: None,
-            match_context: None,
-            section_heading: None,
-        };
-
-        let output = format_semantic_result(&result, &conn, &utc());
-        // Strip ANSI codes for assertion
-        let plain = strip_ansi_escapes::strip_str(&output);
-        assert!(
-            plain.contains("[doc-1]"),
-            "Expected output to contain document ID prefix [doc-1], got: {}",
-            plain
-        );
-    }
-
-    #[test]
-    fn format_semantic_result_truncates_long_id() {
-        let conn = build_test_db(&meetings_state());
-        let long_id = "abcdef01-2345-6789-abcd-ef0123456789";
-        let result = SemanticSearchResult {
-            document_id: long_id.to_string(),
-            score: 0.72,
-            source_type: "transcript".to_string(),
-            matched_text: "Some text".to_string(),
-            window_start_idx: None,
-            window_end_idx: None,
-            match_context: None,
-            section_heading: None,
-        };
-
-        let output = format_semantic_result(&result, &conn, &utc());
-        let plain = strip_ansi_escapes::strip_str(&output);
-        assert!(
-            plain.contains("[abcdef01]"),
-            "Expected output to contain truncated ID prefix [abcdef01], got: {}",
-            plain
-        );
-        assert!(
-            !plain.contains(long_id),
-            "Full ID should not appear in output"
-        );
     }
 
     fn strip(s: &str) -> String {

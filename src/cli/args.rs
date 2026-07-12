@@ -45,8 +45,8 @@ pub enum Commands {
     /// Runs hybrid search by default: keyword and semantic results are fused,
     /// then the top candidates are reranked with a cross-encoder. The first
     /// search downloads the embedding and reranker models, and a search may
-    /// prompt before embedding new content (--yes accepts). Force a single
-    /// mode with --keyword or --semantic, or skip reranking with --fast.
+    /// prompt before embedding new content (--yes accepts). Force plain
+    /// keyword search with --keyword, or skip reranking with --fast.
     #[command(visible_alias = "s")]
     Search {
         /// Search query; words match in any order, "quoted phrases" must match exactly
@@ -57,31 +57,27 @@ pub enum Commands {
         r#in: String,
 
         /// Force keyword (FTS) search instead of the hybrid default
-        #[arg(long, conflicts_with_all = ["hybrid", "semantic"])]
+        #[arg(long, conflicts_with = "hybrid")]
         keyword: bool,
-
-        /// Force semantic (vector) search instead of the hybrid default
-        #[arg(long)]
-        semantic: bool,
 
         /// Hybrid search: fuse keyword and semantic rankings and rerank the
         /// top candidates with a cross-encoder (the default; flag kept for
         /// compatibility)
-        #[arg(long, conflicts_with_all = ["semantic", "context", "speaker"])]
+        #[arg(long, conflicts_with_all = ["context", "speaker"])]
         hybrid: bool,
 
         /// Skip the cross-encoder rerank stage of hybrid search
         /// (fusion order only; faster, but no relevance scores)
-        #[arg(long, conflicts_with_all = ["keyword", "semantic", "context", "speaker"])]
+        #[arg(long, conflicts_with_all = ["keyword", "context", "speaker"])]
         fast: bool,
 
         /// Minimum reranker relevance score (0-1) for hybrid results
-        #[arg(long, conflicts_with_all = ["fast", "keyword", "semantic", "context", "speaker"])]
+        #[arg(long, conflicts_with_all = ["fast", "keyword", "context", "speaker"])]
         min_score: Option<f32>,
 
         /// Maximum match snippets shown per meeting in hybrid results
         /// (0 = headers only)
-        #[arg(long, default_value = "1", conflicts_with_all = ["keyword", "semantic", "context", "speaker"])]
+        #[arg(long, default_value = "1", conflicts_with_all = ["keyword", "context", "speaker"])]
         matches: usize,
 
         /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled; implies keyword search)
@@ -104,7 +100,7 @@ pub enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Filter transcript matches by speaker: "me" (your utterances) or "other" (others' utterances); implies keyword search unless --semantic or --context
+        /// Filter transcript matches by speaker: "me" (your utterances) or "other" (others' utterances); implies keyword search unless --context
         #[arg(long, value_parser = parse_speaker_filter)]
         speaker: Option<SpeakerFilter>,
 
@@ -243,7 +239,7 @@ pub enum Commands {
         timeout: u64,
     },
 
-    /// Build embeddings for semantic search
+    /// Build embeddings for hybrid search
     Embed {
         #[command(subcommand)]
         action: Option<EmbedAction>,
@@ -629,11 +625,17 @@ mod tests {
     }
 
     #[test]
-    fn search_keyword_conflicts_with_hybrid_and_semantic() {
-        for flag in ["--hybrid", "--semantic"] {
-            let result = Cli::try_parse_from(["grans", "search", "q", "--keyword", flag]);
-            assert!(result.is_err(), "--keyword {flag} should conflict");
-        }
+    fn search_keyword_conflicts_with_hybrid() {
+        let result = Cli::try_parse_from(["grans", "search", "q", "--keyword", "--hybrid"]);
+        assert!(result.is_err(), "--keyword --hybrid should conflict");
+    }
+
+    #[test]
+    fn search_semantic_flag_is_rejected() {
+        // The standalone semantic retrieval mode was removed (#59); the flag
+        // must fail parsing rather than silently doing something else.
+        let result = Cli::try_parse_from(["grans", "search", "q", "--semantic"]);
+        assert!(result.is_err(), "--semantic should be an unknown flag");
     }
 
     #[test]
@@ -659,7 +661,6 @@ mod tests {
     fn search_fast_conflicts_with_non_hybrid_paths() {
         for extra in [
             &["--keyword"][..],
-            &["--semantic"][..],
             &["--context", "3"][..],
             &["--speaker", "me"][..],
         ] {
@@ -685,7 +686,6 @@ mod tests {
         for extra in [
             &["--fast"][..],
             &["--keyword"][..],
-            &["--semantic"][..],
             &["--context", "3"][..],
             &["--speaker", "me"][..],
         ] {

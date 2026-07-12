@@ -9,7 +9,7 @@ use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
 use crate::query::filter::SearchTarget;
 
-/// Threshold for prompting before embedding during semantic search.
+/// Threshold for prompting before embedding during hybrid search.
 const EMBED_WARN_THRESHOLD: usize = 200;
 
 /// Typed search mode, replacing the old 11-parameter search function.
@@ -27,13 +27,6 @@ pub enum SearchMode {
         speaker_filter: Option<SpeakerFilter>,
         limit: usize,
     },
-    Semantic {
-        targets: Vec<SearchTarget>,
-        context_size: usize,
-        speaker_filter: Option<SpeakerFilter>,
-        yes: bool,
-        limit: usize,
-    },
     Hybrid {
         targets: Vec<SearchTarget>,
         meeting_filter: Option<String>,
@@ -49,16 +42,15 @@ pub enum SearchMode {
 impl SearchMode {
     /// Construct a SearchMode from CLI arguments.
     ///
-    /// A bare search runs hybrid. --semantic, --context, and --keyword force
-    /// their modes, and --speaker also routes to the keyword path because
-    /// hybrid does not use it. --hybrid needs no parameter here: it is the
-    /// default, and clap conflicts keep it from combining with forcing flags.
+    /// A bare search runs hybrid. --context and --keyword force their modes,
+    /// and --speaker also routes to the keyword path because hybrid does not
+    /// use it. --hybrid needs no parameter here: it is the default, and clap
+    /// conflicts keep it from combining with forcing flags.
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         fast: bool,
         min_score: Option<f32>,
         keyword: bool,
-        semantic: bool,
         context: usize,
         in_targets: &str,
         meeting_filter: Option<&str>,
@@ -67,15 +59,7 @@ impl SearchMode {
         limit: usize,
         matches: usize,
     ) -> Self {
-        if semantic {
-            SearchMode::Semantic {
-                targets: SearchTarget::parse_list(in_targets),
-                context_size: context,
-                speaker_filter: speaker.cloned(),
-                yes,
-                limit,
-            }
-        } else if context > 0 {
+        if context > 0 {
             SearchMode::ContextWindow {
                 targets: SearchTarget::parse_list(in_targets),
                 context_size: context,
@@ -114,13 +98,6 @@ pub fn search(
     ctx: &RunContext,
 ) -> Result<()> {
     match mode {
-        SearchMode::Semantic {
-            targets,
-            context_size,
-            speaker_filter,
-            yes,
-            limit,
-        } => semantic_search(conn, query, &targets, context_size, date_range, speaker_filter.as_ref(), yes, limit, include_deleted, ctx),
         SearchMode::ContextWindow {
             targets,
             context_size,
@@ -614,7 +591,7 @@ fn context_window_search(
             for (i, (title, body)) in tty_blocks.iter().enumerate() {
                 println!(
                     "{}",
-                    crate::output::table::format_search_separator(i + 1, shown, title, None)
+                    crate::output::table::format_search_separator(i + 1, shown, title)
                 );
                 println!("{}", body);
                 println!();
@@ -684,230 +661,6 @@ fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Res
     Ok(true)
 }
 
-fn semantic_search(
-    conn: &Connection,
-    query: &str,
-    targets: &[SearchTarget],
-    context_size: usize,
-    date_range: Option<DateRange>,
-    speaker_filter: Option<&SpeakerFilter>,
-    yes: bool,
-    limit: usize,
-    include_deleted: bool,
-    ctx: &RunContext,
-) -> Result<()> {
-    use crate::query::filter::semantic_source_filter;
-
-    // Parse --in targets and compute source type filter for semantic search
-    let filter = semantic_source_filter(targets);
-
-    // If only non-embeddable targets selected (e.g. --in titles), inform user
-    if let Some(ref f) = filter {
-        if f.is_empty() {
-            if ctx.output_mode == OutputMode::Tty {
-                eprintln!("Semantic search does not support searching in titles only.");
-                eprintln!("Try: grans search \"{}\" --semantic --in transcripts,panels,notes", query);
-            }
-            return Ok(());
-        }
-    }
-
-    if !confirm_embedding_work(conn, yes, ctx)? {
-        return Ok(());
-    }
-
-    let filter_strs = filter.as_deref();
-    let (results, total_count) =
-        crate::embed::semantic_search(conn, query, date_range.as_ref(), limit, filter_strs, include_deleted)?;
-
-    if results.is_empty() {
-        if ctx.output_mode == OutputMode::Tty {
-            println!("No semantic matches found for \"{}\".", query);
-        }
-        return Ok(());
-    }
-
-    // If context is requested, build context windows for each result
-    if context_size > 0 {
-        return display_semantic_results_with_context(
-            conn,
-            &results,
-            total_count,
-            context_size,
-            query,
-            limit,
-            speaker_filter,
-            ctx,
-        );
-    }
-
-    // Original behavior: display without context
-    match ctx.output_mode {
-        OutputMode::Json => {
-            println!(
-                "{}",
-                crate::output::json::format_semantic_results(&results, query, total_count, limit, conn)
-            );
-        }
-        OutputMode::Tty => {
-            if total_count > results.len() {
-                println!(
-                    "Found {} semantic match(es) for \"{}\" (showing top {}):\n",
-                    total_count,
-                    query,
-                    results.len()
-                );
-            } else {
-                println!(
-                    "Found {} semantic match(es) for \"{}\":\n",
-                    results.len(),
-                    query
-                );
-            }
-            for result in &results {
-                println!(
-                    "{}",
-                    crate::output::table::format_semantic_result(result, conn, &ctx.tz)
-                );
-            }
-            if total_count > results.len() {
-                println!("\nUse --limit 0 to show all {} results.", total_count);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn display_semantic_results_with_context(
-    conn: &Connection,
-    results: &[crate::embed::search::SemanticSearchResult],
-    total_count: usize,
-    context_size: usize,
-    query: &str,
-    limit: usize,
-    speaker_filter: Option<&SpeakerFilter>,
-    ctx: &RunContext,
-) -> Result<()> {
-    use crate::db::transcripts::{build_context_window_from_indices, load_transcript};
-    use crate::query::search::ContextWindow;
-
-    // Build context windows for each result
-    let mut results_with_context: Vec<(crate::embed::search::SemanticSearchResult, ContextWindow)> =
-        Vec::new();
-
-    for result in results {
-        // Skip if no window indices
-        let (start_idx, end_idx) = match (result.window_start_idx, result.window_end_idx) {
-            (Some(s), Some(e)) => (s, e),
-            _ => continue,
-        };
-
-        // Load the transcript for this document
-        let utterances = load_transcript(conn, &result.document_id)?;
-        if utterances.is_empty() {
-            continue;
-        }
-
-        // Build context window
-        if let Some(window) =
-            build_context_window_from_indices(&utterances, start_idx, end_idx, context_size)
-        {
-            // Apply speaker filter to matched utterance
-            if let Some(filter) = speaker_filter {
-                if !filter.matches(window.matched.source.as_deref()) {
-                    continue;
-                }
-            }
-            results_with_context.push((result.clone(), window));
-        }
-    }
-
-    if results_with_context.is_empty() {
-        if ctx.output_mode == OutputMode::Tty {
-            println!("No semantic matches with context found for \"{}\".", query);
-        }
-        return Ok(());
-    }
-
-    match ctx.output_mode {
-        OutputMode::Json => {
-            println!(
-                "{}",
-                crate::output::json::format_semantic_results_with_context(
-                    &results_with_context,
-                    query,
-                    total_count,
-                    limit,
-                    conn
-                )
-            );
-        }
-        OutputMode::Tty => {
-            use colored::Colorize;
-
-            let shown = results_with_context.len();
-            if total_count > shown {
-                println!(
-                    "Found {} semantic match(es) for \"{}\" (showing top {}):\n",
-                    total_count.to_string().cyan().bold(),
-                    query,
-                    shown.to_string().cyan().bold()
-                );
-            } else {
-                println!(
-                    "Found {} semantic match(es) for \"{}\":\n",
-                    shown.to_string().cyan().bold(),
-                    query
-                );
-            }
-            for (i, (result, window)) in results_with_context.iter().enumerate() {
-                let (title, _) = lookup_document_meta(conn, &result.document_id);
-                println!(
-                    "{}",
-                    crate::output::table::format_search_separator(
-                        i + 1,
-                        shown,
-                        &title,
-                        Some(result.score)
-                    )
-                );
-                println!(
-                    "{}",
-                    crate::output::table::format_context_window_with_score(
-                        window,
-                        None,
-                        result.score,
-                        &ctx.tz,
-                    )
-                );
-                println!();
-            }
-            if total_count > shown {
-                println!("Use --limit 0 to show all {} results.", total_count);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn lookup_document_meta(conn: &Connection, doc_id: &str) -> (String, String) {
-    let result: Option<(String, String)> = conn
-        .query_row(
-            "SELECT COALESCE(title, '(untitled)'), COALESCE(created_at, '') FROM documents WHERE id = ?1",
-            [doc_id],
-            |row| {
-                let title: String = row.get(0)?;
-                let date: String = row.get(1)?;
-                Ok((title, date))
-            },
-        )
-        .ok();
-
-    result.unwrap_or_else(|| ("(unknown)".to_string(), String::new()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,7 +668,7 @@ mod tests {
     #[test]
     fn from_cli_args_defaults_to_hybrid() {
         let mode = SearchMode::from_cli_args(
-            false, None, false, false, 0, "titles,notes", None, None, false, 10, 1,
+            false, None, false, 0, "titles,notes", None, None, false, 10, 1,
         );
         match mode {
             SearchMode::Hybrid {
@@ -992,7 +745,7 @@ mod tests {
     #[test]
     fn from_cli_args_matches_threads_to_hybrid() {
         let mode = SearchMode::from_cli_args(
-            false, None, false, false, 0, "titles", None, None, false, 10, 3,
+            false, None, false, 0, "titles", None, None, false, 10, 3,
         );
         match mode {
             SearchMode::Hybrid { matches, .. } => assert_eq!(matches, 3),
@@ -1003,7 +756,7 @@ mod tests {
     #[test]
     fn from_cli_args_keyword_flag_forces_keyword() {
         let mode = SearchMode::from_cli_args(
-            false, None, true, false, 0, "titles,notes", Some("standup"), None, false, 10, 1,
+            false, None, true, 0, "titles,notes", Some("standup"), None, false, 10, 1,
         );
         match mode {
             SearchMode::Keyword {
@@ -1024,7 +777,7 @@ mod tests {
     #[test]
     fn from_cli_args_fast_skips_rerank() {
         let mode = SearchMode::from_cli_args(
-            true, None, false, false, 0, "titles", None, None, false, 10, 1,
+            true, None, false, 0, "titles", None, None, false, 10, 1,
         );
         match mode {
             SearchMode::Hybrid { rerank, .. } => assert!(!rerank),
@@ -1035,7 +788,7 @@ mod tests {
     #[test]
     fn from_cli_args_min_score_threads_to_hybrid() {
         let mode = SearchMode::from_cli_args(
-            false, Some(0.4), false, false, 0, "titles", None, None, false, 10, 1,
+            false, Some(0.4), false, 0, "titles", None, None, false, 10, 1,
         );
         match mode {
             SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),
@@ -1044,28 +797,8 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_args_semantic_takes_priority() {
-        let mode = SearchMode::from_cli_args(false, None, false, true, 5, "titles", Some("standup"), None, true, 10, 1);
-        match mode {
-            SearchMode::Semantic {
-                targets,
-                context_size,
-                yes,
-                limit,
-                ..
-            } => {
-                assert_eq!(targets, vec![SearchTarget::Titles]);
-                assert_eq!(context_size, 5);
-                assert!(yes);
-                assert_eq!(limit, 10);
-            }
-            _ => panic!("Expected Semantic variant"),
-        }
-    }
-
-    #[test]
     fn from_cli_args_context_forces_context_window() {
-        let mode = SearchMode::from_cli_args(false, None, false, false, 3, "titles,notes", Some("standup"), None, false, 10, 1);
+        let mode = SearchMode::from_cli_args(false, None, false, 3, "titles,notes", Some("standup"), None, false, 10, 1);
         match mode {
             SearchMode::ContextWindow {
                 targets,
@@ -1089,7 +822,7 @@ mod tests {
     fn from_cli_args_speaker_routes_bare_search_to_keyword() {
         let speaker = SpeakerFilter::Me;
         let mode = SearchMode::from_cli_args(
-            false, None, false, false, 0, "transcripts", None, Some(&speaker), false, 10, 1,
+            false, None, false, 0, "transcripts", None, Some(&speaker), false, 10, 1,
         );
         match mode {
             SearchMode::Keyword { .. } => {}
@@ -1100,7 +833,7 @@ mod tests {
     #[test]
     fn from_cli_args_meeting_filter_threads_to_hybrid() {
         let mode =
-            SearchMode::from_cli_args(false, None, false, false, 0, "transcripts", Some("daily"), None, false, 10, 1);
+            SearchMode::from_cli_args(false, None, false, 0, "transcripts", Some("daily"), None, false, 10, 1);
         match mode {
             SearchMode::Hybrid {
                 meeting_filter, ..
@@ -1114,7 +847,7 @@ mod tests {
     #[test]
     fn from_cli_args_meeting_filter_threads_to_keyword() {
         let mode =
-            SearchMode::from_cli_args(false, None, true, false, 0, "transcripts", Some("daily"), None, false, 10, 1);
+            SearchMode::from_cli_args(false, None, true, 0, "transcripts", Some("daily"), None, false, 10, 1);
         match mode {
             SearchMode::Keyword {
                 meeting_filter, ..
@@ -1128,7 +861,7 @@ mod tests {
     #[test]
     fn from_cli_args_meeting_filter_threads_to_context_window() {
         let mode =
-            SearchMode::from_cli_args(false, None, false, false, 5, "titles", Some("retro"), None, false, 10, 1);
+            SearchMode::from_cli_args(false, None, false, 5, "titles", Some("retro"), None, false, 10, 1);
         match mode {
             SearchMode::ContextWindow {
                 meeting_filter, ..
@@ -1142,7 +875,7 @@ mod tests {
     #[test]
     fn from_cli_args_speaker_filter_threads_to_context_window() {
         let speaker = SpeakerFilter::Me;
-        let mode = SearchMode::from_cli_args(false, None, false, false, 3, "transcripts", None, Some(&speaker), false, 10, 1);
+        let mode = SearchMode::from_cli_args(false, None, false, 3, "transcripts", None, Some(&speaker), false, 10, 1);
         match mode {
             SearchMode::ContextWindow {
                 speaker_filter, ..
@@ -1150,20 +883,6 @@ mod tests {
                 assert_eq!(speaker_filter, Some(SpeakerFilter::Me));
             }
             _ => panic!("Expected ContextWindow variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_speaker_filter_threads_to_semantic() {
-        let speaker = SpeakerFilter::Other;
-        let mode = SearchMode::from_cli_args(false, None, false, true, 0, "transcripts", None, Some(&speaker), false, 10, 1);
-        match mode {
-            SearchMode::Semantic {
-                speaker_filter, ..
-            } => {
-                assert_eq!(speaker_filter, Some(SpeakerFilter::Other));
-            }
-            _ => panic!("Expected Semantic variant"),
         }
     }
 
