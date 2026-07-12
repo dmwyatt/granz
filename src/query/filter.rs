@@ -55,11 +55,6 @@ pub fn meeting_filter_matches(filter_lower: &str, title: Option<&str>, id: Optio
         || id.map(|i| i.to_lowercase().contains(filter_lower)).unwrap_or(false)
 }
 
-/// True when the document's title or id contains the lowercased filter.
-pub fn matches_meeting_filter(doc: &Document, filter_lower: &str) -> bool {
-    meeting_filter_matches(filter_lower, doc.title.as_deref(), doc.id.as_deref())
-}
-
 /// Keep only documents whose title or id contains `filter` (case-insensitive).
 /// No filter keeps everything.
 pub fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Vec<Document> {
@@ -67,7 +62,10 @@ pub fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -
         return results;
     };
     let filter_lower = filter.to_lowercase();
-    results.into_iter().filter(|doc| matches_meeting_filter(doc, &filter_lower)).collect()
+    results
+        .into_iter()
+        .filter(|doc| meeting_filter_matches(&filter_lower, doc.title.as_deref(), doc.id.as_deref()))
+        .collect()
 }
 
 #[cfg(test)]
