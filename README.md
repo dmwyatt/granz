@@ -140,7 +140,7 @@ Two verbs query meeting content, with two different promises:
 - `grans search` (alias `s`) is ranked discovery: the best few meetings for a query, matched by meaning as well as by words. Keyword (FTS5) and semantic rankings are fused with reciprocal rank fusion, then the top candidates are reranked by a cross-encoder. Results come from bounded candidate pools, so search shows a `Top N match(es)` list and never reports a corpus total.
 - `grans grep` (alias `g`) is complete lexical lookup: every meeting where the words literally appear. Its `Found N meeting(s)` count is a fact about your synced data, and `--limit` only trims how many are shown. Grep never loads models and never prompts.
 
-When search finds any meetings containing the query's literal words, it says so in a footer and points at grep, e.g. `312 meeting(s) contain these words; grans grep "budget" lists them all.`
+When search finds any meetings containing the query's literal words, it says so in a footer and points at grep, e.g. `312 meeting(s) contain these words; grans grep "budget" lists them all.` The suggested command echoes any search filters that affect the count (`--in`, `--meeting`, date flags, `--include-deleted`), so running it reports the number the footer claims.
 
 Migrating from the old flags: `search --keyword` is now `grep`, `search --speaker me` is now `grep --speaker me`, and `--hybrid` is gone because hybrid retrieval is simply what `search` does.
 

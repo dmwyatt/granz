@@ -55,7 +55,7 @@ pub enum Commands {
         query: String,
 
         /// Search targets: titles, transcripts, notes, panels (comma-separated)
-        #[arg(long, rename_all = "lowercase", default_value = "titles,transcripts,notes,panels")]
+        #[arg(long, rename_all = "lowercase", default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
         r#in: String,
 
         /// Skip the cross-encoder rerank stage
@@ -119,7 +119,7 @@ pub enum Commands {
         query: String,
 
         /// Search targets: titles, transcripts, notes, panels (comma-separated)
-        #[arg(long, rename_all = "lowercase", default_value = "titles,transcripts,notes,panels")]
+        #[arg(long, rename_all = "lowercase", default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
         r#in: String,
 
         /// Maximum match snippets shown per meeting (0 = headers only)

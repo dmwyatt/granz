@@ -112,15 +112,22 @@ fn main() -> Result<()> {
             limit,
             include_deleted,
         } => {
+            let echo = commands::search::FilterEcho {
+                in_targets: r#in.clone(),
+                meeting: meeting.clone(),
+                date: date.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                include_deleted: *include_deleted,
+            };
             let opts = SearchOptions::from_cli_args(
                 *fast,
                 *min_score,
                 *context,
-                r#in,
-                meeting.as_deref(),
                 *yes,
                 *limit,
                 *matches,
+                echo,
             );
             let date_range = query::dates::build_date_range(
                 from.as_deref(),

@@ -16,10 +16,36 @@ use crate::commands::search_common::{print_shaped_cards, shape_and_page};
 use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::SearchTarget;
+use crate::query::filter::{SearchTarget, DEFAULT_SEARCH_TARGETS};
 
 /// Threshold for prompting before embedding during a search.
 const EMBED_WARN_THRESHOLD: usize = 200;
+
+/// Raw filter values as given on the command line. The grep cross-link
+/// echoes them verbatim so the suggested command reproduces the count the
+/// footer claims; only filters that change the match count belong here.
+pub struct FilterEcho {
+    /// Raw `--in` value.
+    pub in_targets: String,
+    pub meeting: Option<String>,
+    pub date: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub include_deleted: bool,
+}
+
+impl Default for FilterEcho {
+    fn default() -> Self {
+        FilterEcho {
+            in_targets: DEFAULT_SEARCH_TARGETS.to_string(),
+            meeting: None,
+            date: None,
+            from: None,
+            to: None,
+            include_deleted: false,
+        }
+    }
+}
 
 /// Options for a ranked search.
 pub struct SearchOptions {
@@ -33,31 +59,34 @@ pub struct SearchOptions {
     pub matches: usize,
     /// Neighboring units rendered around each shown match.
     pub context: usize,
+    /// Raw filter values, echoed into the grep cross-link.
+    pub echo: FilterEcho,
 }
 
 impl SearchOptions {
     /// Construct SearchOptions from CLI arguments. A bare search reranks;
-    /// --fast keeps fusion order.
+    /// --fast keeps fusion order. Targets and the meeting filter derive
+    /// from the raw values in `echo`.
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         fast: bool,
         min_score: Option<f32>,
         context: usize,
-        in_targets: &str,
-        meeting_filter: Option<&str>,
         yes: bool,
         limit: usize,
         matches: usize,
+        echo: FilterEcho,
     ) -> Self {
         SearchOptions {
-            targets: SearchTarget::parse_list(in_targets),
-            meeting_filter: meeting_filter.map(String::from),
+            targets: SearchTarget::parse_list(&echo.in_targets),
+            meeting_filter: echo.meeting.clone(),
             rerank: !fast,
             min_score,
             yes,
             limit,
             matches,
             context,
+            echo,
         }
     }
 }
@@ -147,7 +176,7 @@ pub fn search(
         opts.limit,
     )?;
 
-    render_ranked_meeting_list(&shaped, query, ranking.keyword_total, opts.limit, ctx);
+    render_ranked_meeting_list(&shaped, query, ranking.keyword_total, &opts, ctx);
     Ok(())
 }
 
@@ -156,12 +185,46 @@ fn ranked_header(shown: usize, query: &str) -> String {
     format!("Top {} match(es) for \"{}\":", shown, query)
 }
 
-/// Cross-link to the complete lookup, backed by the uncapped FTS count.
-fn grep_cross_link(keyword_total: usize, query: &str) -> String {
-    format!(
-        "{} meeting(s) contain these words; grans grep \"{}\" lists them all.",
-        keyword_total, query
-    )
+/// The grep command that reproduces `keyword_total`: the query plus every
+/// search filter that affects the match count, echoed as given. Flags that
+/// only shape presentation or the ranked pipeline (--limit, --matches,
+/// --context, --fast, --min-score, --yes) are omitted because they do not
+/// change what counts as a match.
+fn grep_command_echo(query: &str, filters: &FilterEcho) -> String {
+    let mut cmd = format!("grans grep \"{}\"", query);
+    if filters.in_targets != DEFAULT_SEARCH_TARGETS {
+        cmd.push_str(&format!(" --in {}", filters.in_targets));
+    }
+    if let Some(meeting) = &filters.meeting {
+        cmd.push_str(&format!(" --meeting \"{}\"", meeting));
+    }
+    if let Some(date) = &filters.date {
+        cmd.push_str(&format!(" --date {}", date));
+    }
+    if let Some(from) = &filters.from {
+        cmd.push_str(&format!(" --from {}", from));
+    }
+    if let Some(to) = &filters.to {
+        cmd.push_str(&format!(" --to {}", to));
+    }
+    if filters.include_deleted {
+        cmd.push_str(" --include-deleted");
+    }
+    cmd
+}
+
+/// Footer cross-linking the complete lookup, backed by the uncapped FTS
+/// count. None when no meeting contains the query's words, in which case
+/// no footer is printed.
+fn grep_cross_link(keyword_total: usize, query: &str, filters: &FilterEcho) -> Option<String> {
+    if keyword_total == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} meeting(s) contain these words; {} lists them all.",
+        keyword_total,
+        grep_command_echo(query, filters)
+    ))
 }
 
 /// Print ranked results, honoring the output mode. The list is a pooled
@@ -171,14 +234,14 @@ fn render_ranked_meeting_list(
     shaped: &[crate::query::shape::ShapedMeeting],
     query: &str,
     keyword_total: usize,
-    limit: usize,
+    opts: &SearchOptions,
     ctx: &RunContext,
 ) {
     match ctx.output_mode {
         OutputMode::Json => {
             println!(
                 "{}",
-                crate::output::json::format_search_meetings(shaped, query, keyword_total, limit)
+                crate::output::json::format_search_meetings(shaped, query, keyword_total, opts.limit)
             );
         }
         OutputMode::Tty => {
@@ -188,8 +251,8 @@ fn render_ranked_meeting_list(
                 println!("{}\n", ranked_header(shaped.len(), query));
                 print_shaped_cards(shaped, ctx);
             }
-            if keyword_total > 0 {
-                println!("{}", grep_cross_link(keyword_total, query));
+            if let Some(footer) = grep_cross_link(keyword_total, query, &opts.echo) {
+                println!("{}", footer);
             }
         }
     }
@@ -255,10 +318,22 @@ fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Res
 mod tests {
     use super::*;
 
+    fn echo_with(f: impl FnOnce(&mut FilterEcho)) -> FilterEcho {
+        let mut echo = FilterEcho::default();
+        f(&mut echo);
+        echo
+    }
+
     #[test]
     fn from_cli_args_defaults_rerank_on() {
         let opts = SearchOptions::from_cli_args(
-            false, None, 0, "titles,notes", None, false, 10, 1,
+            false,
+            None,
+            0,
+            false,
+            10,
+            1,
+            echo_with(|e| e.in_targets = "titles,notes".to_string()),
         );
         assert_eq!(opts.targets.len(), 2);
         assert!(opts.targets.contains(&SearchTarget::Titles));
@@ -274,28 +349,43 @@ mod tests {
 
     #[test]
     fn from_cli_args_fast_skips_rerank() {
-        let opts = SearchOptions::from_cli_args(true, None, 0, "titles", None, false, 10, 1);
+        let opts =
+            SearchOptions::from_cli_args(true, None, 0, false, 10, 1, FilterEcho::default());
         assert!(!opts.rerank);
     }
 
     #[test]
     fn from_cli_args_min_score_threads() {
-        let opts =
-            SearchOptions::from_cli_args(false, Some(0.4), 0, "titles", None, false, 10, 1);
+        let opts = SearchOptions::from_cli_args(
+            false,
+            Some(0.4),
+            0,
+            false,
+            10,
+            1,
+            FilterEcho::default(),
+        );
         assert_eq!(opts.min_score, Some(0.4));
     }
 
     #[test]
     fn from_cli_args_meeting_filter_threads() {
         let opts = SearchOptions::from_cli_args(
-            false, None, 0, "transcripts", Some("daily"), false, 10, 1,
+            false,
+            None,
+            0,
+            false,
+            10,
+            1,
+            echo_with(|e| e.meeting = Some("daily".to_string())),
         );
         assert_eq!(opts.meeting_filter.as_deref(), Some("daily"));
     }
 
     #[test]
     fn from_cli_args_matches_and_context_thread() {
-        let opts = SearchOptions::from_cli_args(false, None, 3, "titles", None, false, 10, 4);
+        let opts =
+            SearchOptions::from_cli_args(false, None, 3, false, 10, 4, FilterEcho::default());
         assert_eq!(opts.context, 3);
         assert_eq!(opts.matches, 4);
     }
@@ -306,10 +396,90 @@ mod tests {
     }
 
     #[test]
-    fn grep_cross_link_names_the_complete_verb() {
+    fn grep_cross_link_suppressed_when_nothing_matches_the_words() {
+        assert_eq!(grep_cross_link(0, "budget", &FilterEcho::default()), None);
+    }
+
+    #[test]
+    fn grep_cross_link_bare_default_echoes_plain_grep() {
         assert_eq!(
-            grep_cross_link(312, "budget"),
-            "312 meeting(s) contain these words; grans grep \"budget\" lists them all."
+            grep_cross_link(312, "budget", &FilterEcho::default()).as_deref(),
+            Some("312 meeting(s) contain these words; grans grep \"budget\" lists them all.")
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_omits_the_default_target_list() {
+        assert_eq!(
+            grep_command_echo("budget", &FilterEcho::default()),
+            "grans grep \"budget\""
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_echoes_a_non_default_in_list() {
+        let echo = echo_with(|e| e.in_targets = "titles,notes".to_string());
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --in titles,notes"
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_quotes_the_meeting_filter() {
+        let echo = echo_with(|e| e.meeting = Some("Weekly Standup".to_string()));
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --meeting \"Weekly Standup\""
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_echoes_the_raw_date_flag() {
+        let echo = echo_with(|e| e.date = Some("last-week".to_string()));
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --date last-week"
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_echoes_raw_from_and_to() {
+        let echo = echo_with(|e| {
+            e.from = Some("2026-01-01".to_string());
+            e.to = Some("3d".to_string());
+        });
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --from 2026-01-01 --to 3d"
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_echoes_include_deleted() {
+        let echo = echo_with(|e| e.include_deleted = true);
+        assert_eq!(
+            grep_command_echo("budget", &echo),
+            "grans grep \"budget\" --include-deleted"
+        );
+    }
+
+    #[test]
+    fn grep_command_echo_combines_every_count_affecting_filter() {
+        let echo = FilterEcho {
+            in_targets: "transcripts".to_string(),
+            meeting: Some("Weekly Standup".to_string()),
+            date: Some("last-week".to_string()),
+            from: None,
+            to: None,
+            include_deleted: true,
+        };
+        assert_eq!(
+            grep_cross_link(41, "budget", &echo).as_deref(),
+            Some(
+                "41 meeting(s) contain these words; grans grep \"budget\" --in transcripts \
+                 --meeting \"Weekly Standup\" --date last-week --include-deleted lists them all."
+            )
         );
     }
 }

@@ -1,5 +1,8 @@
 use crate::models::Document;
 
+/// The default `--in` target list for search and grep: every source.
+pub const DEFAULT_SEARCH_TARGETS: &str = "titles,transcripts,notes,panels";
+
 /// Where to search for text matches in meetings.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchTarget {
