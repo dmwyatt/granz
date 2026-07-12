@@ -11,7 +11,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::models::Document;
+use crate::models::{Document, SpeakerFilter};
 use crate::query::fts::{matches_all_tokens, FtsToken};
 use crate::query::hybrid::BestChunk;
 use crate::query::shape::{
@@ -19,18 +19,22 @@ use crate::query::shape::{
 };
 use crate::query::text::{split_into_paragraphs, split_markdown_sections, strip_panel_footer};
 
-/// Caps on how much evidence is excerpted per document.
+/// How evidence is selected and excerpted per document.
 #[derive(Debug, Clone)]
-pub struct EvidenceLimits {
+pub struct EvidenceOptions {
     /// How many match sites to excerpt (the rest are only counted).
     pub max_matches: usize,
     /// Rough excerpt width in characters.
     pub max_chars: usize,
+    /// When set, only transcript utterances by this speaker count as
+    /// evidence; panel and notes sites have no speaker to attribute and are
+    /// excluded, and the semantic and title fallback tiers are disabled.
+    pub speaker: Option<SpeakerFilter>,
 }
 
-impl Default for EvidenceLimits {
+impl Default for EvidenceOptions {
     fn default() -> Self {
-        Self { max_matches: 1, max_chars: 160 }
+        Self { max_matches: 1, max_chars: 160, speaker: None }
     }
 }
 
@@ -56,12 +60,12 @@ struct Site {
 }
 
 /// Collect every lexical match site for `doc` and excerpt the first
-/// `limits.max_matches` of them.
+/// `opts.max_matches` of them.
 pub fn collect_document_evidence(
     conn: &Connection,
     doc: &Document,
     tokens: &[FtsToken],
-    limits: &EvidenceLimits,
+    opts: &EvidenceOptions,
 ) -> Result<DocumentEvidence> {
     // An empty query matches nothing, mirroring the FTS empty-phrase
     // behavior; without this, matches_all_tokens is vacuously true and
@@ -76,22 +80,25 @@ pub fn collect_document_evidence(
 
     let mut sites = Vec::new();
 
-    if let Some(doc_id) = doc.id.as_deref() {
-        collect_panel_sites(conn, doc_id, tokens, &mut sites)?;
+    // A speaker filter restricts evidence to attributable transcript sites.
+    if opts.speaker.is_none() {
+        if let Some(doc_id) = doc.id.as_deref() {
+            collect_panel_sites(conn, doc_id, tokens, &mut sites)?;
+        }
+        collect_notes_sites(doc.notes_plain.as_deref(), tokens, &mut sites);
     }
-    collect_notes_sites(doc.notes_plain.as_deref(), tokens, &mut sites);
     if let Some(doc_id) = doc.id.as_deref() {
-        collect_transcript_sites(conn, doc_id, tokens, &mut sites)?;
+        collect_transcript_sites(conn, doc_id, tokens, opts.speaker.as_ref(), &mut sites)?;
     }
 
     let total = sites.len();
     let mut matches = Vec::new();
     let mut remaining_sources = Vec::new();
     for (i, site) in sites.into_iter().enumerate() {
-        if i < limits.max_matches {
+        if i < opts.max_matches {
             matches.push(MatchEvidence {
                 source: site.source,
-                excerpt: excerpt_around_match(&site.text, tokens, limits.max_chars),
+                excerpt: excerpt_around_match(&site.text, tokens, opts.max_chars),
                 speaker: site.speaker,
                 timestamp: site.timestamp,
                 section: site.section,
@@ -125,9 +132,9 @@ pub fn shape_meeting(
     doc: &Document,
     tokens: &[FtsToken],
     facts: &RankingFacts,
-    limits: &EvidenceLimits,
+    opts: &EvidenceOptions,
 ) -> Result<ShapedMeeting> {
-    let evidence = collect_document_evidence(conn, doc, tokens, limits)?;
+    let evidence = collect_document_evidence(conn, doc, tokens, opts)?;
     let signals = Signals {
         keyword: facts.keyword,
         semantic: facts.best_chunk.is_some(),
@@ -136,9 +143,15 @@ pub fn shape_meeting(
 
     // Tier on whether lexical evidence exists, not on whether any was
     // excerpted: --matches 0 keeps matches empty while total still counts.
+    // A speaker filter disables the semantic fallback: an unattributable
+    // chunk cannot stand in for evidence the filter asks to attribute.
     let (matches, total, remaining_sources) = if evidence.total > 0 {
         (evidence.matches, evidence.total, evidence.remaining_sources)
-    } else if let Some(m) = facts.best_chunk.and_then(|c| chunk_evidence(c, tokens, limits)) {
+    } else if let Some(m) = facts
+        .best_chunk
+        .filter(|_| opts.speaker.is_none())
+        .and_then(|c| chunk_evidence(c, tokens, opts))
+    {
         (vec![m], 1, Vec::new())
     } else {
         (Vec::new(), 0, Vec::new())
@@ -160,7 +173,7 @@ pub fn shape_meeting(
 fn chunk_evidence(
     chunk: &BestChunk,
     tokens: &[FtsToken],
-    limits: &EvidenceLimits,
+    opts: &EvidenceOptions,
 ) -> Option<MatchEvidence> {
     let source = match chunk.source_type.as_str() {
         "transcript_window" => EvidenceSource::Transcript,
@@ -170,7 +183,7 @@ fn chunk_evidence(
     };
     Some(MatchEvidence {
         source,
-        excerpt: excerpt_around_match(&chunk.text, tokens, limits.max_chars),
+        excerpt: excerpt_around_match(&chunk.text, tokens, opts.max_chars),
         speaker: None,
         timestamp: None,
         section: chunk.section_heading.clone(),
@@ -222,17 +235,24 @@ fn collect_notes_sites(notes_plain: Option<&str>, tokens: &[FtsToken], sites: &m
     }
 }
 
-/// Transcript utterances that contain every token, in time order.
+/// Transcript utterances that contain every token, in time order. With a
+/// speaker filter, only that speaker's utterances count.
 fn collect_transcript_sites(
     conn: &Connection,
     doc_id: &str,
     tokens: &[FtsToken],
+    speaker: Option<&SpeakerFilter>,
     sites: &mut Vec<Site>,
 ) -> Result<()> {
     for utt in crate::db::transcripts::load_transcript(conn, doc_id)? {
         let Some(text) = utt.text.filter(|t| !t.is_empty()) else {
             continue;
         };
+        if let Some(filter) = speaker {
+            if !filter.matches(utt.source.as_deref()) {
+                continue;
+            }
+        }
         if matches_all_tokens(&text, tokens) {
             sites.push(Site {
                 source: EvidenceSource::Transcript,
@@ -298,7 +318,7 @@ mod tests {
         query: &str,
         max_matches: usize,
     ) -> DocumentEvidence {
-        let limits = EvidenceLimits { max_matches, max_chars: 160 };
+        let limits = EvidenceOptions { max_matches, max_chars: 160, speaker: None };
         collect_document_evidence(conn, doc, &parse_query(query), &limits).unwrap()
     }
 
@@ -418,7 +438,7 @@ mod tests {
         query: &str,
         facts: &RankingFacts,
     ) -> ShapedMeeting {
-        shape_meeting(conn, doc, &parse_query(query), facts, &EvidenceLimits::default()).unwrap()
+        shape_meeting(conn, doc, &parse_query(query), facts, &EvidenceOptions::default()).unwrap()
     }
 
     #[test]
@@ -489,7 +509,7 @@ mod tests {
         let doc = load_doc(&conn, "doc-1");
         let chunk = best_chunk("some semantic chunk", "transcript_window", None);
         let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
-        let limits = EvidenceLimits { max_matches: 0, max_chars: 160 };
+        let limits = EvidenceOptions { max_matches: 0, max_chars: 160, speaker: None };
 
         let shaped =
             shape_meeting(&conn, &doc, &parse_query("kumquat"), &facts, &limits).unwrap();
@@ -519,6 +539,63 @@ mod tests {
         let ev = collect(&conn, &doc, "", 3);
         assert_eq!(ev.total, 0);
         assert!(ev.matches.is_empty());
+    }
+
+    // --- speaker filter ---
+
+    #[test]
+    fn speaker_filter_counts_only_matching_utterances() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        // "kumquat" sites: 1 panel, 2 notes, u1 (microphone), u3 (system).
+        // With a speaker filter only transcript sites by that speaker count.
+        let opts = EvidenceOptions {
+            speaker: Some(crate::models::SpeakerFilter::Me),
+            ..Default::default()
+        };
+        let ev =
+            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        assert_eq!(ev.total, 1);
+        assert_eq!(ev.matches[0].source, EvidenceSource::Transcript);
+        assert_eq!(ev.matches[0].speaker.as_deref(), Some("microphone"));
+    }
+
+    #[test]
+    fn speaker_filter_excludes_unattributable_sources() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let opts = EvidenceOptions {
+            speaker: Some(crate::models::SpeakerFilter::Other),
+            ..Default::default()
+        };
+        let ev =
+            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        // Only u3 ("Back to the kumquat question.", system); the panel and
+        // notes sites have no speaker to attribute and do not count.
+        assert_eq!(ev.total, 1);
+        assert_eq!(ev.matches[0].speaker.as_deref(), Some("system"));
+        assert!(ev.matches[0].excerpt.text.contains("question"));
+    }
+
+    #[test]
+    fn speaker_filter_disables_semantic_and_title_fallbacks() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        // "rollout" appears only in u1 (microphone). Filtering to Other
+        // leaves no attributable evidence, and neither the semantic chunk
+        // nor the title may stand in.
+        let chunk = best_chunk("some semantic chunk", "transcript_window", None);
+        let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
+        let opts = EvidenceOptions {
+            speaker: Some(crate::models::SpeakerFilter::Other),
+            ..Default::default()
+        };
+
+        let shaped =
+            shape_meeting(&conn, &doc, &parse_query("rollout"), &facts, &opts).unwrap();
+
+        assert_eq!(shaped.total_matches, 0);
+        assert!(shaped.matches.is_empty());
     }
 
     #[test]

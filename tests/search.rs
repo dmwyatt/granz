@@ -258,6 +258,60 @@ fn keyword_search_limit_zero_returns_all() {
     assert!(result["meetings"].as_array().unwrap().len() >= 2);
 }
 
+// --- Speaker filter (#60: composes with retrieval instead of forcing keyword) ---
+
+#[test]
+fn speaker_filter_keeps_meetings_with_matching_utterances() {
+    let env = TestEnv::with_fixture();
+    // "prototype" appears in system ("other") utterances of doc-alpha and
+    // doc-beta; both survive the filter and the evidence is the utterance.
+    let output = env
+        .cmd_json()
+        .args(["search", "prototype", "--keyword", "--speaker", "other"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let meetings = result["meetings"].as_array().unwrap();
+    assert_eq!(meetings.len(), 2, "got: {result}");
+    for m in meetings {
+        assert_eq!(m["matches"][0]["source"], "transcript");
+        assert_eq!(m["matches"][0]["speaker"], "other");
+    }
+}
+
+#[test]
+fn speaker_filter_drops_meetings_without_attributable_evidence() {
+    let env = TestEnv::with_fixture();
+    // "milestones" matches doc-alpha only in notes and a panel section.
+    // With a speaker filter only transcript evidence counts, so the meeting
+    // drops out entirely instead of showing unattributable matches.
+    let output = env
+        .cmd_json()
+        .args(["search", "milestones", "--keyword", "--speaker", "other"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["total_meetings"], 0, "got: {result}");
+}
+
+#[test]
+fn speaker_filter_me_matches_nothing_in_all_system_fixture() {
+    let env = TestEnv::with_fixture();
+    let output = env
+        .cmd_json()
+        .args(["search", "prototype", "--keyword", "--speaker", "me"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["total_meetings"], 0, "got: {result}");
+}
+
 #[test]
 fn context_search_respects_limit() {
     let env = TestEnv::with_fixture();

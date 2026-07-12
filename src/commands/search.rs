@@ -21,6 +21,8 @@ pub enum SearchMode {
         limit: usize,
         /// Match snippets shown per meeting card.
         matches: usize,
+        /// Only meetings with matching utterances by this speaker survive.
+        speaker: Option<SpeakerFilter>,
     },
     ContextWindow {
         targets: Vec<SearchTarget>,
@@ -38,15 +40,17 @@ pub enum SearchMode {
         limit: usize,
         /// Match snippets shown per meeting card.
         matches: usize,
+        /// Only meetings with matching utterances by this speaker survive.
+        speaker: Option<SpeakerFilter>,
     },
 }
 
 impl SearchMode {
     /// Construct a SearchMode from CLI arguments.
     ///
-    /// A bare search runs hybrid. --context and --keyword force their modes,
-    /// and --speaker also routes to the keyword path because hybrid does not
-    /// use it. --hybrid needs no parameter here: it is the default, and clap
+    /// A bare search runs hybrid. --context and --keyword force their modes;
+    /// --speaker filters match evidence and composes with either retrieval
+    /// mode. --hybrid needs no parameter here: it is the default, and clap
     /// conflicts keep it from combining with forcing flags.
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
@@ -69,12 +73,13 @@ impl SearchMode {
                 speaker_filter: speaker.cloned(),
                 limit,
             }
-        } else if keyword || speaker.is_some() {
+        } else if keyword {
             SearchMode::Keyword {
                 targets: SearchTarget::parse_list(in_targets),
                 meeting_filter: meeting_filter.map(String::from),
                 limit,
                 matches,
+                speaker: speaker.cloned(),
             }
         } else {
             SearchMode::Hybrid {
@@ -85,6 +90,7 @@ impl SearchMode {
                 yes,
                 limit,
                 matches,
+                speaker: speaker.cloned(),
             }
         }
     }
@@ -124,6 +130,7 @@ pub fn search(
             meeting_filter,
             limit,
             matches,
+            speaker,
         } => keyword_search(
             conn,
             query,
@@ -131,6 +138,7 @@ pub fn search(
             meeting_filter.as_deref(),
             limit,
             matches,
+            speaker,
             date_range,
             include_deleted,
             ctx,
@@ -143,6 +151,7 @@ pub fn search(
             yes,
             limit,
             matches,
+            speaker,
         } => hybrid_search(
             conn,
             query,
@@ -153,6 +162,7 @@ pub fn search(
             yes,
             limit,
             matches,
+            speaker,
             date_range,
             include_deleted,
             ctx,
@@ -199,6 +209,7 @@ fn keyword_search(
     meeting_filter: Option<&str>,
     limit: usize,
     matches: usize,
+    speaker: Option<SpeakerFilter>,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
@@ -220,25 +231,27 @@ fn keyword_search(
     )?;
 
     let results = filter_by_meeting(results, meeting_filter);
-    let total = results.len();
-    let page = apply_limit(results, limit);
+    let docs: Vec<(Document, Option<f32>)> =
+        results.into_iter().map(|doc| (doc, None)).collect();
 
     let tokens = crate::query::fts::parse_query(query);
-    let limits = crate::query::evidence::EvidenceLimits {
+    let opts = crate::query::evidence::EvidenceOptions {
         max_matches: matches,
+        speaker,
         ..Default::default()
     };
-    let shaped = page
-        .iter()
-        .map(|doc| {
-            let facts = crate::query::evidence::RankingFacts {
-                keyword: true,
-                best_chunk: None,
-                score: None,
-            };
-            crate::query::evidence::shape_meeting(conn, doc, &tokens, &facts, &limits)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let (shaped, total) = shape_and_page(
+        conn,
+        docs,
+        |_, _| crate::query::evidence::RankingFacts {
+            keyword: true,
+            best_chunk: None,
+            score: None,
+        },
+        &tokens,
+        &opts,
+        limit,
+    )?;
 
     render_shaped_meeting_list(&shaped, query, total, limit, ctx);
     Ok(())
@@ -258,6 +271,7 @@ fn hybrid_search(
     yes: bool,
     limit: usize,
     matches: usize,
+    speaker: Option<SpeakerFilter>,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
@@ -321,40 +335,66 @@ fn hybrid_search(
         })
         .collect();
 
-    let total = filtered.len();
-    let page = apply_limit(filtered, limit);
-
     let tokens = crate::query::fts::parse_query(query);
-    let limits = crate::query::evidence::EvidenceLimits {
+    let opts = crate::query::evidence::EvidenceOptions {
         max_matches: matches,
+        speaker,
         ..Default::default()
     };
-    let shaped = shape_page(conn, &page, &ranking, &tokens, &limits)?;
+    let (shaped, total) = shape_and_page(
+        conn,
+        filtered,
+        |doc, score| {
+            let doc_id = doc.id.as_deref().unwrap_or_default();
+            crate::query::evidence::RankingFacts {
+                keyword: ranking.keyword_ids.contains(doc_id),
+                best_chunk: ranking.best_chunks.get(doc_id),
+                score,
+            }
+        },
+        &tokens,
+        &opts,
+        limit,
+    )?;
 
     render_shaped_meeting_list(&shaped, query, total, limit, ctx);
     Ok(())
 }
 
-/// Shape one display page of ranked documents into meeting cards, in the
-/// order given.
-fn shape_page(
+/// Shape ranked documents into meeting cards, in the order given, and cut
+/// the display page. Returns the page and the total result count.
+///
+/// Without a speaker filter the page is cut first and only displayed cards
+/// are shaped. With one, every candidate is shaped so that meetings whose
+/// evidence the filter eliminates drop out of the count entirely, and the
+/// page is cut from the survivors.
+fn shape_and_page<'a>(
     conn: &Connection,
-    page: &[(Document, Option<f32>)],
-    ranking: &crate::query::hybrid::HybridRanking,
+    docs: Vec<(Document, Option<f32>)>,
+    facts_for: impl Fn(&Document, Option<f32>) -> crate::query::evidence::RankingFacts<'a>,
     tokens: &[crate::query::fts::FtsToken],
-    limits: &crate::query::evidence::EvidenceLimits,
-) -> Result<Vec<crate::query::shape::ShapedMeeting>> {
-    page.iter()
-        .map(|(doc, score)| {
-            let doc_id = doc.id.as_deref().unwrap_or_default();
-            let facts = crate::query::evidence::RankingFacts {
-                keyword: ranking.keyword_ids.contains(doc_id),
-                best_chunk: ranking.best_chunks.get(doc_id),
-                score: *score,
-            };
-            crate::query::evidence::shape_meeting(conn, doc, tokens, &facts, limits)
-        })
-        .collect()
+    opts: &crate::query::evidence::EvidenceOptions,
+    limit: usize,
+) -> Result<(Vec<crate::query::shape::ShapedMeeting>, usize)> {
+    let shape = |docs: &[(Document, Option<f32>)]| {
+        docs.iter()
+            .map(|(doc, score)| {
+                let facts = facts_for(doc, *score);
+                crate::query::evidence::shape_meeting(conn, doc, tokens, &facts, opts)
+            })
+            .collect::<Result<Vec<_>>>()
+    };
+
+    if opts.speaker.is_none() {
+        let total = docs.len();
+        let page = apply_limit(docs, limit);
+        Ok((shape(&page)?, total))
+    } else {
+        let survivors: Vec<_> =
+            shape(&docs)?.into_iter().filter(|m| m.total_matches > 0).collect();
+        let total = survivors.len();
+        Ok((apply_limit(survivors, limit), total))
+    }
 }
 
 /// Print shaped meeting cards, honoring the output mode.
@@ -673,6 +713,7 @@ mod tests {
                 yes,
                 limit,
                 matches,
+                speaker,
             } => {
                 assert_eq!(targets.len(), 2);
                 assert!(targets.contains(&SearchTarget::Titles));
@@ -683,15 +724,37 @@ mod tests {
                 assert!(!yes);
                 assert_eq!(limit, 10);
                 assert_eq!(matches, 1);
+                assert_eq!(speaker, None);
             }
             _ => panic!("Expected Hybrid variant"),
         }
     }
 
+    /// Documents in a fixed order with scores, as a ranked pipeline would
+    /// hand them to shaping.
+    fn ranked_docs(conn: &Connection) -> Vec<(Document, Option<f32>)> {
+        let docs = crate::db::meetings::get_meetings_by_ids(
+            &conn,
+            &["doc-c".to_string(), "doc-a".to_string(), "doc-b".to_string()],
+        )
+        .unwrap();
+        let mut by_id: std::collections::HashMap<String, Document> =
+            docs.into_iter().map(|d| (d.id.clone().unwrap(), d)).collect();
+        vec![
+            (by_id.remove("doc-c").unwrap(), Some(0.5)),
+            (by_id.remove("doc-a").unwrap(), Some(0.9)),
+            (by_id.remove("doc-b").unwrap(), None),
+        ]
+    }
+
+    fn plain_facts<'a>(_: &Document, score: Option<f32>) -> crate::query::evidence::RankingFacts<'a> {
+        crate::query::evidence::RankingFacts { keyword: true, best_chunk: None, score }
+    }
+
     #[test]
-    fn shape_page_preserves_ranking_order_and_scores() {
+    fn shape_and_page_preserves_ranking_order_and_scores() {
         // Shaping is presentation-only: the cards must come back in exactly
-        // the order the ranked page was handed in, whatever the db returns.
+        // the order the ranked list was handed in, whatever the db returns.
         use crate::db::test_fixtures::build_test_db;
         use serde_json::json;
 
@@ -702,38 +765,74 @@ mod tests {
                 "doc-c": {"id": "doc-c", "title": "Gamma", "created_at": "2026-01-03T10:00:00Z"}
             }
         }));
-        let docs = crate::db::meetings::get_meetings_by_ids(
-            &conn,
-            &["doc-c".to_string(), "doc-a".to_string(), "doc-b".to_string()],
-        )
-        .unwrap();
-        let mut by_id: std::collections::HashMap<String, Document> =
-            docs.into_iter().map(|d| (d.id.clone().unwrap(), d)).collect();
-        let page: Vec<(Document, Option<f32>)> = vec![
-            (by_id.remove("doc-c").unwrap(), Some(0.5)),
-            (by_id.remove("doc-a").unwrap(), Some(0.9)),
-            (by_id.remove("doc-b").unwrap(), None),
-        ];
-        let ranking = crate::query::hybrid::HybridRanking {
-            fused: Vec::new(),
-            best_chunks: std::collections::HashMap::new(),
-            keyword_ids: std::collections::HashSet::new(),
-        };
 
-        let shaped = shape_page(
+        let (shaped, total) = shape_and_page(
             &conn,
-            &page,
-            &ranking,
+            ranked_docs(&conn),
+            plain_facts,
             &crate::query::fts::parse_query("alpha"),
-            &crate::query::evidence::EvidenceLimits::default(),
+            &crate::query::evidence::EvidenceOptions::default(),
+            0,
         )
         .unwrap();
 
+        assert_eq!(total, 3);
         let ids: Vec<&str> = shaped.iter().map(|m| m.document_id.as_str()).collect();
         assert_eq!(ids, vec!["doc-c", "doc-a", "doc-b"]);
         assert_eq!(shaped[0].score, Some(0.5));
         assert_eq!(shaped[1].score, Some(0.9));
         assert_eq!(shaped[2].score, None);
+    }
+
+    #[test]
+    fn shape_and_page_speaker_filter_drops_meetings_and_recounts() {
+        // With a speaker filter, meetings without a matching utterance by
+        // that speaker vanish from both the page and the total, in order.
+        use crate::db::test_fixtures::build_test_db;
+        use serde_json::json;
+
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-a": {"id": "doc-a", "title": "Alpha", "created_at": "2026-01-01T10:00:00Z",
+                          "notes_plain": "kumquat in notes only"},
+                "doc-b": {"id": "doc-b", "title": "Beta", "created_at": "2026-01-02T10:00:00Z"},
+                "doc-c": {"id": "doc-c", "title": "Gamma", "created_at": "2026-01-03T10:00:00Z"}
+            },
+            "transcripts": {
+                "doc-b": [
+                    {"id": "u1", "document_id": "doc-b", "text": "the kumquat by me",
+                     "start_timestamp": "2026-01-02T10:01:00Z", "end_timestamp": "2026-01-02T10:01:05Z",
+                     "source": "microphone", "is_final": true}
+                ],
+                "doc-c": [
+                    {"id": "u2", "document_id": "doc-c", "text": "the kumquat by them",
+                     "start_timestamp": "2026-01-03T10:01:00Z", "end_timestamp": "2026-01-03T10:01:05Z",
+                     "source": "system", "is_final": true}
+                ]
+            }
+        }));
+        let opts = crate::query::evidence::EvidenceOptions {
+            speaker: Some(SpeakerFilter::Me),
+            ..Default::default()
+        };
+
+        let (shaped, total) = shape_and_page(
+            &conn,
+            ranked_docs(&conn),
+            plain_facts,
+            &crate::query::fts::parse_query("kumquat"),
+            &opts,
+            0,
+        )
+        .unwrap();
+
+        // doc-c's match is by the other speaker; doc-a's is unattributable
+        // notes evidence. Only doc-b survives.
+        assert_eq!(total, 1);
+        assert_eq!(shaped.len(), 1);
+        assert_eq!(shaped[0].document_id, "doc-b");
+        assert_eq!(shaped[0].score, None);
+        assert_eq!(shaped[0].matches[0].speaker.as_deref(), Some("microphone"));
     }
 
     #[test]
@@ -758,6 +857,7 @@ mod tests {
                 meeting_filter,
                 limit,
                 matches,
+                speaker,
             } => {
                 assert_eq!(targets.len(), 2);
                 assert!(targets.contains(&SearchTarget::Titles));
@@ -765,6 +865,7 @@ mod tests {
                 assert_eq!(meeting_filter.as_deref(), Some("standup"));
                 assert_eq!(limit, 10);
                 assert_eq!(matches, 1);
+                assert_eq!(speaker, None);
             }
             _ => panic!("Expected Keyword variant"),
         }
@@ -826,13 +927,29 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_args_speaker_routes_bare_search_to_keyword() {
+    fn from_cli_args_speaker_stays_on_the_hybrid_default() {
+        // #60: a bare --speaker used to silently route to the keyword path
+        // (which then dropped the filter); it now composes with hybrid.
         let speaker = SpeakerFilter::Me;
         let mode = SearchMode::from_cli_args(
             false, None, false, 0, "transcripts", None, Some(&speaker), false, 10, 1,
         );
         match mode {
-            SearchMode::Keyword { .. } => {}
+            SearchMode::Hybrid { speaker, .. } => assert_eq!(speaker, Some(SpeakerFilter::Me)),
+            _ => panic!("Expected Hybrid variant"),
+        }
+    }
+
+    #[test]
+    fn from_cli_args_speaker_threads_to_keyword() {
+        let speaker = SpeakerFilter::Other;
+        let mode = SearchMode::from_cli_args(
+            false, None, true, 0, "transcripts", None, Some(&speaker), false, 10, 1,
+        );
+        match mode {
+            SearchMode::Keyword { speaker, .. } => {
+                assert_eq!(speaker, Some(SpeakerFilter::Other));
+            }
             _ => panic!("Expected Keyword variant"),
         }
     }
