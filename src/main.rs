@@ -139,6 +139,37 @@ fn main() -> Result<()> {
             commands::search::search(&conn, query, mode, date_range, *include_deleted, &ctx)?;
         }
 
+        Commands::Grep {
+            query,
+            r#in,
+            matches,
+            context,
+            meeting,
+            from,
+            to,
+            date,
+            speaker,
+            limit,
+            include_deleted,
+        } => {
+            let opts = commands::grep::GrepOptions {
+                targets: query::filter::SearchTarget::parse_list(r#in),
+                meeting_filter: meeting.clone(),
+                limit: *limit,
+                matches: *matches,
+                speaker: speaker.clone(),
+                context: *context,
+            };
+            let date_range = query::dates::build_date_range(
+                from.as_deref(),
+                to.as_deref(),
+                date.as_deref(),
+                chrono::Utc::now(),
+                &ctx.tz,
+            );
+            commands::grep::grep(&conn, query, opts, date_range, *include_deleted, &ctx)?;
+        }
+
         Commands::List {
             person,
             from,

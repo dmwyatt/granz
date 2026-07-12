@@ -3,6 +3,7 @@ pub mod browse;
 pub mod calendars;
 pub mod db;
 pub mod embed;
+pub mod grep;
 pub mod info;
 pub mod meetings;
 pub mod people;

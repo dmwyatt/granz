@@ -117,6 +117,60 @@ pub enum Commands {
         include_deleted: bool,
     },
 
+    /// List every meeting containing the given words
+    ///
+    /// Complete lexical lookup over the local full-text index: the reported
+    /// count is a fact about your synced meetings, and --limit only trims
+    /// how many are shown. Words match in any order; "quoted phrases" must
+    /// match exactly. Never loads models and never prompts. Use
+    /// --speaker to require the match in a specific speaker's utterances.
+    /// For ranked discovery by meaning, use `grans search`.
+    #[command(visible_alias = "g")]
+    Grep {
+        /// Words to look up; words match in any order, "quoted phrases" must match exactly
+        query: String,
+
+        /// Search targets: titles, transcripts, notes, panels (comma-separated)
+        #[arg(long, rename_all = "lowercase", default_value = "titles,transcripts,notes,panels")]
+        r#in: String,
+
+        /// Maximum match snippets shown per meeting (0 = headers only)
+        #[arg(long, default_value = "1")]
+        matches: usize,
+
+        /// Context shown around each match snippet: utterances for transcripts, sections for AI notes, paragraphs for notes (0 = disabled)
+        #[arg(long, default_value = "0")]
+        context: usize,
+
+        /// Limit to a specific meeting (ID or title substring)
+        #[arg(long)]
+        meeting: Option<String>,
+
+        /// Filter from date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Filter to date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Relative date filter, overrides --from/--to [today, yesterday, this-week, last-week, this-month, last-month]
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Filter matches by speaker: "me" (your utterances) or "other" (others' utterances); only meetings where that speaker's utterances match survive. Requires transcripts in --in
+        #[arg(long, value_parser = parse_speaker_filter)]
+        speaker: Option<SpeakerFilter>,
+
+        /// Maximum number of meetings to show (0 = no limit)
+        #[arg(long, default_value = "10")]
+        limit: usize,
+
+        /// Include soft-deleted meetings in results
+        #[arg(long)]
+        include_deleted: bool,
+    },
+
     /// List meetings
     #[command(visible_alias = "ls")]
     List {
@@ -719,6 +773,62 @@ mod tests {
             argv.extend_from_slice(extra);
             let result = Cli::try_parse_from(argv);
             assert!(result.is_ok(), "--speaker {extra:?} should parse");
+        }
+    }
+
+    #[test]
+    fn grep_parses_with_lookup_flags() {
+        let cli = Cli::try_parse_from([
+            "grans", "grep", "kumquat", "--speaker", "me", "--in", "titles,transcripts",
+            "--meeting", "standup", "--context", "2", "--matches", "3", "--limit", "5",
+            "--from", "2026-01-01", "--to", "2026-02-01", "--include-deleted",
+        ])
+        .unwrap();
+        let Commands::Grep {
+            query,
+            speaker,
+            r#in,
+            meeting,
+            context,
+            matches,
+            limit,
+            include_deleted,
+            ..
+        } = &cli.command
+        else {
+            panic!("expected grep subcommand");
+        };
+        assert_eq!(query, "kumquat");
+        assert_eq!(*speaker, Some(SpeakerFilter::Me));
+        assert_eq!(r#in, "titles,transcripts");
+        assert_eq!(meeting.as_deref(), Some("standup"));
+        assert_eq!(*context, 2);
+        assert_eq!(*matches, 3);
+        assert_eq!(*limit, 5);
+        assert!(*include_deleted);
+    }
+
+    #[test]
+    fn grep_visible_alias_g_parses() {
+        let cli = Cli::try_parse_from(["grans", "g", "kumquat"]).unwrap();
+        assert!(matches!(cli.command, Commands::Grep { .. }));
+    }
+
+    #[test]
+    fn grep_rejects_ranked_search_flags() {
+        // Ranked-pipeline flags belong to search; grep never runs models,
+        // so none of them parse here.
+        for extra in [
+            &["--fast"][..],
+            &["--min-score", "0.4"][..],
+            &["--yes"][..],
+            &["--keyword"][..],
+            &["--hybrid"][..],
+        ] {
+            let mut argv = vec!["grans", "grep", "q"];
+            argv.extend_from_slice(extra);
+            let result = Cli::try_parse_from(argv);
+            assert!(result.is_err(), "grep {extra:?} should be rejected");
         }
     }
 

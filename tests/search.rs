@@ -3,14 +3,14 @@ mod common;
 use common::TestEnv;
 use predicates::prelude::*;
 
-// --- --context: card expansion on the keyword path ---
+// --- --context: card expansion on grep cards ---
 
 #[test]
 fn context_search_single_word() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "kickoff", "--keyword", "--context", "2", "--in", "transcripts"])
+        .args(["grep", "kickoff", "--context", "2", "--in", "transcripts"])
         .output()
         .unwrap();
 
@@ -28,7 +28,7 @@ fn context_search_phrase() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "resource allocation", "--keyword", "--context", "2", "--in", "transcripts"])
+        .args(["grep", "resource allocation", "--context", "2", "--in", "transcripts"])
         .output()
         .unwrap();
 
@@ -46,7 +46,7 @@ fn context_search_no_match_returns_empty() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "xyzzyplughnotaword", "--keyword", "--context", "2"])
+        .args(["grep", "xyzzyplughnotaword", "--context", "2"])
         .output()
         .unwrap();
 
@@ -63,7 +63,7 @@ fn context_search_has_before_and_after_units() {
     // panel and notes sites first, so find the transcript match.
     let output = env
         .cmd_json()
-        .args(["search", "timeline", "--keyword", "--context", "2", "--matches", "5"])
+        .args(["grep", "timeline", "--context", "2", "--matches", "5"])
         .output()
         .unwrap();
 
@@ -88,7 +88,7 @@ fn context_search_within_specific_meeting() {
     // "latency" only appears in doc-beta transcript
     let output = env
         .cmd_json()
-        .args(["search", "latency", "--keyword", "--context", "2", "--meeting", "Beta"])
+        .args(["grep", "latency", "--context", "2", "--meeting", "Beta"])
         .output()
         .unwrap();
 
@@ -106,7 +106,7 @@ fn context_search_restricted_to_wrong_meeting_returns_empty() {
     // "latency" is only in doc-beta, so searching within "Alpha" should yield nothing
     let output = env
         .cmd_json()
-        .args(["search", "latency", "--keyword", "--context", "2", "--meeting", "Alpha"])
+        .args(["grep", "latency", "--context", "2", "--meeting", "Alpha"])
         .output()
         .unwrap();
 
@@ -122,7 +122,7 @@ fn meetings_search_notes_fts() {
     let env = TestEnv::with_fixture();
     // "milestones" appears in doc-alpha notes
     env.cmd()
-        .args(["search", "milestones", "--keyword", "--in", "notes"])
+        .args(["grep", "milestones", "--in", "notes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("doc-alpha").or(predicate::str::contains("Alpha")));
@@ -133,7 +133,7 @@ fn meetings_search_notes_no_match() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "xyzzynotaword", "--keyword", "--in", "notes"])
+        .args(["grep", "xyzzynotaword", "--in", "notes"])
         .output()
         .unwrap();
 
@@ -144,13 +144,13 @@ fn meetings_search_notes_no_match() {
 }
 
 #[test]
-fn keyword_search_json_is_shaped_with_evidence() {
+fn grep_json_is_shaped_with_evidence() {
     let env = TestEnv::with_fixture();
-    // "milestones" appears in doc-alpha notes; the keyword path renders the
-    // same shaped cards as the hybrid default.
+    // "milestones" appears in doc-alpha notes; grep renders the same shaped
+    // cards as search.
     let output = env
         .cmd_json()
-        .args(["search", "milestones", "--keyword", "--in", "notes"])
+        .args(["grep", "milestones", "--in", "notes"])
         .output()
         .unwrap();
 
@@ -161,7 +161,7 @@ fn keyword_search_json_is_shaped_with_evidence() {
 
     let m = &meetings[0];
     assert_eq!(m["id"], "doc-alpha");
-    assert!(m["score"].is_null(), "keyword results carry no rerank score");
+    assert!(m["score"].is_null(), "grep results carry no rerank score");
     let signals: Vec<&str> =
         m["signals"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
     assert!(signals.contains(&"keyword"));
@@ -174,13 +174,13 @@ fn keyword_search_json_is_shaped_with_evidence() {
 }
 
 #[test]
-fn keyword_search_matches_flag_shows_more_snippets() {
+fn grep_matches_flag_shows_more_snippets() {
     let env = TestEnv::with_fixture();
     // "timeline" has three match sites in doc-alpha: a panel section, a
     // notes paragraph, and a transcript utterance.
     let output = env
         .cmd_json()
-        .args(["search", "timeline", "--keyword", "--matches", "3"])
+        .args(["grep", "timeline", "--matches", "3"])
         .output()
         .unwrap();
 
@@ -195,10 +195,10 @@ fn keyword_search_matches_flag_shows_more_snippets() {
 }
 
 #[test]
-fn keyword_search_tty_shows_match_evidence() {
+fn grep_tty_shows_match_evidence() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "milestones", "--keyword", "--in", "notes"])
+        .args(["grep", "milestones", "--in", "notes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("your notes"))
@@ -213,7 +213,7 @@ fn meetings_search_multiple_targets() {
     // "prototype" appears in transcript of doc-alpha (utt-a3) and doc-beta (utt-b3)
     // Searching both titles and transcripts
     env.cmd()
-        .args(["search", "prototype", "--keyword", "--in", "titles,transcripts"])
+        .args(["grep", "prototype", "--in", "titles,transcripts"])
         .assert()
         .success();
 }
@@ -221,13 +221,13 @@ fn meetings_search_multiple_targets() {
 // --- Limit flag ---
 
 #[test]
-fn keyword_search_respects_limit() {
+fn grep_respects_limit() {
     let env = TestEnv::with_fixture();
     // "prototype" matches in both doc-alpha and doc-beta transcripts (2 meetings).
     // --limit 1 should return only 1 result.
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--keyword", "--in", "transcripts", "--limit", "1"])
+        .args(["grep", "prototype", "--in", "transcripts", "--limit", "1"])
         .output()
         .unwrap();
 
@@ -238,12 +238,12 @@ fn keyword_search_respects_limit() {
 }
 
 #[test]
-fn keyword_search_limit_zero_returns_all() {
+fn grep_limit_zero_returns_all() {
     let env = TestEnv::with_fixture();
     // --limit 0 means no limit, should return all matches
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--keyword", "--in", "transcripts", "--limit", "0"])
+        .args(["grep", "prototype", "--in", "transcripts", "--limit", "0"])
         .output()
         .unwrap();
 
@@ -252,7 +252,7 @@ fn keyword_search_limit_zero_returns_all() {
     assert!(result["meetings"].as_array().unwrap().len() >= 2);
 }
 
-// --- Speaker filter (#60: composes with retrieval instead of forcing keyword) ---
+// --- Speaker filter: restricts match evidence to a speaker's utterances ---
 
 #[test]
 fn speaker_filter_keeps_meetings_with_matching_utterances() {
@@ -261,7 +261,7 @@ fn speaker_filter_keeps_meetings_with_matching_utterances() {
     // doc-beta; both survive the filter and the evidence is the utterance.
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--keyword", "--speaker", "other"])
+        .args(["grep", "prototype", "--speaker", "other"])
         .output()
         .unwrap();
 
@@ -283,7 +283,7 @@ fn speaker_filter_drops_meetings_without_attributable_evidence() {
     // drops out entirely instead of showing unattributable matches.
     let output = env
         .cmd_json()
-        .args(["search", "milestones", "--keyword", "--speaker", "other"])
+        .args(["grep", "milestones", "--speaker", "other"])
         .output()
         .unwrap();
 
@@ -297,7 +297,7 @@ fn speaker_filter_me_matches_nothing_in_all_system_fixture() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--keyword", "--speaker", "me"])
+        .args(["grep", "prototype", "--speaker", "me"])
         .output()
         .unwrap();
 
@@ -307,12 +307,24 @@ fn speaker_filter_me_matches_nothing_in_all_system_fixture() {
 }
 
 #[test]
+fn grep_speaker_with_in_excluding_transcripts_errors() {
+    let env = TestEnv::with_fixture();
+    // --speaker matches transcript utterances; an --in list without
+    // transcripts leaves it nothing to match, so grep refuses to guess.
+    env.cmd()
+        .args(["grep", "milestones", "--speaker", "me", "--in", "notes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("transcripts"));
+}
+
+#[test]
 fn context_search_limit_counts_meetings() {
     let env = TestEnv::with_fixture();
     // "prototype" matches in both doc-alpha and doc-beta transcripts.
     let output = env
         .cmd_json()
-        .args(["search", "prototype", "--keyword", "--context", "1", "--limit", "1"])
+        .args(["grep", "prototype", "--context", "1", "--limit", "1"])
         .output()
         .unwrap();
 

@@ -4,11 +4,11 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::commands::search_common::{fts_meetings, render_shaped_meeting_list, shape_and_page};
+use crate::commands::search_common::{render_shaped_meeting_list, shape_and_page};
 use crate::models::{Document, SpeakerFilter};
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::{filter_by_meeting, matches_meeting_filter, SearchTarget};
+use crate::query::filter::{matches_meeting_filter, SearchTarget};
 
 /// Threshold for prompting before embedding during hybrid search.
 const EMBED_WARN_THRESHOLD: usize = 200;
@@ -99,6 +99,8 @@ pub fn search(
     ctx: &RunContext,
 ) -> Result<()> {
     match mode {
+        // The keyword path is the grep verb's lookup; --keyword remains as
+        // an alias for it until the search surface is slimmed.
         SearchMode::Keyword {
             targets,
             meeting_filter,
@@ -106,15 +108,17 @@ pub fn search(
             matches,
             speaker,
             context,
-        } => keyword_search(
+        } => crate::commands::grep::grep(
             conn,
             query,
-            &targets,
-            meeting_filter.as_deref(),
-            limit,
-            matches,
-            speaker,
-            context,
+            crate::commands::grep::GrepOptions {
+                targets,
+                meeting_filter,
+                limit,
+                matches,
+                speaker,
+                context,
+            },
             date_range,
             include_deleted,
             ctx,
@@ -146,54 +150,6 @@ pub fn search(
             ctx,
         ),
     }
-}
-
-/// Run plain FTS retrieval and display the resulting meetings as shaped
-/// cards. Keyword results carry no rerank score and no semantic chunk;
-/// content matches show lexical evidence and title-only matches show a
-/// bare title card.
-#[allow(clippy::too_many_arguments)]
-fn keyword_search(
-    conn: &Connection,
-    query: &str,
-    targets: &[SearchTarget],
-    meeting_filter: Option<&str>,
-    limit: usize,
-    matches: usize,
-    speaker: Option<SpeakerFilter>,
-    context: usize,
-    date_range: Option<DateRange>,
-    include_deleted: bool,
-    ctx: &RunContext,
-) -> Result<()> {
-    let results = fts_meetings(conn, query, targets, date_range.as_ref(), include_deleted)?;
-
-    let results = filter_by_meeting(results, meeting_filter);
-    let docs: Vec<(Document, Option<f32>)> =
-        results.into_iter().map(|doc| (doc, None)).collect();
-
-    let tokens = crate::query::fts::parse_query(query);
-    let opts = crate::query::evidence::EvidenceOptions {
-        max_matches: matches,
-        speaker,
-        context,
-        ..Default::default()
-    };
-    let (shaped, total) = shape_and_page(
-        conn,
-        docs,
-        |_, _| crate::query::evidence::RankingFacts {
-            keyword: true,
-            best_chunk: None,
-            score: None,
-        },
-        &tokens,
-        &opts,
-        limit,
-    )?;
-
-    render_shaped_meeting_list(&shaped, query, total, limit, ctx);
-    Ok(())
 }
 
 /// Run keyword and semantic retrieval, fuse the rankings, rerank the top
