@@ -5,7 +5,7 @@
 //! [`crate::query::fusion`]). Used by `grans search --hybrid` and the
 //! quality benchmark's hybrid mode.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -19,13 +19,26 @@ use crate::query::fusion::{reciprocal_rank_fusion, FusedDoc, RRF_K};
 /// How many top documents each retriever contributes to fusion.
 pub const CANDIDATE_POOL: usize = 100;
 
+/// A document's best-matching chunk from the semantic pass.
+#[derive(Debug, Clone)]
+pub struct BestChunk {
+    pub text: String,
+    /// Chunk source: `transcript_window`, `panel_section`, or `notes_paragraph`.
+    pub source_type: String,
+    /// Panel section heading for `panel_section` chunks.
+    pub section_heading: Option<String>,
+}
+
 /// Hybrid retrieval output: the fused ranking plus each document's
-/// best-matching chunk text from the semantic pass. The rerank stage uses
-/// the chunk texts as passages; documents without embedded content (e.g.
-/// title-only FTS matches) have no entry.
+/// best-matching chunk from the semantic pass. The rerank stage uses the
+/// chunk texts as passages and shaped output uses them as semantic-only
+/// evidence; documents without embedded content (e.g. title-only FTS
+/// matches) have no entry. `keyword_ids` records which documents the FTS
+/// retriever surfaced.
 pub struct HybridRanking {
     pub fused: Vec<FusedDoc>,
-    pub best_chunks: HashMap<String, String>,
+    pub best_chunks: HashMap<String, BestChunk>,
+    pub keyword_ids: HashSet<String>,
 }
 
 /// Run FTS and semantic retrieval for `query` and fuse the rankings.
@@ -70,12 +83,21 @@ pub fn hybrid_ranked(
     let mut best_chunks = HashMap::with_capacity(semantic_results.len());
     for r in semantic_results {
         semantic_ids.push(r.document_id.clone());
-        best_chunks.insert(r.document_id, r.matched_text);
+        best_chunks.insert(
+            r.document_id,
+            BestChunk {
+                text: r.matched_text,
+                source_type: r.source_type,
+                section_heading: r.section_heading,
+            },
+        );
     }
 
+    let keyword_ids: HashSet<String> = fts_ids.iter().cloned().collect();
     Ok(HybridRanking {
         fused: fuse_candidates(fts_ids, semantic_ids),
         best_chunks,
+        keyword_ids,
     })
 }
 
@@ -216,10 +238,36 @@ mod tests {
             hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
                 .unwrap();
 
-        assert_eq!(ranking.best_chunks.get("doc-both").map(String::as_str), Some("both chunk"));
-        assert_eq!(ranking.best_chunks.get("doc-sem").map(String::as_str), Some("strong chunk"));
+        assert_eq!(
+            ranking.best_chunks.get("doc-both").map(|c| c.text.as_str()),
+            Some("both chunk")
+        );
+        assert_eq!(
+            ranking.best_chunks.get("doc-sem").map(|c| c.text.as_str()),
+            Some("strong chunk")
+        );
+        assert_eq!(
+            ranking.best_chunks.get("doc-sem").map(|c| c.source_type.as_str()),
+            Some("transcript_window")
+        );
         // doc-fts has no chunks, so it has no passage entry.
         assert!(!ranking.best_chunks.contains_key("doc-fts"));
+    }
+
+    #[test]
+    fn ranking_records_which_documents_fts_surfaced() {
+        let conn = build_test_db(&hybrid_state());
+        let index = hybrid_index();
+
+        let ranking =
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
+                .unwrap();
+
+        // Both kumquat-titled docs come from FTS; the semantic-only doc
+        // does not.
+        assert!(ranking.keyword_ids.contains("doc-both"));
+        assert!(ranking.keyword_ids.contains("doc-fts"));
+        assert!(!ranking.keyword_ids.contains("doc-sem"));
     }
 
     #[test]

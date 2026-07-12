@@ -58,10 +58,13 @@ pub struct ShapedMeeting {
     /// Cross-encoder relevance when the rerank stage ran.
     pub score: Option<f32>,
     pub signals: Signals,
-    /// Total lexical match sites in the meeting's content, independent of
-    /// how many are shown.
+    /// Total match sites in the meeting's content, independent of how many
+    /// are shown.
     pub total_matches: usize,
     pub matches: Vec<MatchEvidence>,
+    /// Sources of the match sites beyond `matches`, deduped in display
+    /// order, for the "+N more matches in …" collapse line.
+    pub remaining_sources: Vec<EvidenceSource>,
 }
 
 /// Window `text` around the first query-token match.

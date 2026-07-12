@@ -13,7 +13,10 @@ use rusqlite::Connection;
 
 use crate::models::Document;
 use crate::query::fts::{matches_all_tokens, FtsToken};
-use crate::query::shape::{excerpt_around_match, EvidenceSource, MatchEvidence};
+use crate::query::hybrid::BestChunk;
+use crate::query::shape::{
+    excerpt_around_match, title_matches, EvidenceSource, MatchEvidence, ShapedMeeting, Signals,
+};
 use crate::query::text::{split_into_paragraphs, split_markdown_sections, strip_panel_footer};
 
 /// Caps on how much evidence is excerpted per document.
@@ -88,6 +91,77 @@ pub fn collect_document_evidence(
     }
 
     Ok(DocumentEvidence { matches, total, remaining_sources })
+}
+
+/// Ranking facts about one document from the hybrid pipeline.
+pub struct RankingFacts<'a> {
+    /// The FTS retriever surfaced this document.
+    pub keyword: bool,
+    /// The document's best semantic chunk, when one exists.
+    pub best_chunk: Option<&'a BestChunk>,
+    /// Cross-encoder relevance when the rerank stage ran.
+    pub score: Option<f32>,
+}
+
+/// Assemble the shaped card for one meeting.
+///
+/// Evidence degrades in tiers: lexical match sites first; when no query
+/// term appears literally in the content, the semantic best chunk stands in
+/// (no highlights); when there is no content evidence at all, the card is a
+/// bare title match.
+pub fn shape_meeting(
+    conn: &Connection,
+    doc: &Document,
+    tokens: &[FtsToken],
+    facts: &RankingFacts,
+    limits: &EvidenceLimits,
+) -> Result<ShapedMeeting> {
+    let evidence = collect_document_evidence(conn, doc, tokens, limits)?;
+    let signals = Signals {
+        keyword: facts.keyword,
+        semantic: facts.best_chunk.is_some(),
+        title: doc.title.as_deref().map(|t| title_matches(t, tokens)).unwrap_or(false),
+    };
+
+    let (matches, total, remaining_sources) = if !evidence.matches.is_empty() {
+        (evidence.matches, evidence.total, evidence.remaining_sources)
+    } else if let Some(m) = facts.best_chunk.and_then(|c| chunk_evidence(c, tokens, limits)) {
+        (vec![m], 1, Vec::new())
+    } else {
+        (Vec::new(), 0, Vec::new())
+    };
+
+    Ok(ShapedMeeting {
+        document_id: doc.id.clone().unwrap_or_default(),
+        title: doc.title.clone(),
+        created_at: doc.created_at.clone(),
+        score: facts.score,
+        signals,
+        total_matches: total,
+        matches,
+        remaining_sources,
+    })
+}
+
+/// Tier-2 evidence: the semantic best chunk, excerpted like any other site.
+fn chunk_evidence(
+    chunk: &BestChunk,
+    tokens: &[FtsToken],
+    limits: &EvidenceLimits,
+) -> Option<MatchEvidence> {
+    let source = match chunk.source_type.as_str() {
+        "transcript_window" => EvidenceSource::Transcript,
+        "panel_section" => EvidenceSource::Panel,
+        "notes_paragraph" => EvidenceSource::Notes,
+        _ => return None,
+    };
+    Some(MatchEvidence {
+        source,
+        excerpt: excerpt_around_match(&chunk.text, tokens, limits.max_chars),
+        speaker: None,
+        timestamp: None,
+        section: chunk.section_heading.clone(),
+    })
 }
 
 /// Panel sections whose body contains every token, in panel order.
@@ -313,5 +387,103 @@ mod tests {
         let doc = load_doc(&conn, "doc-2");
         let ev = collect(&conn, &doc, "kumquat", 3);
         assert_eq!(ev.total, 0);
+    }
+
+    // --- shape_meeting ---
+
+    fn best_chunk(text: &str, source_type: &str, section: Option<&str>) -> BestChunk {
+        BestChunk {
+            text: text.to_string(),
+            source_type: source_type.to_string(),
+            section_heading: section.map(String::from),
+        }
+    }
+
+    fn shape(
+        conn: &Connection,
+        doc: &Document,
+        query: &str,
+        facts: &RankingFacts,
+    ) -> ShapedMeeting {
+        shape_meeting(conn, doc, &parse_query(query), facts, &EvidenceLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn lexical_evidence_outranks_the_semantic_chunk() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let chunk = best_chunk("some semantic chunk", "transcript_window", None);
+        let facts =
+            RankingFacts { keyword: true, best_chunk: Some(&chunk), score: Some(0.9) };
+
+        let shaped = shape(&conn, &doc, "kumquat", &facts);
+
+        assert_eq!(shaped.matches.len(), 1);
+        assert_eq!(shaped.matches[0].source, EvidenceSource::Panel);
+        assert_eq!(shaped.total_matches, 5);
+        assert!(shaped.signals.keyword && shaped.signals.semantic);
+        assert!(!shaped.signals.title);
+        assert_eq!(shaped.score, Some(0.9));
+    }
+
+    #[test]
+    fn semantic_only_match_falls_back_to_the_best_chunk() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        // No content in doc-1 contains "zyzzyva"; the chunk stands in.
+        let chunk = best_chunk(
+            "discussion of adjacent topics",
+            "panel_section",
+            Some("Decisions"),
+        );
+        let facts = RankingFacts { keyword: false, best_chunk: Some(&chunk), score: Some(0.4) };
+
+        let shaped = shape(&conn, &doc, "zyzzyva", &facts);
+
+        assert_eq!(shaped.matches.len(), 1);
+        assert_eq!(shaped.matches[0].source, EvidenceSource::Panel);
+        assert_eq!(shaped.matches[0].section.as_deref(), Some("Decisions"));
+        assert_eq!(shaped.matches[0].excerpt.text, "discussion of adjacent topics");
+        assert!(shaped.matches[0].excerpt.highlights.is_empty());
+        assert_eq!(shaped.total_matches, 1);
+        assert!(!shaped.signals.keyword);
+        assert!(shaped.signals.semantic);
+    }
+
+    #[test]
+    fn title_only_match_yields_a_bare_card() {
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-t": {"id": "doc-t", "title": "Kumquat Planning", "created_at": "2026-01-05T00:00:00Z"}
+            }
+        }));
+        let doc = load_doc(&conn, "doc-t");
+        let facts = RankingFacts { keyword: true, best_chunk: None, score: None };
+
+        let shaped = shape(&conn, &doc, "kumquat", &facts);
+
+        assert!(shaped.matches.is_empty());
+        assert_eq!(shaped.total_matches, 0);
+        assert!(shaped.signals.title);
+        assert!(shaped.signals.keyword);
+        assert!(!shaped.signals.semantic);
+        assert_eq!(shaped.score, None);
+    }
+
+    #[test]
+    fn shaped_meeting_carries_identity_fields() {
+        let conn = build_test_db(&evidence_state());
+        let doc = load_doc(&conn, "doc-1");
+        let facts = RankingFacts { keyword: true, best_chunk: None, score: Some(0.7) };
+
+        let shaped = shape(&conn, &doc, "kumquat", &facts);
+
+        assert_eq!(shaped.document_id, "doc-1");
+        assert_eq!(shaped.title.as_deref(), Some("Infra Sync"));
+        assert_eq!(shaped.created_at.as_deref(), Some("2026-01-20T10:00:00Z"));
+        assert_eq!(
+            shaped.remaining_sources,
+            vec![EvidenceSource::Notes, EvidenceSource::Transcript]
+        );
     }
 }
