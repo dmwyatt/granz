@@ -148,20 +148,20 @@ mod tests {
 
     #[test]
     fn speaker_with_targets_excluding_transcripts_is_an_error() {
-        let targets = SearchTarget::parse_list("titles,notes");
+        let targets = vec![SearchTarget::Titles, SearchTarget::Notes];
         let err = check_speaker_targets(true, &targets).unwrap_err();
         assert!(err.to_string().contains("transcripts"));
     }
 
     #[test]
     fn speaker_with_transcripts_included_is_accepted() {
-        let targets = SearchTarget::parse_list("notes,transcripts");
+        let targets = vec![SearchTarget::Notes, SearchTarget::Transcripts];
         assert!(check_speaker_targets(true, &targets).is_ok());
     }
 
     #[test]
     fn no_speaker_accepts_any_targets() {
-        let targets = SearchTarget::parse_list("notes");
+        let targets = vec![SearchTarget::Notes];
         assert!(check_speaker_targets(false, &targets).is_ok());
     }
 }

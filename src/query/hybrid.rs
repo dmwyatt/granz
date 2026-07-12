@@ -207,7 +207,7 @@ mod tests {
     }
 
     fn all_targets() -> Vec<SearchTarget> {
-        SearchTarget::parse_list("titles,transcripts,notes,panels")
+        SearchTarget::all()
     }
 
     #[test]
@@ -238,7 +238,7 @@ mod tests {
     fn titles_only_targets_exclude_semantic_results() {
         let conn = build_test_db(&hybrid_state());
         let index = hybrid_index();
-        let targets = SearchTarget::parse_list("titles");
+        let targets = vec![SearchTarget::Titles];
 
         let fused =
             hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &targets, None, None, false)

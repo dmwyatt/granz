@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::models::SpeakerFilter;
+use crate::query::filter::SearchTarget;
 
 fn parse_speaker_filter(s: &str) -> Result<SpeakerFilter, String> {
     SpeakerFilter::parse(s).ok_or_else(|| format!("invalid speaker filter '{}': expected 'me' or 'other'", s))
@@ -54,9 +55,9 @@ pub enum Commands {
         /// Search query; words match in any order, "quoted phrases" must match exactly
         query: String,
 
-        /// Search targets: titles, transcripts, notes, panels (comma-separated)
-        #[arg(long, rename_all = "lowercase", default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
-        r#in: String,
+        /// Where to search (comma-separated)
+        #[arg(long, value_delimiter = ',', default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
+        r#in: Vec<SearchTarget>,
 
         /// Skip the cross-encoder rerank stage
         /// (fusion order only; faster, but no relevance scores)
@@ -118,9 +119,9 @@ pub enum Commands {
         /// Words to look up; words match in any order, "quoted phrases" must match exactly
         query: String,
 
-        /// Search targets: titles, transcripts, notes, panels (comma-separated)
-        #[arg(long, rename_all = "lowercase", default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
-        r#in: String,
+        /// Where to search (comma-separated)
+        #[arg(long, value_delimiter = ',', default_value = crate::query::filter::DEFAULT_SEARCH_TARGETS)]
+        r#in: Vec<SearchTarget>,
 
         /// Maximum match snippets shown per meeting (0 = headers only)
         #[arg(long, default_value = "1")]

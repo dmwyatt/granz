@@ -142,7 +142,7 @@ fn retrieve_hybrid(
     index: &EmbeddingIndex,
     query: &str,
 ) -> Result<Vec<RankedDoc>> {
-    let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
+    let targets = SearchTarget::all();
     let fused =
         crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, None, false)?
             .fused;
@@ -167,7 +167,7 @@ fn retrieve_hybrid_rerank_detailed(
     ctx: &RankingContext,
     cfg: &RankingConfig,
 ) -> Result<Vec<RerankCandidate>> {
-    let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
+    let targets = SearchTarget::all();
     let ranking =
         crate::query::hybrid::hybrid_ranked(conn, embedder, index, query, &targets, None, None, false)?;
     crate::query::rerank::rerank_hybrid_detailed(conn, reranker, query, &ranking, ctx, cfg)
