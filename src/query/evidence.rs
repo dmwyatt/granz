@@ -1,12 +1,12 @@
 //! Lexical match evidence for one document: where in its panels, notes, and
 //! transcript the query terms actually occur.
 //!
-//! Match semantics mirror the `--context` path exactly: a site matches when
-//! it contains every query token (`matches_all_tokens`), panels split into
-//! sections on the most frequent heading level, notes split into paragraphs.
-//! Sites are collected in display priority order (AI-notes panels first as
-//! the most distilled source, then the user's notes, then the transcript)
-//! and only the first `max_matches` are excerpted.
+//! A site matches when it contains every query token (`matches_all_tokens`);
+//! panels split into sections on the most frequent heading level, notes
+//! split into paragraphs, transcripts into utterances. Sites are collected
+//! in display priority order (AI-notes panels first as the most distilled
+//! source, then the user's notes, then the transcript) and only the first
+//! `max_matches` are excerpted.
 
 use anyhow::Result;
 use rusqlite::Connection;

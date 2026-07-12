@@ -165,18 +165,17 @@ grans search "budget" --limit 0  # No limit
 # Show more match snippets per meeting (default 1)
 grans search "budget" --matches 3
 
-# Search with context (utterances for transcripts, sections for panels, paragraphs for notes)
-# --context implies keyword search (context-window mode), even from a bare search
+# Show context around each match (utterances for transcripts, sections for
+# AI notes, paragraphs for notes); works with any mode
 grans search "action items" --context 3
-grans search "action items" --context 2 --in panels
+grans search "action items" --keyword --context 2
 
 # Limit to a specific meeting
 grans search "budget" --meeting "Weekly Standup"
 
-# Filter transcript matches by speaker; implies keyword search unless combined
-# with --context (hybrid search doesn't use speaker data)
-grans search "action items" --speaker me      # only your matches
-grans search "deadline" --speaker other        # only others' matches
+# Keep only meetings where that speaker's utterances match; works with any mode
+grans search "action items" --speaker me      # things you said
+grans search "deadline" --speaker other        # things others said
 
 # Include soft-deleted meetings in search results
 grans search "budget" --include-deleted
@@ -184,15 +183,17 @@ grans search "budget" --include-deleted
 
 Hybrid search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either mode surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do).
 
-Each result is a card showing why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1). When a meeting matched semantically but contains none of the query's literal words, the card shows the best-matching passage without highlights; a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` still drops results below a relevance threshold; it conflicts with `--fast`, `--keyword`, `--context`, and `--speaker`, since only the rerank stage produces that score. Hybrid search supports `--in`, `--meeting`, date filters, and `--limit` (which counts meetings), and conflicts with `--context` and `--speaker`; `--hybrid` still works as an explicit (redundant) way to ask for it.
+Every search renders the same cards, whichever mode retrieved the results. Each card shows why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1). When a meeting matched semantically but contains none of the query's literal words, the card shows the best-matching passage without highlights; a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` still drops results below a relevance threshold; it conflicts with `--fast` and `--keyword`, since only the rerank stage produces that score. Both modes support `--in`, `--meeting`, date filters, and `--limit` (which counts meetings everywhere); `--hybrid` still works as an explicit (redundant) way to ask for the default.
 
-Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference. `--fast` skips the rerank stage and returns fusion-order results (no relevance scores) in about 75 milliseconds, and now works directly on a bare search instead of requiring `--hybrid`. It conflicts with `--keyword`, `--context`, and `--speaker`.
+Two options refine what a card shows. `--context N` renders N neighboring units around each shown match inside the card (the utterances around a transcript hit, the sections around an AI-notes hit, the paragraphs around a notes hit), with the matched unit shown whole. `--speaker me|other` keeps only meetings where that speaker's transcript utterances match the query, and the cards show exactly those utterances; matches in notes or AI notes have no speaker to attribute, so they don't count while the filter is on, and a meeting with nothing attributable drops out entirely. Both work with either retrieval mode and with each other.
 
-`--keyword` forces plain FTS5 search, the search behavior grans used before hybrid became the default: it matches every word in the query, in any order (`grans search "budget review" --keyword` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans search '"budget review"' --keyword`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. It conflicts with `--hybrid`. `--context` and `--speaker` also route a bare search onto this same keyword path (context-window search, and plain keyword search respectively), since hybrid doesn't support either.
+Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference. `--fast` skips the rerank stage and returns fusion-order results (no relevance scores) in about 75 milliseconds, and now works directly on a bare search instead of requiring `--hybrid`. It conflicts with `--keyword`.
+
+`--keyword` forces plain FTS5 search, the search behavior grans used before hybrid became the default: it matches every word in the query, in any order (`grans search "budget review" --keyword` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans search '"budget review"' --keyword`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. It conflicts with `--hybrid`.
 
 The semantic half of hybrid search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-Since hybrid is the default, a bare `grans search` touches local models and embeddings; only searches forced onto the keyword path (`--keyword`, `--context`, or `--speaker`) avoid them. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
+Since hybrid is the default, a bare `grans search` touches local models and embeddings; only `--keyword` searches avoid them. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
 
 ```bash
 grans search "deployment" --yes
