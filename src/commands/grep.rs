@@ -123,7 +123,7 @@ fn render_grep_meeting_list(
             }
             print_shaped_cards(shaped, ctx);
             if total > shaped.len() {
-                println!("Use --limit 0 to show all {} results.", total);
+                println!("Use --limit 0 to show all {} meetings.", total);
             }
         }
     }
