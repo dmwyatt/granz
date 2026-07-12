@@ -15,7 +15,8 @@ pub enum FtsToken {
 }
 
 impl FtsToken {
-    fn text(&self) -> &str {
+    /// The token's text, phrase or term alike.
+    pub fn text(&self) -> &str {
         match self {
             FtsToken::Term(s) | FtsToken::Phrase(s) => s,
         }

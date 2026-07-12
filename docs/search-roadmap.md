@@ -10,6 +10,7 @@ A staged plan to evolve `grans search` from two separate modes (FTS5 keyword, se
 - **Hybrid search** (Phase 2, #40, promoted to the bare `grans search` default via #52 on 2026-07-11): runs both retrievers, truncates each ranked list to a 100-document candidate pool, and fuses by reciprocal rank fusion (k=60) in `query/fusion.rs` + `query/hybrid.rs`. Output is the fused meeting list, reranked by default (see next bullet); `--keyword` and `--semantic` remain the forcing modes (escape hatches to a single retriever), and `--hybrid` is still accepted but redundant.
 - **Reranking** (Phase 3, #41 + follow-up, part of hybrid search by default): a cross-encoder (fastembed `TextRerank`, jina-reranker-v1-turbo-en) scores the top 50 fused candidates as title + best-chunk passages; the ordering formula lives in `query/adjust.rs` (see next bullet). The sigmoid relevance probability is the user-facing score; `--min-score` filters on it; `--fast` skips the stage for fusion-only ordering (~63 ms instead of ~2 s per query).
 - **Ordering adjustments** (Phase 5 part 1, #43): the rerank-stage ordering is `rerank_score + 30 × RRF score + 0.2 × title_signal` (`query/adjust.rs`), where `title_signal` is the fraction of query content tokens found in the meeting title, damped by `log2(1 + series size)` so recurring series sharing one title (the largest spans 123 meetings) don't drown the query. Adjustments are ordering-only: they reorder the fixed 50-candidate pool and never touch the user-facing score. Weights live in `RankingConfig` (defaults are the sweep winners); `benchmark quality` has a hidden `--title-boost-weight` override so one binary can record before/after runs, and non-default weights are appended to the ledger note. A recency prior was swept alongside and rejected (results below).
+- **Shaped output** (#57 part 1): hybrid results render as per-meeting cards with match evidence. Evidence degrades in tiers (`query/evidence.rs`): lexical match sites located with the same Rust-side matchers the `--context` path uses (FTS5 `snippet()`/`highlight()` were considered but the notes/panels FTS indexes are whole-blob, so they cannot yield section labels); the reranker's best chunk when no query term appears literally; a bare `title match` card otherwise. Shaping is presentation-only, runs on the displayed page (not the candidate pool), and never reorders (pinned by test). The numeric score left human output (the ordering blend made the score column non-monotonic, which read as broken); `--json` carries score, signals, and highlight offsets. Keyword/semantic/context modes still render their old flat output; unifying them onto cards is #57 part 2.
 - The modes are mutually exclusive; `commands/search.rs` dispatches on a `SearchMode` enum.
 - **Evaluation** (Phase 0, #38): `grans benchmark quality --file <golden-set.json> --mode fts|semantic` scores any retrieval mode; `--compare fts,semantic` runs several with a per-query rank-of-first-relevant table and win/loss/tie summary. Results match labels by document ID (`relevant_meeting_ids`), falling back to exact title for the v1 file. Reports hit-rate@k, recall@k, MRR@k, and per-mode latency, with per-stratum breakdowns. `--record` appends the run to the results ledger. For rerank modes, `--dump-candidates <path>` writes each query's candidates (fused rank, RRF score, passage, rerank score) as JSONL for offline ranking experiments; dumps carry meeting content and stay outside the repo. Implemented in `commands/benchmark/`.
 
@@ -24,7 +25,7 @@ query
         ↓
  cross-encoder reranker + weighted fusion prior     → top N
         ↓
- per-meeting grouping, recency tiebreak, snippets
+ per-meeting cards with match snippets
 ```
 
 ## How improvement is tracked
@@ -148,6 +149,7 @@ Implementation is tracked on GitHub: parent issue #37 with one sub-issue per pha
 - Phase 3 (#41): cross-encoder reranking
 - Phase 4 (#42): embedding-side experiments (contextual chunk headers, chunking variants)
 - Phase 5 (#43): ranking polish (recency tiebreak, title boost, per-meeting grouping)
+- Result shaping (#57): per-meeting cards with match evidence, spun out of Phase 5
 
 One experiment result worth keeping here because it contradicts the model card's guidance: nomic task prefixes (`search_query:`/`search_document:`) were tested 2026-07 on the current chunking and made no measurable difference. Re-test only if chunking changes materially; Phase 4 kept the chunking unchanged, so the result stands.
 

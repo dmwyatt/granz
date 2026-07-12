@@ -1,9 +1,11 @@
 pub mod adjust;
 pub mod dates;
+pub mod evidence;
 pub mod filter;
 pub mod fts;
 pub mod fusion;
 pub mod hybrid;
 pub mod rerank;
 pub mod search;
+pub mod shape;
 pub mod text;

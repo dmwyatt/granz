@@ -91,7 +91,7 @@ pub fn rerank_hybrid_detailed(
                 fused_score: fused.score,
                 passage: build_passage(
                     title.as_deref(),
-                    ranking.best_chunks.get(&fused.document_id).map(String::as_str),
+                    ranking.best_chunks.get(&fused.document_id).map(|c| c.text.as_str()),
                 ),
                 title: title.clone(),
                 created_at: created_at.clone(),
@@ -130,6 +130,7 @@ mod tests {
     use crate::db::test_fixtures::build_test_db;
     use crate::embed::rerank::MockReranker;
     use crate::query::fusion::FusedDoc;
+    use crate::query::hybrid::BestChunk;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -153,6 +154,18 @@ mod tests {
             .collect()
     }
 
+    fn chunk(text: &str) -> BestChunk {
+        BestChunk {
+            text: text.to_string(),
+            source_type: "transcript_window".to_string(),
+            section_heading: None,
+        }
+    }
+
+    fn make_ranking(fused: Vec<FusedDoc>, best_chunks: HashMap<String, BestChunk>) -> HybridRanking {
+        HybridRanking { fused, best_chunks, keyword_ids: std::collections::HashSet::new() }
+    }
+
     #[test]
     fn hybrid_rerank_scores_titles_and_chunks() {
         // doc-chunk matches the query twice via its chunk; doc-title once
@@ -165,13 +178,10 @@ mod tests {
                 "doc-chunk": {"id": "doc-chunk", "title": "Planning", "created_at": "2026-01-03T10:00:00Z"}
             }
         }));
-        let ranking = HybridRanking {
-            fused: fused(&["doc-none", "doc-title", "doc-chunk"]),
-            best_chunks: HashMap::from([(
-                "doc-chunk".to_string(),
-                "kumquat kumquat".to_string(),
-            )]),
-        };
+        let ranking = make_ranking(
+            fused(&["doc-none", "doc-title", "doc-chunk"]),
+            HashMap::from([("doc-chunk".to_string(), chunk("kumquat kumquat"))]),
+        );
 
         let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 
@@ -191,17 +201,14 @@ mod tests {
                 "doc-chunk": {"id": "doc-chunk", "title": "Planning", "created_at": "2026-01-03T10:00:00Z"}
             }
         }));
-        let ranking = HybridRanking {
-            fused: vec![
+        let ranking = make_ranking(
+            vec![
                 FusedDoc { document_id: "doc-none".to_string(), score: 0.03 },
                 FusedDoc { document_id: "doc-title".to_string(), score: 0.02 },
                 FusedDoc { document_id: "doc-chunk".to_string(), score: 0.01 },
             ],
-            best_chunks: HashMap::from([(
-                "doc-chunk".to_string(),
-                "kumquat kumquat".to_string(),
-            )]),
-        };
+            HashMap::from([("doc-chunk".to_string(), chunk("kumquat kumquat"))]),
+        );
 
         let detailed =
             rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
@@ -232,16 +239,13 @@ mod tests {
                 "doc-deep": {"id": "doc-deep", "title": "Planning", "created_at": "2026-01-02T10:00:00Z"}
             }
         }));
-        let ranking = HybridRanking {
-            fused: vec![
+        let ranking = make_ranking(
+            vec![
                 FusedDoc { document_id: "doc-fused".to_string(), score: 0.1 },
                 FusedDoc { document_id: "doc-deep".to_string(), score: 0.0 },
             ],
-            best_chunks: HashMap::from([(
-                "doc-deep".to_string(),
-                "kumquat kumquat".to_string(),
-            )]),
-        };
+            HashMap::from([("doc-deep".to_string(), chunk("kumquat kumquat"))]),
+        );
 
         let detailed =
             rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
@@ -262,7 +266,7 @@ mod tests {
                 "doc-1": {"id": "doc-1", "title": "Kumquat sync", "created_at": "2026-01-02T10:00:00Z"}
             }
         }));
-        let ranking = HybridRanking { fused: fused(&["doc-1"]), best_chunks: HashMap::new() };
+        let ranking = make_ranking(fused(&["doc-1"]), HashMap::new());
 
         let detailed =
             rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
@@ -285,16 +289,16 @@ mod tests {
                 "doc-titled": {"id": "doc-titled", "title": "Kumquat retro", "created_at": "2026-01-02T10:00:00Z"}
             }
         }));
-        let ranking = HybridRanking {
-            fused: vec![
+        let ranking = make_ranking(
+            vec![
                 FusedDoc { document_id: "doc-plain".to_string(), score: 0.05 },
                 FusedDoc { document_id: "doc-titled".to_string(), score: 0.01 },
             ],
-            best_chunks: HashMap::from([
-                ("doc-plain".to_string(), "kumquat".to_string()),
-                ("doc-titled".to_string(), "kumquat".to_string()),
+            HashMap::from([
+                ("doc-plain".to_string(), chunk("kumquat")),
+                ("doc-titled".to_string(), chunk("kumquat")),
             ]),
-        };
+        );
         let ctx = RankingContext::default();
 
         let without = rerank_hybrid_detailed(
@@ -323,10 +327,7 @@ mod tests {
                 "doc-first": {"id": "doc-first", "title": "Kumquat sync", "created_at": "2026-01-02T10:00:00Z"}
             }
         }));
-        let ranking = HybridRanking {
-            fused: fused(&["doc-first", "doc-second"]),
-            best_chunks: HashMap::new(),
-        };
+        let ranking = make_ranking(fused(&["doc-first", "doc-second"]), HashMap::new());
 
         let detailed =
             rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
@@ -340,7 +341,7 @@ mod tests {
     #[test]
     fn detailed_empty_ranking_reranks_to_empty() {
         let conn = build_test_db(&json!({ "documents": {} }));
-        let ranking = HybridRanking { fused: Vec::new(), best_chunks: HashMap::new() };
+        let ranking = make_ranking(Vec::new(), HashMap::new());
 
         let detailed =
             rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
@@ -364,10 +365,10 @@ mod tests {
 
         let ids: Vec<String> = (0..60).map(|i| format!("doc-{i:02}")).collect();
         let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let ranking = HybridRanking {
-            fused: fused(&id_refs),
-            best_chunks: HashMap::from([("doc-59".to_string(), "kumquat".to_string())]),
-        };
+        let ranking = make_ranking(
+            fused(&id_refs),
+            HashMap::from([("doc-59".to_string(), chunk("kumquat"))]),
+        );
 
         let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
 

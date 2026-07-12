@@ -48,12 +48,6 @@ fn colored_score(score: f32) -> String {
     }
 }
 
-/// Format a meeting row prefixed with its relevance score (reranked hybrid
-/// search results).
-pub fn format_scored_meeting_row(doc: &Document, score: f32, tz: &FixedOffset) -> String {
-    format!("{} {}", colored_score(score), format_meeting_row(doc, tz))
-}
-
 /// Format a meeting detail view for TTY.
 pub fn format_meeting_detail(doc: &Document, tz: &FixedOffset) -> String {
     let mut lines = Vec::new();
@@ -454,7 +448,7 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     }
 }
 
-fn format_date_short(s: &str, tz: &FixedOffset) -> String {
+pub(super) fn format_date_short(s: &str, tz: &FixedOffset) -> String {
     // Try to parse and format nicely, fallback to raw string
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         dt.with_timezone(tz).format("%Y-%m-%d %H:%M").to_string()
@@ -465,7 +459,7 @@ fn format_date_short(s: &str, tz: &FixedOffset) -> String {
     }
 }
 
-fn format_time_only(s: &str, tz: &FixedOffset) -> String {
+pub(super) fn format_time_only(s: &str, tz: &FixedOffset) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         dt.with_timezone(tz).format("%H:%M:%S").to_string()
     } else {
@@ -534,6 +528,7 @@ mod tests {
             window_start_idx: None,
             window_end_idx: None,
             match_context: None,
+            section_heading: None,
         };
 
         let output = format_semantic_result(&result, &conn, &utc());
@@ -558,6 +553,7 @@ mod tests {
             window_start_idx: None,
             window_end_idx: None,
             match_context: None,
+            section_heading: None,
         };
 
         let output = format_semantic_result(&result, &conn, &utc());

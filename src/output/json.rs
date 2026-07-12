@@ -22,23 +22,6 @@ pub fn format_meeting_detail(doc: &Document) -> String {
     to_json(doc)
 }
 
-/// A document with its reranker relevance score.
-#[derive(Debug, Serialize)]
-struct ScoredMeetingJson<'a> {
-    score: f32,
-    #[serde(flatten)]
-    document: &'a Document,
-}
-
-/// Format reranked hybrid results as JSON: each document plus its score.
-pub fn format_scored_meetings(results: &[(Document, f32)]) -> String {
-    let items: Vec<ScoredMeetingJson> = results
-        .iter()
-        .map(|(doc, score)| ScoredMeetingJson { score: *score, document: doc })
-        .collect();
-    to_json(&items)
-}
-
 /// JSON-serializable context window.
 #[derive(Debug, Serialize)]
 pub struct ContextWindowJson {
@@ -187,6 +170,114 @@ pub struct SemanticSearchResponse<T> {
     pub results: Vec<T>,
 }
 
+/// One match's evidence in shaped search JSON.
+#[derive(Debug, Serialize)]
+pub struct ShapedMatchJson {
+    /// `transcript`, `panel`, or `notes`.
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    pub snippet: String,
+    /// Char ranges `[start, end)` into `snippet` where query terms occur.
+    pub highlights: Vec<(usize, usize)>,
+}
+
+/// One meeting in shaped search JSON.
+#[derive(Debug, Serialize)]
+pub struct ShapedMeetingJson {
+    pub id: String,
+    pub title: Option<String>,
+    pub created_at: Option<String>,
+    /// Cross-encoder relevance; absent under `--fast`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    /// Which retrievers surfaced the meeting: `keyword`, `semantic`, `title`.
+    pub signals: Vec<&'static str>,
+    pub total_matches: usize,
+    pub matches: Vec<ShapedMatchJson>,
+}
+
+/// Response envelope for shaped search results.
+#[derive(Debug, Serialize)]
+pub struct ShapedSearchResponse {
+    pub query: String,
+    pub total_meetings: usize,
+    pub limit: usize,
+    pub returned: usize,
+    pub meetings: Vec<ShapedMeetingJson>,
+}
+
+fn shaped_source_label(source: crate::query::shape::EvidenceSource) -> &'static str {
+    use crate::query::shape::EvidenceSource;
+    match source {
+        EvidenceSource::Transcript => "transcript",
+        EvidenceSource::Panel => "panel",
+        EvidenceSource::Notes => "notes",
+    }
+}
+
+impl ShapedMeetingJson {
+    fn from_shaped(m: &crate::query::shape::ShapedMeeting) -> Self {
+        let mut signals = Vec::new();
+        if m.signals.keyword {
+            signals.push("keyword");
+        }
+        if m.signals.semantic {
+            signals.push("semantic");
+        }
+        if m.signals.title {
+            signals.push("title");
+        }
+        ShapedMeetingJson {
+            id: m.document_id.clone(),
+            title: m.title.clone(),
+            created_at: m.created_at.clone(),
+            score: m.score,
+            signals,
+            total_matches: m.total_matches,
+            matches: m
+                .matches
+                .iter()
+                .map(|ev| ShapedMatchJson {
+                    source: shaped_source_label(ev.source),
+                    speaker: ev.speaker.as_deref().map(|s| match s {
+                        "microphone" => "me".to_string(),
+                        "system" => "other".to_string(),
+                        other => other.to_string(),
+                    }),
+                    timestamp: ev.timestamp.clone(),
+                    section: ev.section.clone(),
+                    snippet: ev.excerpt.text.clone(),
+                    highlights: ev.excerpt.highlights.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Format shaped search results as JSON with metadata.
+pub fn format_shaped_meetings(
+    results: &[crate::query::shape::ShapedMeeting],
+    query: &str,
+    total_meetings: usize,
+    limit: usize,
+) -> String {
+    let meetings: Vec<ShapedMeetingJson> =
+        results.iter().map(ShapedMeetingJson::from_shaped).collect();
+    let response = ShapedSearchResponse {
+        query: query.to_string(),
+        total_meetings,
+        limit,
+        returned: meetings.len(),
+        meetings,
+    };
+    to_json(&response)
+}
+
 /// Format semantic search results as JSON with metadata.
 pub fn format_semantic_results(
     results: &[SemanticSearchResult],
@@ -297,4 +388,62 @@ pub fn format_templates(templates: &[&PanelTemplate]) -> String {
 /// Format a list of recipes as JSON.
 pub fn format_recipes(recipes: &[&Recipe]) -> String {
     to_json(&recipes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::shape::{
+        EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting, Signals,
+    };
+
+    fn shaped() -> ShapedMeeting {
+        ShapedMeeting {
+            document_id: "doc-1".to_string(),
+            title: Some("Infra Sync".to_string()),
+            created_at: Some("2026-05-12T14:30:00Z".to_string()),
+            score: Some(0.63),
+            signals: Signals { keyword: true, semantic: false, title: true },
+            total_matches: 3,
+            matches: vec![MatchEvidence {
+                source: EvidenceSource::Transcript,
+                excerpt: Excerpt {
+                    text: "run the migration tonight".to_string(),
+                    highlights: vec![(8, 17)],
+                },
+                speaker: Some("microphone".to_string()),
+                timestamp: Some("2026-05-12T14:31:07Z".to_string()),
+                section: None,
+            }],
+            remaining_sources: vec![EvidenceSource::Notes],
+        }
+    }
+
+    #[test]
+    fn shaped_json_shape_and_signals() {
+        let out = format_shaped_meetings(&[shaped()], "migration", 12, 10);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["query"], "migration");
+        assert_eq!(v["total_meetings"], 12);
+        assert_eq!(v["returned"], 1);
+        let m = &v["meetings"][0];
+        assert_eq!(m["id"], "doc-1");
+        assert_eq!(m["signals"], serde_json::json!(["keyword", "title"]));
+        assert_eq!(m["total_matches"], 3);
+        let mt = &m["matches"][0];
+        assert_eq!(mt["source"], "transcript");
+        assert_eq!(mt["speaker"], "me");
+        assert_eq!(mt["snippet"], "run the migration tonight");
+        assert_eq!(mt["highlights"], serde_json::json!([[8, 17]]));
+        assert!(mt.get("section").is_none());
+    }
+
+    #[test]
+    fn shaped_json_omits_score_when_rerank_skipped() {
+        let mut m = shaped();
+        m.score = None;
+        let out = format_shaped_meetings(&[m], "q", 1, 0);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["meetings"][0].get("score").is_none());
+    }
 }

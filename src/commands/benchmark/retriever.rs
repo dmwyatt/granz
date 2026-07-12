@@ -398,6 +398,7 @@ mod tests {
                 window_start_idx: None,
                 window_end_idx: None,
                 match_context: None,
+                section_heading: None,
             },
             SemanticSearchResult {
                 document_id: "d2".into(),
@@ -407,6 +408,7 @@ mod tests {
                 window_start_idx: None,
                 window_end_idx: None,
                 match_context: None,
+                section_heading: None,
             },
         ];
 

@@ -172,6 +172,9 @@ grans search "budget" --context 2 --limit 3
 grans search "budget" --semantic --limit 5
 grans search "budget" --limit 0  # No limit
 
+# Show more match snippets per meeting (default 1)
+grans search "budget" --matches 3
+
 # Search with context (utterances for transcripts, sections for panels, paragraphs for notes)
 # --context implies keyword search (context-window mode), even from a bare search
 grans search "action items" --context 3
@@ -191,7 +194,9 @@ grans search "budget" --include-deleted
 grans search "old project" --semantic --include-deleted
 ```
 
-Hybrid search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either mode surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do). Results show the reranker's relevance score between 0 and 1, and `--min-score` drops results below a threshold; it conflicts with `--fast`, `--keyword`, `--semantic`, `--context`, and `--speaker`, since only the rerank stage produces that score. Hybrid search supports `--in`, `--meeting`, date filters, and `--limit`, and conflicts with `--semantic`, `--context`, and `--speaker`; `--hybrid` still works as an explicit (redundant) way to ask for it.
+Hybrid search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either mode surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do).
+
+Each result is a card showing why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1). When a meeting matched semantically but contains none of the query's literal words, the card shows the best-matching passage without highlights; a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` still drops results below a relevance threshold; it conflicts with `--fast`, `--keyword`, `--semantic`, `--context`, and `--speaker`, since only the rerank stage produces that score. Hybrid search supports `--in`, `--meeting`, date filters, and `--limit` (which counts meetings), and conflicts with `--semantic`, `--context`, and `--speaker`; `--hybrid` still works as an explicit (redundant) way to ask for it.
 
 Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference. `--fast` skips the rerank stage and returns fusion-order results (no relevance scores) in about 75 milliseconds, and now works directly on a bare search instead of requiring `--hybrid`. It conflicts with `--keyword`, `--semantic`, `--context`, and `--speaker`.
 

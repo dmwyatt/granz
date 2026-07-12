@@ -15,6 +15,8 @@ pub struct SemanticSearchResult {
     pub window_end_idx: Option<usize>,
     /// Human-readable context for where the match came from (e.g. "AI notes: Budget Review").
     pub match_context: Option<String>,
+    /// Raw panel section heading for `panel_section` chunks.
+    pub section_heading: Option<String>,
 }
 
 /// Compute cosine similarity between two vectors.
@@ -51,19 +53,24 @@ fn parse_window_indices(metadata_json: &Option<String>) -> (Option<usize>, Optio
     (None, None)
 }
 
-/// Extract human-readable context from a chunk's source type and metadata.
-fn extract_match_context(source_type: &str, metadata_json: &Option<String>) -> Option<String> {
+/// Extract the panel section heading from a chunk's metadata, when present.
+fn extract_section_heading(source_type: &str, metadata_json: &Option<String>) -> Option<String> {
+    if source_type != "panel_section" {
+        return None;
+    }
+    metadata_json
+        .as_ref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|meta| meta.get("section_heading")?.as_str().map(|s| s.to_string()))
+}
+
+/// Format human-readable context from a chunk's source type and section heading.
+fn extract_match_context(source_type: &str, section_heading: Option<&str>) -> Option<String> {
     match source_type {
-        "panel_section" => {
-            let heading = metadata_json
-                .as_ref()
-                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-                .and_then(|meta| meta.get("section_heading")?.as_str().map(|s| s.to_string()));
-            Some(match heading {
-                Some(h) => format!("AI notes: {}", h),
-                None => "AI notes".to_string(),
-            })
-        }
+        "panel_section" => Some(match section_heading {
+            Some(h) => format!("AI notes: {}", h),
+            None => "AI notes".to_string(),
+        }),
         "notes_paragraph" => Some("your notes".to_string()),
         _ => None,
     }
@@ -95,7 +102,8 @@ pub fn rank_results(
         }
 
         let (window_start_idx, window_end_idx) = parse_window_indices(&sv.metadata_json);
-        let match_context = extract_match_context(&sv.source_type, &sv.metadata_json);
+        let section_heading = extract_section_heading(&sv.source_type, &sv.metadata_json);
+        let match_context = extract_match_context(&sv.source_type, section_heading.as_deref());
 
         let entry = doc_best
             .entry(&sv.document_id)
@@ -107,6 +115,7 @@ pub fn rank_results(
                 window_start_idx,
                 window_end_idx,
                 match_context,
+                section_heading,
             });
 
         if score > entry.score {
@@ -115,7 +124,9 @@ pub fn rank_results(
             entry.matched_text = sv.text.clone();
             entry.window_start_idx = window_start_idx;
             entry.window_end_idx = window_end_idx;
-            entry.match_context = extract_match_context(&sv.source_type, &sv.metadata_json);
+            entry.section_heading = extract_section_heading(&sv.source_type, &sv.metadata_json);
+            entry.match_context =
+                extract_match_context(&sv.source_type, entry.section_heading.as_deref());
         }
     }
 
@@ -375,28 +386,41 @@ mod tests {
 
     #[test]
     fn test_match_context_panel_section() {
-        let ctx = extract_match_context(
-            "panel_section",
-            &Some(serde_json::json!({"section_heading": "Budget Review"}).to_string()),
-        );
+        let ctx = extract_match_context("panel_section", Some("Budget Review"));
         assert_eq!(ctx, Some("AI notes: Budget Review".to_string()));
     }
 
     #[test]
     fn test_match_context_panel_section_no_heading() {
-        let ctx = extract_match_context("panel_section", &None);
+        let ctx = extract_match_context("panel_section", None);
         assert_eq!(ctx, Some("AI notes".to_string()));
     }
 
     #[test]
     fn test_match_context_notes_paragraph() {
-        let ctx = extract_match_context("notes_paragraph", &None);
+        let ctx = extract_match_context("notes_paragraph", None);
         assert_eq!(ctx, Some("your notes".to_string()));
     }
 
     #[test]
     fn test_match_context_transcript_window() {
-        let ctx = extract_match_context("transcript_window", &None);
+        let ctx = extract_match_context("transcript_window", None);
         assert_eq!(ctx, None);
+    }
+
+    #[test]
+    fn test_section_heading_extraction() {
+        let heading = extract_section_heading(
+            "panel_section",
+            &Some(serde_json::json!({"section_heading": "Budget Review"}).to_string()),
+        );
+        assert_eq!(heading, Some("Budget Review".to_string()));
+        assert_eq!(extract_section_heading("panel_section", &None), None);
+        // Only panel sections carry headings, whatever the metadata says.
+        let heading = extract_section_heading(
+            "transcript_window",
+            &Some(serde_json::json!({"section_heading": "X"}).to_string()),
+        );
+        assert_eq!(heading, None);
     }
 }

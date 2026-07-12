@@ -79,6 +79,11 @@ pub enum Commands {
         #[arg(long, conflicts_with_all = ["fast", "keyword", "semantic", "context", "speaker"])]
         min_score: Option<f32>,
 
+        /// Maximum match snippets shown per meeting in hybrid results
+        /// (0 = headers only)
+        #[arg(long, default_value = "1", conflicts_with_all = ["keyword", "semantic", "context", "speaker"])]
+        matches: usize,
+
         /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled; implies keyword search)
         #[arg(long, default_value = "0")]
         context: usize,
