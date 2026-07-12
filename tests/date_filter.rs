@@ -105,9 +105,10 @@ fn meetings_search_with_date_filter() {
         .unwrap();
 
     assert!(output.status.success());
-    let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(docs.len(), 1);
-    assert_eq!(docs[0]["title"], "Gamma Sprint Planning");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let meetings = result["meetings"].as_array().unwrap();
+    assert_eq!(meetings.len(), 1);
+    assert_eq!(meetings[0]["title"], "Gamma Sprint Planning");
 }
 
 #[test]
@@ -119,23 +120,14 @@ fn transcripts_search_with_date_filter() {
     let output = env
         .cmd_json()
         .args([
-            "search", "kickoff", "--context", "2", "--from", "2025-07-01",
+            "search", "kickoff", "--keyword", "--context", "2", "--from", "2025-07-01",
         ])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    // With no matches, both result arrays should be absent or empty
-    let transcript_results = result.get("transcript_results")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    let text_results = result.get("text_results")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(transcript_results + text_results, 0);
+    assert_eq!(result["total_meetings"], 0);
 }
 
 #[test]

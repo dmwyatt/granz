@@ -8,10 +8,12 @@
 use chrono::FixedOffset;
 use colored::Colorize;
 
-use crate::query::shape::{EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting};
+use crate::query::shape::{ContextUnit, EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting};
 
 /// Card body indent, sized to clear the rank gutter.
 const INDENT: &str = "    ";
+/// Context-line indent, one step deeper than the snippet it surrounds.
+const CONTEXT_INDENT: &str = "      ";
 /// Snippet wrap width in characters, excluding the indent.
 const SNIPPET_WRAP: usize = 72;
 
@@ -31,7 +33,13 @@ pub fn format_shaped_meeting(m: &ShapedMeeting, rank: usize, tz: &FixedOffset) -
 
     for evidence in &m.matches {
         lines.push(format!("{INDENT}{}", source_line(evidence, tz)));
+        for unit in &evidence.context_before {
+            lines.push(context_block(unit, tz));
+        }
         lines.push(snippet_block(&evidence.excerpt));
+        for unit in &evidence.context_after {
+            lines.push(context_block(unit, tz));
+        }
     }
     if m.matches.is_empty() && m.signals.title {
         lines.push(format!("{INDENT}{}", "title match".dimmed().italic()));
@@ -98,6 +106,36 @@ fn snippet_block(excerpt: &Excerpt) -> String {
             let open = if i == 0 { "\"" } else { " " };
             let close = if i == last { "\"" } else { "" };
             format!("{INDENT}{open}{body}{close}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A dimmed neighboring unit around a match under --context: transcript
+/// neighbors carry their time and speaker, panel neighbors their section
+/// heading, wrapped like the snippet one indent step deeper.
+fn context_block(unit: &ContextUnit, tz: &FixedOffset) -> String {
+    let mut head = String::new();
+    if let Some(ts) = unit.timestamp.as_deref() {
+        head.push_str(&super::table::format_time_only(ts, tz));
+        head.push(' ');
+    }
+    match unit.speaker.as_deref() {
+        Some("microphone") => head.push_str("You  "),
+        Some("system") => head.push_str("Other  "),
+        _ => {}
+    }
+    if let Some(section) = unit.section.as_deref() {
+        head.push_str(section);
+        head.push_str(" › ");
+    }
+    let full = format!("{head}{}", unit.text);
+    let chars: Vec<char> = full.chars().collect();
+    wrap_ranges(&full, SNIPPET_WRAP)
+        .iter()
+        .map(|&(start, end)| {
+            let line: String = chars[start..end].iter().collect();
+            format!("{CONTEXT_INDENT}{}", line.dimmed())
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -201,6 +239,8 @@ mod tests {
                 speaker: None,
                 timestamp: None,
                 section: Some("Migration Plan".to_string()),
+                context_before: Vec::new(),
+                context_after: Vec::new(),
             }],
             remaining_sources: Vec::new(),
         }
@@ -254,6 +294,8 @@ mod tests {
             speaker: Some("microphone".to_string()),
             timestamp: Some("2026-05-12T14:31:07Z".to_string()),
             section: None,
+            context_before: Vec::new(),
+            context_after: Vec::new(),
         }];
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
         assert!(out.contains("    transcript › 14:31:07 You"), "got:\n{out}");
@@ -315,6 +357,55 @@ mod tests {
         m.remaining_sources = vec![EvidenceSource::Panel];
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
         assert!(out.contains("    +1 more match in AI notes"), "got:\n{out}");
+    }
+
+    #[test]
+    fn context_units_render_around_the_snippet() {
+        let mut m = base_meeting();
+        m.matches = vec![MatchEvidence {
+            source: EvidenceSource::Transcript,
+            excerpt: Excerpt {
+                text: "run the migration tonight".to_string(),
+                highlights: vec![(8, 17)],
+            },
+            speaker: Some("microphone".to_string()),
+            timestamp: Some("2026-05-12T14:31:07Z".to_string()),
+            section: None,
+            context_before: vec![ContextUnit {
+                text: "are we ready for it".to_string(),
+                speaker: Some("system".to_string()),
+                timestamp: Some("2026-05-12T14:30:50Z".to_string()),
+                section: None,
+            }],
+            context_after: vec![ContextUnit {
+                text: "ok, scheduling it now".to_string(),
+                speaker: Some("system".to_string()),
+                timestamp: Some("2026-05-12T14:31:20Z".to_string()),
+                section: None,
+            }],
+        }];
+        let out = strip(&format_shaped_meeting(&m, 1, &utc()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "    transcript › 14:31:07 You");
+        assert_eq!(lines[2], "      14:30:50 Other  are we ready for it");
+        assert_eq!(lines[3], "    \"run the migration tonight\"");
+        assert_eq!(lines[4], "      14:31:20 Other  ok, scheduling it now");
+    }
+
+    #[test]
+    fn panel_context_units_carry_their_section_heading() {
+        let mut m = base_meeting();
+        m.matches[0].context_after = vec![ContextUnit {
+            text: "follow up next week".to_string(),
+            speaker: None,
+            timestamp: None,
+            section: Some("Action Items".to_string()),
+        }];
+        let out = strip(&format_shaped_meeting(&m, 1, &utc()));
+        assert!(
+            out.contains("      Action Items › follow up next week"),
+            "got:\n{out}"
+        );
     }
 
     #[test]

@@ -4,8 +4,6 @@ use serde::Serialize;
 
 use crate::api::ApiPanel;
 use crate::models::Panel;
-use crate::query::dates::DateRange;
-use crate::query::fts::sanitize_fts_query;
 use crate::tiptap::{extract_chat_url, tiptap_to_markdown};
 
 // ============================================================================
@@ -157,115 +155,6 @@ pub fn load_panels(conn: &Connection, document_id: &str) -> Result<Vec<Panel>> {
 
     Ok(rows.filter_map(|r| r.ok()).map(row_to_panel).collect())
 }
-
-/// Search panels with context windows.
-///
-/// Returns `(document_id, document_title, context_windows)` for each matching document.
-/// Panels are split into sections (on the most frequent heading level) and context is
-/// shown as surrounding sections.
-pub fn search_panels_with_context(
-    conn: &Connection,
-    query: &str,
-    meeting_filter: Option<&str>,
-    context_size: usize,
-    date_range: Option<&DateRange>,
-    include_deleted: bool,
-) -> Result<Vec<(String, String, Vec<crate::query::search::TextContextWindow>)>> {
-    use crate::query::search::{build_text_context_windows, TextSegment};
-    use crate::query::text::{split_markdown_sections, strip_panel_footer};
-
-    let matching_docs = find_matching_panel_documents(conn, query, meeting_filter, date_range, include_deleted)?;
-
-    let mut results = Vec::new();
-    for (doc_id, doc_title) in &matching_docs {
-        let panels = load_panels(conn, doc_id)?;
-        for panel in &panels {
-            let markdown = match panel.content_markdown.as_deref() {
-                Some(md) if !md.is_empty() => md,
-                _ => continue,
-            };
-
-            let cleaned = strip_panel_footer(markdown);
-            let sections = split_markdown_sections(cleaned);
-            let segments: Vec<TextSegment> = sections
-                .into_iter()
-                .map(|(heading, body)| TextSegment {
-                    label: heading.map(String::from),
-                    text: body.to_string(),
-                })
-                .collect();
-
-            let windows = build_text_context_windows(&segments, query, context_size);
-            if !windows.is_empty() {
-                results.push((doc_id.clone(), doc_title.clone(), windows));
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-fn find_matching_panel_documents(
-    conn: &Connection,
-    query: &str,
-    meeting_filter: Option<&str>,
-    date_range: Option<&DateRange>,
-    include_deleted: bool,
-) -> Result<Vec<(String, String)>> {
-    let fts_query = sanitize_fts_query(query);
-    let d_deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
-
-    // MATERIALIZED stops the query flattener from pulling bm25() into the
-    // aggregate context, where FTS5 auxiliary functions cannot run.
-    let mut sql = format!(
-        "WITH hits AS MATERIALIZED (
-         SELECT p.document_id AS doc_id, COALESCE(d.title, '(untitled)') AS title,
-                d.created_at AS created_at, bm25(panels_fts) AS score
-         FROM panels_fts
-         JOIN panels p ON panels_fts.rowid = p.rowid
-         JOIN documents d ON p.document_id = d.id
-         WHERE p.deleted_at IS NULL{} AND panels_fts MATCH ?1",
-        d_deleted_filter
-    );
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query)];
-
-    if let Some(meeting_q) = meeting_filter {
-        sql.push_str(" AND (d.id = ?2 OR d.id LIKE ?3 OR d.title LIKE ?3 COLLATE NOCASE)");
-        let pattern = format!("%{}%", meeting_q);
-        params.push(Box::new(meeting_q.to_string()));
-        params.push(Box::new(pattern));
-    }
-
-    if let Some(range) = date_range {
-        if let Some(start) = &range.start {
-            sql.push_str(" AND d.created_at >= ?");
-            params.push(Box::new(start.to_rfc3339()));
-        }
-        if let Some(end) = &range.end {
-            sql.push_str(" AND d.created_at < ?");
-            params.push(Box::new(end.to_rfc3339()));
-        }
-    }
-
-    // A document's rank is its best-matching panel; bm25 is lower-is-better,
-    // recency breaks ties.
-    sql.push_str(
-        ") SELECT doc_id, title FROM hits GROUP BY doc_id ORDER BY MIN(score) ASC, created_at DESC",
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-// ============================================================================
-// Sync functions
-// ============================================================================
 
 /// Document info for panel sync
 #[derive(Debug, Clone, Serialize)]
@@ -494,21 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_matching_panel_documents() {
-        let conn = build_test_db(&panels_state());
-        let results = find_matching_panel_documents(&conn, "roadmap", None, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "doc-1");
-    }
-
-    #[test]
-    fn test_find_matching_panel_documents_no_match() {
-        let conn = build_test_db(&panels_state());
-        let results = find_matching_panel_documents(&conn, "quantum computing", None, None, false).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
     fn test_find_documents_without_panels() {
         let conn = build_test_db(&panels_state());
         // doc-1 has panels, doc-2 does not
@@ -614,9 +488,17 @@ mod tests {
     fn test_insert_panels_from_api_updates_fts() {
         let conn = build_test_db(&panels_state());
 
+        let fts_count = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM panels_fts WHERE panels_fts MATCH ?1",
+                [format!("\"{query}\"")],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
         // Verify existing panel content is searchable
-        let results = find_matching_panel_documents(&conn, "roadmap", None, None, false).unwrap();
-        assert_eq!(results.len(), 1);
+        assert_eq!(fts_count("roadmap"), 1);
 
         // Replace with different content
         let api_panels = vec![crate::api::ApiPanel {
@@ -637,12 +519,10 @@ mod tests {
         insert_panels_from_api(&conn, "doc-1", &api_panels).unwrap();
 
         // Old content should not be searchable
-        let results = find_matching_panel_documents(&conn, "roadmap", None, None, false).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(fts_count("roadmap"), 0);
 
         // New content should be searchable
-        let results = find_matching_panel_documents(&conn, "quantum mechanics", None, None, false).unwrap();
-        assert_eq!(results.len(), 1);
+        assert_eq!(fts_count("quantum mechanics"), 1);
     }
 
     #[test]
@@ -779,31 +659,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_matching_panel_documents_excludes_soft_deleted() {
-        let conn = build_test_db(&panels_state());
-
-        // Insert a soft-deleted panel with searchable content
-        conn.execute(
-            "INSERT INTO panels (id, document_id, title, content_markdown, deleted_at)
-             VALUES ('panel-deleted', 'doc-2', 'Deleted Panel', 'unique_deleted_content', '2026-01-22T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO panels_fts(panels_fts) VALUES('rebuild')",
-            [],
-        )
-        .unwrap();
-
-        // Searching for the deleted panel's content should return nothing
-        let results = find_matching_panel_documents(&conn, "unique_deleted_content", None, None, false).unwrap();
-        assert!(
-            results.is_empty(),
-            "Soft-deleted panels should not appear in search results"
-        );
-    }
-
-    #[test]
     fn test_insert_panels_extracts_chat_url() {
         let conn = build_test_db(&transcripts_state());
 
@@ -880,184 +735,8 @@ mod tests {
 
     // --- search_panels_with_context tests ---
 
-    #[test]
-    fn test_search_panels_with_context_basic() {
-        let conn = build_test_db(&panels_state());
-        let results =
-            search_panels_with_context(&conn, "roadmap", None, 1, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "doc-1"); // document_id
-        assert_eq!(results[0].2.len(), 1); // one match window
-
-        let window = &results[0].2[0];
-        assert!(window.matched.text.contains("roadmap"));
-        // "Key Decisions" section matched, with context_size=1 should have Action Items after
-        assert_eq!(window.after.len(), 1);
-    }
-
-    #[test]
-    fn test_search_panels_with_context_section_labels() {
-        let conn = build_test_db(&panels_state());
-        let results =
-            search_panels_with_context(&conn, "deployment", None, 1, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-
-        let window = &results[0].2[0];
-        // "deployment" is in "Action Items" section
-        assert_eq!(window.matched.label.as_deref(), Some("Action Items"));
-    }
-
-    #[test]
-    fn test_search_panels_orders_by_relevance_then_recency() {
-        // Regression: matches were ordered by created_at DESC, so a passing
-        // mention in a newer meeting outranked the meeting about the topic.
-        // Filler panels keep the term under half the corpus so BM25 IDF stays
-        // positive.
-        let conn = build_test_db(&serde_json::json!({
-            "documents": {
-                "doc-relevant": {"id": "doc-relevant", "title": "Relevant", "created_at": "2026-01-10T10:00:00Z"},
-                "doc-mention": {"id": "doc-mention", "title": "Mention", "created_at": "2026-01-20T10:00:00Z"},
-                "doc-f1": {"id": "doc-f1", "title": "Filler 1", "created_at": "2026-01-11T10:00:00Z"}
-            },
-            "panels": {
-                "doc-relevant": [
-                    {"id": "p-rel", "document_id": "doc-relevant",
-                     "content_markdown": "terraform modules terraform state management and terraform providers"}
-                ],
-                "doc-mention": [
-                    {"id": "p-men", "document_id": "doc-mention",
-                     "content_markdown": "brief mention of terraform in passing during the standup recap"}
-                ],
-                "doc-f1": [
-                    {"id": "p-f1", "document_id": "doc-f1", "content_markdown": "offsite agenda planning notes"},
-                    {"id": "p-f2", "document_id": "doc-f1", "content_markdown": "quarterly budget review discussion"},
-                    {"id": "p-f3", "document_id": "doc-f1", "content_markdown": "team retro action items"}
-                ]
-            }
-        }));
-        let results =
-            search_panels_with_context(&conn, "terraform", None, 0, None, false).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "doc-relevant");
-        assert_eq!(results[1].0, "doc-mention");
-    }
-
-    #[test]
-    fn test_search_panels_multi_word_matches_any_order() {
-        // Regression: phrase-quoting meant reversed word order never matched.
-        let conn = build_test_db(&panels_state());
-        let results =
-            search_panels_with_context(&conn, "priorities roadmap", None, 0, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "doc-1");
-        assert!(results[0].2[0].matched.text.contains("roadmap and priorities"));
-    }
-
-    #[test]
-    fn test_search_panels_with_context_no_match() {
-        let conn = build_test_db(&panels_state());
-        let results =
-            search_panels_with_context(&conn, "quantum computing", None, 1, None, false).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_search_panels_with_context_meeting_filter() {
-        let conn = build_test_db(&panels_state());
-        // doc-1 has panels, but filter to "Other Meeting" (doc-2) which has none
-        let results =
-            search_panels_with_context(&conn, "roadmap", Some("Other"), 1, None, false).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_search_panels_with_context_zero_context() {
-        let conn = build_test_db(&panels_state());
-        let results =
-            search_panels_with_context(&conn, "roadmap", None, 0, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        let window = &results[0].2[0];
-        assert!(window.before.is_empty());
-        assert!(window.after.is_empty());
-    }
-
     /// Regression test: --in panels --context should return panel content, not transcripts.
     /// This is the core bug from issue #197.
-    #[test]
-    fn test_search_panels_with_context_returns_panel_content_not_transcripts() {
-        // Build a DB with both transcripts and panels containing different content
-        let state = json!({
-            "documents": {
-                "doc-1": {
-                    "id": "doc-1",
-                    "title": "Test Meeting",
-                    "created_at": "2026-01-20T10:00:00Z"
-                }
-            },
-            "transcripts": {
-                "doc-1": [
-                    {"id": "u1", "document_id": "doc-1", "text": "This is transcript content only"}
-                ]
-            },
-            "panels": {
-                "doc-1": [
-                    {
-                        "id": "panel-1",
-                        "document_id": "doc-1",
-                        "title": "Summary",
-                        "content_markdown": "### Key Decisions\n\nThis is panel BKE content only."
-                    }
-                ]
-            }
-        });
-        let conn = build_test_db(&state);
-
-        // Search for "BKE" in panels - should find it in panel, not transcript
-        let results =
-            search_panels_with_context(&conn, "BKE", None, 1, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].2[0].matched.text.contains("BKE"));
-    }
-
-    #[test]
-    fn test_search_panels_with_context_h1_headers() {
-        let state = json!({
-            "documents": {
-                "doc-1": {
-                    "id": "doc-1",
-                    "title": "Team Standup",
-                    "created_at": "2026-01-20T10:00:00Z"
-                }
-            },
-            "panels": {
-                "doc-1": [
-                    {
-                        "id": "panel-h1",
-                        "document_id": "doc-1",
-                        "title": "Notes",
-                        "content_markdown": "# Announcements\n\nNew hire starting Monday.\n\n# Updates\n\nProject deployment is on track.\n\n# Action Items\n\n- Send welcome email"
-                    }
-                ]
-            }
-        });
-        let conn = build_test_db(&state);
-
-        // Search for "deployment" — should match "Updates" section
-        let results =
-            search_panels_with_context(&conn, "deployment", None, 1, None, false).unwrap();
-        assert_eq!(results.len(), 1);
-
-        let window = &results[0].2[0];
-        assert_eq!(window.matched.label.as_deref(), Some("Updates"));
-        assert!(window.matched.text.contains("deployment"));
-
-        // With context_size=1, should have Announcements before and Action Items after
-        assert_eq!(window.before.len(), 1);
-        assert_eq!(window.before[0].label.as_deref(), Some("Announcements"));
-        assert_eq!(window.after.len(), 1);
-        assert_eq!(window.after[0].label.as_deref(), Some("Action Items"));
-    }
-
     #[test]
     fn test_row_to_panel_all_fields() {
         let row = PanelRow {

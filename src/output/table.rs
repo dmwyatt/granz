@@ -4,7 +4,6 @@ use colored::Colorize;
 use crate::models::{
     Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe, TranscriptUtterance,
 };
-use crate::query::search::ContextWindow;
 
 /// Format a meeting list entry for TTY display.
 pub fn format_meeting_row(doc: &Document, tz: &FixedOffset) -> String {
@@ -80,25 +79,6 @@ pub fn format_meeting_detail(doc: &Document, tz: &FixedOffset) -> String {
                 lines.push(format!("  {}", line));
             }
         }
-    }
-
-    lines.join("\n")
-}
-
-/// Format a transcript context window for TTY.
-pub fn format_context_window(window: &ContextWindow, doc_title: Option<&str>, tz: &FixedOffset) -> String {
-    let mut lines = Vec::new();
-
-    if let Some(title) = doc_title {
-        lines.push(format!("{} {}", "Meeting:".dimmed(), title.bold()));
-    }
-
-    for utt in &window.before {
-        lines.push(format_utterance(utt, false, tz));
-    }
-    lines.push(format_utterance(&window.matched, true, tz));
-    for utt in &window.after {
-        lines.push(format_utterance(utt, false, tz));
     }
 
     lines.join("\n")
@@ -262,82 +242,6 @@ pub fn format_recipe_row(recipe: &Recipe) -> String {
     format!("{} {}{}", id, name, visibility)
 }
 
-/// Fixed content width for search separator dash-fill calculation.
-const SEPARATOR_WIDTH: usize = 60;
-
-/// Format a search result separator with index, total, and title.
-///
-/// Produces output like: `── [1/3] Team Standup ──────────────────────`
-pub fn format_search_separator(index: usize, total: usize, title: &str) -> String {
-    let counter = format!("[{}/{}]", index, total);
-
-    // "── " is 3 display columns (each ─ is 1 column), then counter, space, title, space
-    let prefix_cols = 3; // "── " = 2 dashes + 1 space
-    let content_cols = prefix_cols + counter.len() + 1 + title.len() + 1;
-    let trail_dashes = if content_cols < SEPARATOR_WIDTH {
-        SEPARATOR_WIDTH - content_cols
-    } else {
-        3
-    };
-
-    format!(
-        "{}{} {} {}",
-        "── ".cyan(),
-        counter.cyan().bold(),
-        title.bold(),
-        "─".repeat(trail_dashes).cyan()
-    )
-}
-
-/// Format a text-based context window (panels/notes) for TTY.
-pub fn format_text_context_window(
-    window: &crate::query::search::TextContextWindow,
-    doc_title: Option<&str>,
-) -> String {
-    let mut lines = Vec::new();
-
-    if let Some(title) = doc_title {
-        lines.push(format!("{} {}", "Meeting:".dimmed(), title.bold()));
-    }
-
-    for seg in &window.before {
-        lines.push(format_text_segment(seg, false));
-    }
-    lines.push(format_text_segment(&window.matched, true));
-    for seg in &window.after {
-        lines.push(format_text_segment(seg, false));
-    }
-
-    lines.join("\n")
-}
-
-fn format_text_segment(seg: &crate::query::search::TextSegment, highlight: bool) -> String {
-    let mut lines = Vec::new();
-
-    // Section title: ▶ goes here for highlighted segments
-    if let Some(label) = seg.label.as_deref() {
-        let bracket_label = format!("[{}]", label);
-        if highlight {
-            lines.push(format!("  {} {}", "▶".green(), bracket_label.bold()));
-        } else {
-            lines.push(format!("    {}", bracket_label.dimmed()));
-        }
-    }
-
-    // Content lines: uniform indent, ▶ on first line only when no label
-    let mut first = true;
-    for line in seg.text.lines() {
-        if first && highlight && seg.label.is_none() {
-            lines.push(format!("  {} {}", "▶".green(), line.bold()));
-        } else {
-            lines.push(format!("    {}", line));
-        }
-        first = false;
-    }
-
-    lines.join("\n")
-}
-
 pub(super) fn format_date_short(s: &str, tz: &FixedOffset) -> String {
     // Try to parse and format nicely, fallback to raw string
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
@@ -360,121 +264,13 @@ pub(super) fn format_time_only(s: &str, tz: &FixedOffset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_fixtures::{build_test_db, meetings_state};
-    use crate::query::search::TextSegment;
 
     fn utc() -> FixedOffset {
         FixedOffset::east_opt(0).unwrap()
     }
 
-    #[test]
-    fn format_search_separator_contains_counter_and_title() {
-        let output = format_search_separator(1, 3, "Team Standup");
-        let plain = strip_ansi_escapes::strip_str(&output);
-        assert!(plain.contains("[1/3]"), "Expected [1/3] counter, got: {}", plain);
-        assert!(plain.contains("Team Standup"), "Expected title, got: {}", plain);
-    }
-
-    #[test]
-    fn format_search_separator_pads_with_trailing_dashes() {
-        let output = format_search_separator(1, 1, "Short");
-        let plain = strip_ansi_escapes::strip_str(&output);
-        // Should have trailing ─ chars to fill to SEPARATOR_WIDTH
-        let dash_count = plain.chars().filter(|c| *c == '─').count();
-        assert!(dash_count > 5, "Expected trailing dashes, got {} dashes in: {}", dash_count, plain);
-    }
-
-    #[test]
-    fn format_search_separator_handles_long_title() {
-        let long_title = "A".repeat(100);
-        let output = format_search_separator(1, 1, &long_title);
-        let plain = strip_ansi_escapes::strip_str(&output);
-        // Should still have at least 3 trailing dashes
-        assert!(plain.contains(&long_title), "Expected long title, got: {}", plain);
-        // Count trailing dashes (not counting the leading ──)
-        let trailing = plain.rsplit("── ").next().unwrap_or("");
-        let trailing_dashes: String = trailing.chars().filter(|c| *c == '─').collect();
-        assert!(trailing_dashes.len() >= 3, "Expected at least 3 trailing dashes for long title");
-    }
-
     fn strip(s: &str) -> String {
         strip_ansi_escapes::strip_str(s)
-    }
-
-    #[test]
-    fn format_text_segment_highlighted_with_label_puts_marker_on_title() {
-        let seg = TextSegment {
-            label: Some("Sprint Updates".to_string()),
-            text: "- Todd: working on feature\n- Jane: fixing bug".to_string(),
-        };
-        let output = strip(&format_text_segment(&seg, true));
-        let lines: Vec<&str> = output.lines().collect();
-
-        assert_eq!(lines.len(), 3);
-        assert!(
-            lines[0].contains("▶") && lines[0].contains("[Sprint Updates]"),
-            "▶ should be on the section title line, got: {:?}",
-            lines[0]
-        );
-        assert!(
-            !lines[1].contains("▶"),
-            "Content lines should not have ▶, got: {:?}",
-            lines[1]
-        );
-    }
-
-    #[test]
-    fn format_text_segment_highlighted_without_label_puts_marker_on_first_content() {
-        let seg = TextSegment {
-            label: None,
-            text: "- Todd: working on feature\n- Jane: fixing bug".to_string(),
-        };
-        let output = strip(&format_text_segment(&seg, true));
-        let lines: Vec<&str> = output.lines().collect();
-
-        assert_eq!(lines.len(), 2);
-        assert!(
-            lines[0].contains("▶") && lines[0].contains("Todd"),
-            "▶ should be on first content line, got: {:?}",
-            lines[0]
-        );
-        assert!(
-            !lines[1].contains("▶"),
-            "Second line should not have ▶, got: {:?}",
-            lines[1]
-        );
-    }
-
-    #[test]
-    fn format_text_segment_non_highlighted_with_label_no_marker() {
-        let seg = TextSegment {
-            label: Some("Context Section".to_string()),
-            text: "- Some context content".to_string(),
-        };
-        let output = strip(&format_text_segment(&seg, false));
-
-        assert!(!output.contains("▶"), "Non-highlighted should not have ▶");
-        assert!(output.contains("[Context Section]"));
-    }
-
-    #[test]
-    fn format_text_segment_title_less_indented_than_content() {
-        let seg = TextSegment {
-            label: Some("Section Title".to_string()),
-            text: "- First line\n- Second line".to_string(),
-        };
-        let output = strip(&format_text_segment(&seg, false));
-        let lines: Vec<&str> = output.lines().collect();
-
-        let title_indent = lines[0].len() - lines[0].trim_start().len();
-        let content_indent = lines[1].len() - lines[1].trim_start().len();
-        assert!(
-            title_indent <= content_indent,
-            "Title indent ({}) should be <= content indent ({})\nOutput:\n{}",
-            title_indent,
-            content_indent,
-            output
-        );
     }
 
     #[test]
@@ -521,28 +317,6 @@ mod tests {
         let output = strip(&format_utterance(&utt, true, &utc()));
         assert!(output.contains("▶"), "Expected highlight marker");
         assert!(output.contains("You:"), "Expected 'You:' label in highlighted");
-    }
-
-    #[test]
-    fn format_text_segment_multiline_content_uniformly_indented() {
-        let seg = TextSegment {
-            label: Some("Section".to_string()),
-            text: "- Line one\n- Line two\n- Line three".to_string(),
-        };
-        let output = strip(&format_text_segment(&seg, true));
-        let lines: Vec<&str> = output.lines().collect();
-
-        // All content lines (skip title at index 0) should have same indent
-        let indents: Vec<usize> = lines[1..]
-            .iter()
-            .map(|l| l.len() - l.trim_start().len())
-            .collect();
-        assert!(
-            indents.windows(2).all(|w| w[0] == w[1]),
-            "Content lines should have uniform indent, got {:?}\nOutput:\n{}",
-            indents,
-            output
-        );
     }
 
     // === Timezone-aware display tests ===
