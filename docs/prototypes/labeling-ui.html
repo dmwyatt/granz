@@ -1,0 +1,897 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Interaction prototype for the speaker-labeling UI (issue #66).
+  Synthetic transcript only; no real meeting content belongs in this file.
+  The semantic JS here (sentences(), TICK, BRIDGE, timeline math) is the
+  reference implementation for the Rust derivation module (#68); once that
+  ships, grans label export (#70) embeds derived fields and this logic is
+  deleted from the template.
+-->
+<title>Speaker Labeling UI Prototypes</title>
+<style>
+  :root {
+    --bg: #f4f5f4;
+    --surface: #ffffff;
+    --ink: #22282e;
+    --muted: #6d7683;
+    --line: #dde1e4;
+    --accent: #2e6e64;
+    --accent-soft: #2e6e6422;
+    --flag: #b0731f;
+    --s1: #b07a1f;  /* Alice — amber */
+    --s2: #2f7d8c;  /* Bob — teal */
+    --s3: #7562b8;  /* Priya — violet */
+    --su: #8a8f96;  /* unknown */
+    --sm: #4a5560;  /* media */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15181b;
+      --surface: #1d2126;
+      --ink: #e5e8ea;
+      --muted: #97a0ab;
+      --line: #313841;
+      --accent: #56b3a5;
+      --accent-soft: #56b3a526;
+      --flag: #d9a04a;
+      --s1: #d3a44e;
+      --s2: #5eb0c0;
+      --s3: #a493e3;
+      --su: #7d838b;
+      --sm: #a3adb8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15181b; --surface: #1d2126; --ink: #e5e8ea; --muted: #97a0ab;
+    --line: #313841; --accent: #56b3a5; --accent-soft: #56b3a526; --flag: #d9a04a;
+    --s1: #d3a44e; --s2: #5eb0c0; --s3: #a493e3; --su: #7d838b; --sm: #a3adb8;
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f4; --surface: #ffffff; --ink: #22282e; --muted: #6d7683;
+    --line: #dde1e4; --accent: #2e6e64; --accent-soft: #2e6e6422; --flag: #b0731f;
+    --s1: #b07a1f; --s2: #2f7d8c; --s3: #7562b8; --su: #8a8f96; --sm: #4a5560;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    margin: 0;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+    padding: 10px 20px 0;
+  }
+  .masthead { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .masthead h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .masthead .sub { color: var(--muted); font-size: 12.5px; }
+  nav { display: flex; gap: 2px; margin-top: 8px; align-items: center; }
+  nav .navlabel {
+    font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); margin-right: 6px;
+  }
+  nav button {
+    appearance: none; border: none; background: none; color: var(--muted);
+    font: 600 13px/1 "Segoe UI", system-ui, sans-serif;
+    padding: 9px 14px; cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .statusline {
+    display: flex; align-items: center; gap: 12px;
+    padding: 7px 20px; border-bottom: 1px solid var(--line);
+    background: var(--surface); font-size: 12.5px; color: var(--muted);
+    position: sticky; top: 79px; z-index: 4; flex-wrap: wrap;
+  }
+  .bar { flex: 0 0 160px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0%; transition: width .15s; }
+  @media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+  .hint kbd {
+    font: 11px/1 ui-monospace, "Cascadia Code", Consolas, monospace;
+    background: var(--bg); border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 5px; margin: 0 1px;
+  }
+
+  main { display: flex; gap: 24px; max-width: 1080px; margin: 0 auto; padding: 18px 20px 80px; align-items: flex-start; }
+  #pane { flex: 1; min-width: 0; }
+  aside {
+    flex: 0 0 235px; position: sticky; top: 130px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  @media (max-width: 800px) { main { flex-direction: column-reverse; } aside { position: static; flex-basis: auto; width: 100%; } }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .panel h2 {
+    margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .spk {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 6px 8px; border-radius: 6px; border: 1px solid transparent;
+    background: none; color: var(--ink); cursor: pointer; text-align: left;
+    font: 13px/1.3 "Segoe UI", system-ui, sans-serif;
+  }
+  .spk:hover { background: var(--bg); }
+  .spk:focus-visible { outline: 2px solid var(--accent); }
+  .spk .dot { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .spk .who { flex: 1; min-width: 0; }
+  .spk .who small { display: block; color: var(--muted); font-size: 11px; }
+  .spk kbd, .count {
+    font: 11px/1 ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--muted);
+  }
+  .spk kbd { border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  /* Shift held → palette and hint show "add co-speaker" state */
+  body.shift .spk kbd { color: var(--accent); border-color: var(--accent); }
+  body.shift .spk kbd::before { content: '+'; }
+  body.shift #hint .co, body.shift #modenote kbd { color: var(--accent); border-color: var(--accent); }
+  #hint .co { border-radius: 4px; padding: 1px 2px; }
+  .export {
+    appearance: none; width: 100%; padding: 8px; border-radius: 6px;
+    border: 1px solid var(--accent); background: none; color: var(--accent);
+    font: 600 13px "Segoe UI", system-ui, sans-serif; cursor: pointer;
+  }
+  .export:hover { background: var(--accent-soft); }
+  .fineprint { font-size: 11.5px; color: var(--muted); }
+  .fineprint kbd {
+    font: 10px/1 ui-monospace, "Cascadia Code", Consolas, monospace;
+    border: 1px solid var(--line); border-radius: 3px; padding: 0 3px;
+  }
+
+  /* transcript rows */
+  #rows { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .row {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 5px 12px 5px 9px; border-left: 3px solid transparent;
+    font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  #rows.dragging { user-select: none; }
+  .row + .row { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
+  .row .t { color: var(--muted); font-size: 11px; flex: none; width: 38px; }
+  .row .txt { flex: 1; min-width: 0; overflow-wrap: break-word; }
+  .row .txt.clamp {
+    display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2; overflow: hidden;
+  }
+  .row .xp {
+    appearance: none; border: 1px solid var(--line); background: none; color: var(--muted);
+    border-radius: 4px; flex: none; cursor: pointer; align-self: center;
+    font: 10px/1 ui-monospace, monospace; padding: 2px 5px;
+  }
+  .row .xp:hover { color: var(--ink); border-color: var(--muted); }
+  .row.sys { cursor: pointer; }
+  .row.mic { color: var(--muted); }
+  .row.mic .chips { opacity: .65; }
+  .row.blockstart { border-top: 1px solid var(--line); }
+  .gaptick {
+    display: flex; align-items: center; gap: 8px;
+    padding: 2px 12px 2px 9px;
+    color: var(--muted);
+    font: 10px/1 ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  .gaptick::before { content: ''; width: 38px; border-top: 1px dashed color-mix(in srgb, var(--muted) 55%, transparent); }
+  .gaptick::after { content: ''; flex: 1; border-top: 1px dashed color-mix(in srgb, var(--muted) 55%, transparent); }
+  .row.bridge { border-left: 3px dotted color-mix(in srgb, var(--accent) 60%, transparent); }
+  .ov {
+    flex: none; align-self: center; font-size: 9px; color: var(--muted);
+    border: 1px dashed var(--line); border-radius: 8px; padding: 1px 5px;
+  }
+  .txt .ssep { color: var(--muted); opacity: .45; padding: 0 6px; }
+  .row.splitting { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+  .row.splitting .xp, .row.splitting > .chips { display: none; }
+  .sent { display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 6px; border-left: 2px solid transparent; cursor: pointer; }
+  .sent.cur { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .sent .si { color: var(--muted); font-size: 10px; width: 14px; flex: none; text-align: right; }
+  .sent .stx { flex: 1; min-width: 0; }
+  .chip.seg { min-width: auto; }
+  .chips { display: flex; gap: 4px; flex: none; align-self: center; }
+  .chip {
+    font-size: 11px; padding: 1px 8px; border-radius: 10px;
+    border: 1px solid var(--line); color: var(--muted); min-width: 40px; text-align: center;
+  }
+  .chip[data-c] { border-color: var(--c); color: var(--c); font-weight: 600; }
+  .row.labeled { border-left-color: var(--spk-c); background: color-mix(in srgb, var(--spk-c) 9%, transparent); }
+  .row.multi { border-left-width: 3px; border-left-style: double; }
+  .row.sel { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+  .row.flagged { box-shadow: inset 0 0 0 1px var(--flag); }
+  .row.sel.flagged { box-shadow: inset 0 0 0 1px var(--accent); }
+  .row .conf { flex: none; font-size: 10.5px; color: var(--flag); width: 34px; text-align: right; }
+  .row .conf.ok { color: var(--muted); }
+  .done {
+    margin: 10px 0 0; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+    background: var(--accent-soft); border: 1px solid var(--accent); color: var(--accent);
+    display: none;
+  }
+  .done.show { display: block; }
+</style>
+
+<header>
+  <div class="masthead">
+    <h1>Speaker labeling — unified interface</h1>
+    <span class="sub">synthetic transcript · 4 attendees · mic channel pre-labeled as You</span>
+  </div>
+  <nav id="scen">
+    <span class="navlabel">Data</span>
+    <button data-scen="blank" class="active">Fresh transcript</button>
+    <button data-scen="llm">After LLM pass</button>
+  </nav>
+</header>
+<div class="statusline">
+  <div class="bar"><i id="barfill"></i></div>
+  <span id="progress"></span>
+  <span class="hint" id="hint">
+    <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>U</kbd><kbd>M</kbd> label &amp; next ·
+    <span class="co">hold <kbd>⇧</kbd>: keys stack co-speakers, no jump</span> · <kbd>Enter</kbd>/<kbd>N</kbd> next ·
+    <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>⇧↑</kbd><kbd>⇧↓</kbd> extend ·
+    <kbd>S</kbd> split sentences · <kbd>Del</kbd> clear · <kbd>⌫</kbd> undo ·
+    <kbd>X</kbd> expand · <kbd>A</kbd> accept flags
+  </span>
+</div>
+
+<main>
+  <div id="pane">
+    <div id="rows"></div>
+    <p class="done" id="done">Nothing left in the queue. Export when ready.</p>
+  </div>
+  <aside>
+    <div class="panel">
+      <h2>Speakers</h2>
+      <div id="palette"></div>
+    </div>
+    <div class="panel">
+      <h2>Export</h2>
+      <button class="export" id="export">Download labels JSON</button>
+      <p class="fineprint">Same shape in both scenarios: utterance_id → speakers[] (one or more), with source (human/llm) and confidence. This is what the CLI would ingest.</p>
+    </div>
+    <div class="panel fineprint" id="modenote">
+      One interface, one queue. The queue holds whatever needs attention:
+      unlabeled runs on a fresh transcript, low-confidence flags after an LLM pass.
+      A plain key is the fast path: it labels and jumps to the next item.
+      For a mixed utterance, hold <kbd>⇧</kbd>: <kbd>⇧2</kbd> <kbd>⇧3</kbd> stack
+      speakers on the selection without jumping, then <kbd>Enter</kbd> moves on.
+      Already jumped? <kbd>⌫</kbd> brings you back.
+      Dashed dividers mark pauses over 2 s in the audio; the default selection
+      stops at them because pauses often mean the speaker changed. They're hints,
+      not truth: this transcript has pauses mid-speaker and speaker changes with
+      no pause. Short mic rows marked "overlap" are backchannels spoken over
+      ongoing speech; the selection flows across them instead of treating them
+      as turn boundaries. For a fused utterance (two speakers, no pause, like
+      the "—no, you go ahead" hand-off), select it and press <kbd>S</kbd> to
+      label sentence by sentence; utterance texts are always complete sentences,
+      so sentences are a free sub-unit. The LLM scenario still hides two wrong
+      high-confidence labels.
+    </div>
+  </aside>
+</main>
+
+<script>
+'use strict';
+
+/* ---------- synthetic data (no real meeting content) ---------- */
+const A = 'alice@fakeco.example', B = 'bob@fakeco.example', P = 'priya@fakeco.example';
+const SPEAKERS = [
+  { id: A, name: 'Alice Chen', role: 'PM',      cssVar: '--s1', key: '1' },
+  { id: B, name: 'Bob Marsh',  role: 'Backend', cssVar: '--s2', key: '2' },
+  { id: P, name: 'Priya Nair', role: 'Design',  cssVar: '--s3', key: '3' },
+];
+const SPECIALS = [
+  { id: 'unknown', name: 'Unknown',              role: 'can’t tell',        cssVar: '--su', key: 'u' },
+  { id: 'media',   name: 'Media / not a person', role: 'video, audio clip', cssVar: '--sm', key: 'm' },
+];
+const ALL_LABELS = [...SPEAKERS, ...SPECIALS];
+const byId = Object.fromEntries(ALL_LABELS.map(s => [s.id, s]));
+
+/* [pauseBefore(s), channel, text, llmPrelabel?, llmConfidence?]
+   Timestamps are computed from pauses + estimated speech duration, mirroring
+   how the real tool derives gaps from utterance start/end timestamps.
+   Prelabels seed the "After LLM pass" scenario; two are wrong at high
+   confidence (the launch-timeline worry mid-meeting is Alice, labeled Bob).
+   Pause design mixes honest cases: true turn boundaries with pauses (Bob→Priya
+   empty-state, Priya→Alice runbook, Alice→Bob dashboard), speaker changes with
+   NO pause (backchannels, the "—no, you go ahead" interruption), and pauses
+   with NO speaker change (Priya thinking, the video stalling). */
+const RAW = [
+  [0.0,'mic',"Alright, I think everyone's here. Let's get started."],
+  [0.5,'mic',"Alice, want to kick off with the launch checklist?"],
+  [1.2,'sys',"Sure, yeah.", A, .94],
+  [0.6,'sys',"So the headline is the search rollout on Thursday.", A, .96],
+  [0.5,'sys',"Marketing wants the blog post out the same morning, so we're locked on the date.", A, .93],
+  [1.0,'mic',"That works. The feature flag's already staged."],
+  [0.8,'sys',"Wait, which flag is this?", B, .88],
+  [0.6,'mic',"search-v2-default. It flips the new ranking model on."],
+  [1.0,'sys',"Okay, good. Because the old flag is still referenced in the mobile client.", B, .92],
+  [0.4,'sys',"I saw that yesterday when I was in there.", A, .58],
+  [-0.8,'mic',"Yeah."],
+  [0.5,'sys',"We should rip it out before Thursday or it'll confuse the on-call.", B, .86],
+  [0.3,'sys',"Mm-hm.", 'unknown', .55],
+  [0.8,'mic',"Can you own that, Bob?"],
+  [0.7,'sys',"Yep, I'll get a PR up today.", B, .95],
+  [2.6,'sys',"While we're on mobile, the empty-state screens still show the old copy.", P, .83],
+  [0.5,'sys',"I handed those off to content last week but I haven't heard back.", P, .87],
+  [0.9,'mic',"Priya, is that blocking the design QA pass?"],
+  [0.9,'sys',"Not blocking, but I'd rather not sign off twice.", P, .94],
+  [0.6,'sys',"If the copy lands Wednesday I can do one pass Wednesday afternoon.", P, .95],
+  [3.1,'sys',"I'll chase content after this call.", A, .71],
+  [0.4,'sys',"Thanks.", 'unknown', .52],
+  [1.1,'mic',"Okay. Next thing: the deploy that failed on Monday."],
+  [0.5,'mic',"I dug into it this morning. It's the migration lock again."],
+  [0.6,'sys',"Ugh.", A, .66],
+  [0.7,'sys',"Is that the same thing that bit us during the pricing launch?", A, .85],
+  [0.8,'mic',"Same table, different index this time."],
+  [0.9,'sys',"So the fix is what, batching the backfill?", B, .89],
+  [0.7,'mic',"Batching, plus we take the lock outside peak hours."],
+  [1.0,'sys',"That pushes the deploy window to Wednesday night though, right? Which is cutting it close to Thursday morning.", B, .84],
+  [0.5,'sys',"If anything goes sideways we're debugging during the launch.", B, .84],
+  [0.6,'sys',"And I want to be honest about the support side of this too, because the last time we shipped a ranking change the ticket volume doubled for a week, the query tricks people had memorized stopped working, and we didn't have a doc ready for the support team until day three. I'd like the support macro written before Thursday, and I'd like us to agree on who owns updating it when the model changes, because right now that's nobody.", A, .90],
+  [1.2,'mic',"Fair. Alternative is we ship the backfill tonight."],
+  [0.8,'sys',"I'd vote tonight.", B, .78],
+  [0.3,'sys',"Same.", B, .52],
+  [2.4,'sys',"Okay, tonight it is. I'll update the runbook.", A, .90],
+  [1.5,'mic',"One more thing on search: I want to show you a clip from a user session."],
+  [0.4,'mic',"Give me a second to share my screen."],
+  [4.0,'sys',"So I'm just going to type what I'm looking for...", 'media', .91],
+  [1.8,'sys',"...huh, that's weird, it says no results.", 'media', .93],
+  [2.2,'sys',"Oh wait, there it is. That took a while.", 'media', .90],
+  [1.0,'mic',"That pause is the reranker cold start."],
+  [0.9,'sys',"How often does that happen in prod?", A, .80],
+  [0.6,'mic',"First query after idle. Maybe two percent of sessions."],
+  [0.8,'sys',"Two percent of first impressions is a lot for launch day.", A, .86],
+  [0.2,'sys',"—no, you go ahead. I was just going to say we can pre-warm it. Right, so as I was saying, can we pre-warm it when the page loads like we do for embeddings?", B, .48],
+  [0.7,'sys',"So the way the pre-warm works for embeddings is we fire a dummy request when the page loads, which pulls the model into memory before the user actually types anything, and the reranker can do exactly the same thing. The only wrinkle is that the reranker container scales to zero on weekends, so the first hit on a Monday morning still eats the cold start no matter what we do, which is why I want the cold-start counter on the dashboard: if the Monday spike is big we might need to keep one replica warm all the time, and that's a cost conversation, not an engineering one.", B, .88],
+  [-1.4,'mic',"Mm-hm."],
+  [0.5,'sys',"It's like a fifty-line change.", B, .85],
+  [0.9,'mic',"Okay, let's do it. Bob, can it ride the same PR as the flag cleanup?"],
+  [0.7,'sys',"Separate PR, same day.", B, .94],
+  [0.4,'sys',"Cool.", A, .62],
+  [2.9,'sys',"On metrics, what are we watching Thursday?", A, .87],
+  [0.8,'mic',"Search CTR, zero-result rate, and p95 latency."],
+  [0.9,'sys',"Can we get those on one dashboard before launch?", A, .84],
+  [2.3,'sys',"I can throw one together tomorrow.", B, .82],
+  [0.4,'sys',"Add the reranker cold-start count to it too.", P, .69],
+  [0.3,'sys',"Good call.", A, .60],
+  [1.0,'mic',"Anything else before we wrap?"],
+  [0.9,'sys',"Nothing from me.", B, .75],
+  [1.1,'sys',"I'm good.", P, .72],
+  [0.6,'sys',"Ship it.", A, .57],
+  [0.7,'mic',"Alright. Thanks, everyone."],
+];
+let clock = 2;
+const U = RAW.map(([pre, ch, text, llm, conf], i) => {
+  /* negative pre = this utterance starts before the previous one ended
+     (mic backchannel overlapping ongoing system speech) */
+  const start = clock + pre;
+  const end = start + Math.max(0.8, text.length / 16);  /* ~16 chars/s speech */
+  clock = Math.max(clock, end);
+  const mm = String(Math.floor(start / 60)).padStart(2, '0');
+  const ss = String(Math.floor(start % 60)).padStart(2, '0');
+  return { id: 'u' + String(i + 1).padStart(2, '0'), t: `${mm}:${ss}`, ch, text, llm, conf, gap: pre, start, end };
+});
+
+const sysIds = U.filter(u => u.ch === 'sys').map(u => u.id);
+const idx = Object.fromEntries(U.map((u, i) => [u.id, i]));
+const LONG = 150;  /* clamp threshold, chars */
+const FLAG_BELOW = 0.75;
+/* Pauses over GAP_SPLIT inside a system run are likely turn boundaries
+   (~19% of intra-run junctions in the real db exceed 2s). They render as
+   tick dividers and bound the default queue selection. */
+const GAP_SPLIT = 2;
+const TICK = U.map((u, i) => i > 0 && u.ch === 'sys' && U[i - 1].ch === 'sys' && u.gap > GAP_SPLIT);
+/* A short mic utterance overlapping (or nearly abutting) surrounding system
+   speech is a backchannel, not a turn: it shouldn't end the default selection.
+   ~9% of real mic utterances overlap system speech. */
+const BRIDGE = U.map((u, i) => {
+  if (u.ch !== 'mic' || u.text.length > 30) return false;
+  const prev = U[i - 1], next = U[i + 1];
+  if (!prev || !next || prev.ch !== 'sys' || next.ch !== 'sys') return false;
+  return u.start < prev.end + 0.3;
+});
+
+/* Utterance texts are complete punctuated sentences (observed Granola
+   behavior), so sentences are a free sub-utterance unit. */
+function sentences(t) {
+  const m = t.match(/[^.?!…]+(?:[.?!…]+["']?|$)/g);
+  return m ? m.map(x => x.trim()).filter(Boolean) : [t];
+}
+
+/* ---------- state: two data scenarios, ONE interface ---------- */
+function blankState() {
+  /* sent[id]: per-sentence speaker arrays (null = unlabeled sentence),
+     present only when an utterance was labeled sentence-by-sentence */
+  return { labels: {}, source: {}, conf: {}, flags: new Set(), sent: {}, sel: null, undo: [] };
+}
+function llmState() {
+  const st = blankState();
+  for (const u of U) {
+    if (!u.llm) continue;
+    st.labels[u.id] = [u.llm];
+    st.source[u.id] = 'llm';
+    st.conf[u.id] = u.conf;
+    if (u.conf < FLAG_BELOW) st.flags.add(u.id);
+  }
+  return st;
+}
+const scenarios = { blank: blankState(), llm: llmState() };
+let scen = 'blank';
+const st = () => scenarios[scen];
+
+const expanded = new Set();
+const $ = s => document.querySelector(s);
+const rowsEl = $('#rows');
+
+/* ---------- the queue: whatever needs attention, in transcript order ----------
+   Unlabeled system utterances group into runs; flagged LLM labels are single rows. */
+function queueItems() {
+  const s = st(), items = [];
+  let i = 0;
+  while (i < U.length) {
+    const u = U[i];
+    if (u.ch === 'sys') {
+      if (!s.labels[u.id]?.length) {
+        let end = i;
+        while (true) {
+          const n = end + 1;
+          if (n < U.length && U[n].ch === 'sys' &&
+              !s.labels[U[n].id]?.length && !TICK[n]) { end = n; continue; }
+          /* flow across a backchannel if the silence around it stays small */
+          if (n + 1 < U.length && BRIDGE[n] && U[n + 1].ch === 'sys' &&
+              !s.labels[U[n + 1].id]?.length &&
+              U[n + 1].start - U[end].end <= GAP_SPLIT) { end = n + 1; continue; }
+          break;
+        }
+        items.push({ start: i, end });
+        i = end + 1;
+        continue;
+      }
+      if (s.flags.has(u.id)) items.push({ start: i, end: i });
+    }
+    i++;
+  }
+  return items;
+}
+
+function advance() {
+  const s = st(), q = queueItems();
+  if (!q.length) { s.sel = null; refresh(); return; }
+  const after = s.sel ? s.sel.start : -1;
+  s.sel = q.find(item => item.start > after) ?? q[0];
+  refresh();
+  rowEl[U[s.sel.start].id].scrollIntoView({ block: 'center', behavior: 'auto' });
+}
+
+/* ---------- mutations (all snapshot for undo) ---------- */
+function snapshot() {
+  const s = st();
+  if (!s.sel) return;
+  const rows = [];
+  for (let i = s.sel.start; i <= s.sel.end; i++) {
+    const id = U[i].id;
+    rows.push({ id, labels: s.labels[id], source: s.source[id], conf: s.conf[id],
+                flagged: s.flags.has(id), sent: s.sent[id] });
+  }
+  s.undo.push({ sel: { ...s.sel }, rows });
+}
+
+function markHuman(id) {
+  const s = st();
+  s.source[id] = 'human';
+  delete s.conf[id];
+  s.flags.delete(id);
+}
+
+function eachSelSys(fn) {
+  const s = st();
+  if (!s.sel) return false;
+  for (let i = s.sel.start; i <= s.sel.end; i++) if (U[i].ch === 'sys') fn(U[i].id);
+  return true;
+}
+
+function assign(labelId) {
+  const s = st();
+  snapshot();
+  if (!eachSelSys(id => { s.labels[id] = [labelId]; delete s.sent[id]; markHuman(id); })) return;
+  advance();
+}
+
+function toggleCoSpeaker(labelId) {
+  const s = st();
+  snapshot();
+  const ok = eachSelSys(id => {
+    const cur = s.labels[id] ?? [];
+    const next = cur.includes(labelId) ? cur.filter(x => x !== labelId) : [...cur, labelId];
+    delete s.sent[id];
+    if (next.length) { s.labels[id] = next; markHuman(id); }
+    else { delete s.labels[id]; delete s.source[id]; }
+  });
+  if (ok) refresh();
+}
+
+function accept() {
+  const s = st();
+  snapshot();
+  eachSelSys(id => { if (s.labels[id]?.length) markHuman(id); });
+  advance();
+}
+
+function clearSel() {
+  const s = st();
+  snapshot();
+  const ok = eachSelSys(id => {
+    delete s.labels[id]; delete s.source[id]; delete s.conf[id]; delete s.sent[id];
+    s.flags.delete(id);
+  });
+  if (ok) refresh();
+}
+
+function acceptAllFlags() {
+  const s = st();
+  const saved = s.sel;
+  s.sel = { start: 0, end: U.length - 1 };
+  snapshot();
+  s.undo[s.undo.length - 1].sel = saved ? { ...saved } : null;
+  for (const id of [...s.flags]) markHuman(id);
+  s.sel = saved;
+  advance();
+}
+
+function undo() {
+  const s = st();
+  const shot = s.undo.pop();
+  if (!shot) return;
+  for (const { id, labels, source, conf, flagged, sent } of shot.rows) {
+    if (labels === undefined) delete s.labels[id]; else s.labels[id] = labels;
+    if (source === undefined) delete s.source[id]; else s.source[id] = source;
+    if (conf === undefined) delete s.conf[id]; else s.conf[id] = conf;
+    if (sent === undefined) delete s.sent[id]; else s.sent[id] = sent;
+    flagged ? s.flags.add(id) : s.flags.delete(id);
+  }
+  s.sel = shot.sel;
+  refresh();
+  if (s.sel) rowEl[U[s.sel.start].id].scrollIntoView({ block: 'center', behavior: 'auto' });
+}
+
+/* ---------- selection by keyboard ---------- */
+function move(delta) {
+  const s = st();
+  let i = s.sel ? (delta > 0 ? s.sel.end : s.sel.start) + delta : 0;
+  while (i >= 0 && i < U.length && U[i].ch !== 'sys') i += delta;
+  if (i < 0 || i >= U.length) return;
+  s.sel = { start: i, end: i };
+  refresh();
+  rowEl[U[i].id].scrollIntoView({ block: 'nearest', behavior: 'auto' });
+}
+
+function extend(delta) {
+  const s = st();
+  if (!s.sel) return;
+  const cand = s.sel.end + delta;
+  if (cand < s.sel.start || cand >= U.length) return;
+  s.sel.end = cand;
+  refresh();
+  rowEl[U[cand].id].scrollIntoView({ block: 'nearest', behavior: 'auto' });
+}
+
+/* ---------- selection by mouse ---------- */
+let dragging = false, dragAnchor = null;
+rowsEl.addEventListener('pointerdown', e => {
+  if (e.target.closest('.xp')) return;
+  if (splitState) {
+    const sentEl = e.target.closest('.sent');
+    if (sentEl && e.target.closest('.row')?.dataset.id === splitState.id) {
+      splitState.senti = Number(sentEl.dataset.si);
+      refresh();
+      return;
+    }
+    commitSplit();
+  }
+  const row = e.target.closest('.row');
+  if (!row) return;
+  const i = idx[row.dataset.id];
+  dragging = true; dragAnchor = i;
+  st().sel = { start: i, end: i };
+  rowsEl.classList.add('dragging');
+  refresh();
+});
+rowsEl.addEventListener('pointerover', e => {
+  if (!dragging) return;
+  const row = e.target.closest('.row');
+  if (!row) return;
+  const i = idx[row.dataset.id];
+  st().sel = { start: Math.min(dragAnchor, i), end: Math.max(dragAnchor, i) };
+  refresh();
+});
+addEventListener('pointerup', () => { dragging = false; rowsEl.classList.remove('dragging'); });
+
+rowsEl.addEventListener('click', e => {
+  const xp = e.target.closest('.xp');
+  if (!xp) return;
+  const id = xp.closest('.row').dataset.id;
+  expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+  refresh();
+});
+
+/* ---------- rendering ---------- */
+let rowEl = {};  /* utterance id → row element (tick dividers break index math) */
+function buildRows() {
+  rowsEl.innerHTML = '';
+  rowEl = {};
+  let prevCh = null;
+  for (const u of U) {
+    if (TICK[idx[u.id]]) {
+      const g = document.createElement('div');
+      g.className = 'gaptick';
+      g.textContent = u.gap.toFixed(1) + ' s pause';
+      rowsEl.appendChild(g);
+    }
+    const div = document.createElement('div');
+    div.className = 'row ' + u.ch + (u.ch !== prevCh ? ' blockstart' : '');
+    if (BRIDGE[idx[u.id]]) div.classList.add('bridge');
+    div.dataset.id = u.id;
+    div.innerHTML =
+      `<span class="t">${u.t}</span>` +
+      (scen === 'llm' && u.ch === 'sys' ? `<span class="conf" data-conf></span>` : '') +
+      `<span class="txt"></span>` +
+      (u.text.length > LONG ? `<button class="xp" title="expand / collapse">⌄</button>` : '') +
+      (BRIDGE[idx[u.id]] ? `<span class="ov" title="overlaps surrounding speech">overlap</span>` : '') +
+      `<span class="chips"></span>`;
+    div.querySelector('.txt').textContent = u.text;
+    rowsEl.appendChild(div);
+    rowEl[u.id] = div;
+    prevCh = u.ch;
+  }
+  refresh();
+}
+
+function chipHtml(labelId) {
+  const sp = byId[labelId];
+  return `<span class="chip" data-c style="--c:var(${sp.cssVar})">${sp.name.split(' ')[0]}</span>`;
+}
+
+/* Text body: plain (clamped or short), sentence-separated (expanded long
+   rows; sentences are the future span unit), or split-mode sentence rows. */
+function renderTxt(txtEl, u, isSplit, clamped) {
+  if (isSplit) {
+    txtEl.innerHTML = '';
+    sentences(u.text).forEach((sen, si) => {
+      const d = document.createElement('div');
+      d.className = 'sent' + (si === splitState.senti ? ' cur' : '');
+      d.dataset.si = si;
+      const lab = splitState.labels[si];
+      d.innerHTML = `<span class="si">${si + 1}</span><span class="stx"></span><span class="chips">` +
+        (lab && lab.length ? lab.map(chipHtml).join('') : '<span class="chip">·</span>') + `</span>`;
+      d.querySelector('.stx').textContent = sen;
+      txtEl.appendChild(d);
+    });
+    return;
+  }
+  const sents = !clamped && u.text.length > LONG ? sentences(u.text) : null;
+  if (sents && sents.length > 1) {
+    txtEl.innerHTML = '';
+    sents.forEach((sen, si) => {
+      if (si) {
+        const sep = document.createElement('span');
+        sep.className = 'ssep';
+        sep.textContent = '|';
+        txtEl.appendChild(sep);
+      }
+      txtEl.appendChild(document.createTextNode(sen));
+    });
+    return;
+  }
+  if (txtEl.firstElementChild || txtEl.textContent !== u.text) txtEl.textContent = u.text;
+}
+
+function refresh() {
+  const s = st();
+  for (const el of rowsEl.children) {
+    if (!el.dataset.id) continue;  /* gap tick divider */
+    const id = el.dataset.id, u = U[idx[id]], i = idx[id];
+    const chips = el.querySelector('.chips');
+    el.classList.remove('sel', 'flagged', 'labeled', 'multi', 'splitting');
+
+    const inSel = s.sel && i >= s.sel.start && i <= s.sel.end;
+    if (inSel) el.classList.add('sel');
+
+    const txt = el.querySelector('.txt');
+    const isSplit = splitState && splitState.id === id;
+    if (isSplit) el.classList.add('splitting');
+    const clamped = u.text.length > LONG && !expanded.has(id) && !inSel && !isSplit;
+    txt.classList.toggle('clamp', clamped);
+    renderTxt(txt, u, isSplit, clamped);
+    const xp = el.querySelector('.xp');
+    if (xp) xp.textContent = clamped ? '⌄' : '⌃';
+
+    if (u.ch === 'mic') { chips.innerHTML = '<span class="chip">You</span>'; continue; }
+
+    const labs = s.labels[id];
+    if (labs && labs.length) {
+      el.classList.add('labeled');
+      if (labs.length > 1) el.classList.add('multi');
+      el.style.setProperty('--spk-c', `var(${byId[labs[0]].cssVar})`);
+      chips.innerHTML = (s.sent[id] ? '<span class="chip seg" title="labeled per sentence">§</span>' : '')
+        + labs.map(chipHtml).join('');
+    } else {
+      chips.innerHTML = '<span class="chip">·</span>';
+    }
+    if (s.flags.has(id)) el.classList.add('flagged');
+
+    const confEl = el.querySelector('[data-conf]');
+    if (confEl) {
+      if (s.source[id] === 'human') { confEl.textContent = 'you'; confEl.classList.add('ok'); }
+      else if (s.conf[id] !== undefined) {
+        confEl.textContent = Math.round(s.conf[id] * 100) + '%';
+        confEl.classList.toggle('ok', !s.flags.has(id));
+      } else { confEl.textContent = ''; }
+    }
+  }
+  refreshStatus();
+}
+
+function refreshStatus() {
+  const s = st();
+  const labeled = sysIds.filter(id => s.labels[id]?.length).length;
+  const flagged = s.flags.size;
+  const resolved = sysIds.filter(id => s.labels[id]?.length && !s.flags.has(id)).length;
+  $('#progress').textContent =
+    `${labeled} / ${sysIds.length} labeled` + (flagged ? ` · ${flagged} flagged` : '');
+  $('#barfill').style.width = Math.round(resolved / sysIds.length * 100) + '%';
+  $('#done').classList.toggle('show', queueItems().length === 0);
+
+  for (const btn of document.querySelectorAll('.spk[data-label]')) {
+    const lid = btn.dataset.label;
+    const n = sysIds.filter(id => s.labels[id]?.includes(lid)).length;
+    btn.querySelector('.count').textContent = n || '';
+  }
+}
+
+function buildPalette() {
+  const pal = $('#palette');
+  pal.innerHTML = '';
+  for (const sp of ALL_LABELS) {
+    const b = document.createElement('button');
+    b.className = 'spk';
+    b.dataset.label = sp.id;
+    b.innerHTML = `<span class="dot" style="background:var(${sp.cssVar})"></span>` +
+      `<span class="who">${sp.name}<small>${sp.role}</small></span>` +
+      `<span class="count"></span><kbd>${sp.key.toUpperCase()}</kbd>`;
+    b.addEventListener('click', e => e.shiftKey ? toggleCoSpeaker(sp.id) : assign(sp.id));
+    pal.appendChild(b);
+  }
+}
+
+/* ---------- sentence-split mode ----------
+   For fused utterances (two speakers, no pause), label each sentence.
+   Only reachable on a single selected system utterance with 2+ sentences. */
+let splitState = null;  /* { id, senti, labels: (speakers[]|null)[] } */
+
+function toggleSplit() {
+  if (splitState) { commitSplit(); return; }
+  const s = st();
+  if (!s.sel || s.sel.start !== s.sel.end) return;
+  const u = U[s.sel.start];
+  if (u.ch !== 'sys' || sentences(u.text).length < 2) return;
+  snapshot();  /* one undo unit for the whole split */
+  const prior = s.sent[u.id];
+  splitState = { id: u.id, senti: 0, labels: prior ? prior.map(x => x && [...x]) : sentences(u.text).map(() => null) };
+  refresh();
+}
+
+function commitSplit() {
+  if (!splitState) return;
+  const s = st(), sp = splitState;
+  const union = [...new Set(sp.labels.filter(Boolean).flat())];
+  if (union.length) { s.labels[sp.id] = union; s.sent[sp.id] = sp.labels; markHuman(sp.id); }
+  else { delete s.labels[sp.id]; delete s.sent[sp.id]; delete s.source[sp.id]; }
+  splitState = null;
+  advance();
+}
+
+function cancelSplit() {
+  if (!splitState) return;
+  splitState = null;
+  undo();  /* pops the snapshot taken on entry */
+}
+
+function splitKey(e, k, sp) {
+  const stt = splitState;
+  if (sp) {
+    const cur = stt.labels[stt.senti] ?? [];
+    if (e.shiftKey) {
+      stt.labels[stt.senti] = cur.includes(sp.id) ? cur.filter(x => x !== sp.id) : [...cur, sp.id];
+      if (!stt.labels[stt.senti].length) stt.labels[stt.senti] = null;
+      refresh();
+    } else {
+      stt.labels[stt.senti] = [sp.id];
+      if (stt.senti + 1 < stt.labels.length) { stt.senti++; refresh(); }
+      else commitSplit();
+    }
+    return;
+  }
+  if (k === 'arrowup')        { stt.senti = Math.max(0, stt.senti - 1); refresh(); }
+  else if (k === 'arrowdown') { stt.senti = Math.min(stt.labels.length - 1, stt.senti + 1); refresh(); }
+  else if (k === 'delete')    { stt.labels[stt.senti] = null; refresh(); }
+  else if (k === 'enter' || k === 's') commitSplit();
+  else if (k === 'escape' || k === 'backspace') cancelSplit();
+  /* swallow everything else while splitting */
+}
+
+/* ---------- keys ---------- */
+/* Match label keys by physical key (e.code): with Shift held, e.key for a
+   digit is the shifted symbol ('!', '@', …) and would never match. */
+const CODE_TO_LABEL = {};
+for (const sp of ALL_LABELS) {
+  if (/\d/.test(sp.key)) { CODE_TO_LABEL['Digit' + sp.key] = sp; CODE_TO_LABEL['Numpad' + sp.key] = sp; }
+  else CODE_TO_LABEL['Key' + sp.key.toUpperCase()] = sp;
+}
+addEventListener('keydown', e => {
+  if (e.key === 'Shift') document.body.classList.add('shift');
+  if (e.target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  const sp = CODE_TO_LABEL[e.code];
+  if (splitState) { splitKey(e, k, sp); e.preventDefault(); return; }
+  let handled = true;
+  if (sp) e.shiftKey ? toggleCoSpeaker(sp.id) : assign(sp.id);
+  else if (k === 's') toggleSplit();
+  else if (k === 'enter') accept();
+  else if (k === 'n' || k === 'tab') advance();
+  else if (k === 'arrowup') e.shiftKey ? extend(-1) : move(-1);
+  else if (k === 'arrowdown') e.shiftKey ? extend(1) : move(1);
+  else if (k === 'delete') clearSel();
+  else if (k === 'backspace') undo();
+  else if (k === 'x') {
+    const s = st();
+    if (s.sel) {
+      const id = U[s.sel.start].id;
+      expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+      refresh();
+    }
+  }
+  else if (k === 'a') acceptAllFlags();
+  else handled = false;
+  if (handled) e.preventDefault();
+});
+addEventListener('keyup', e => { if (e.key === 'Shift') document.body.classList.remove('shift'); });
+addEventListener('blur', () => document.body.classList.remove('shift'));
+
+/* ---------- scenario switch (data, not mode) ---------- */
+document.querySelectorAll('#scen button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    cancelSplit();
+    scen = btn.dataset.scen;
+    document.querySelectorAll('#scen button').forEach(b => b.classList.toggle('active', b === btn));
+    buildRows();
+    if (!st().sel) advance(); else refresh();
+  });
+});
+
+/* ---------- export ---------- */
+$('#export').addEventListener('click', () => {
+  const s = st();
+  const labels = sysIds.filter(id => s.labels[id]?.length).map(id => ({
+    utterance_id: id,
+    speakers: s.labels[id],
+    source: s.source[id] ?? 'human',
+    ...(s.source[id] === 'llm' ? { confidence: s.conf[id] } : {}),
+    ...(s.sent[id] ? { segments: s.sent[id]
+        .map((sp, si) => sp && sp.length ? { sentence: si, speakers: sp } : null)
+        .filter(Boolean) } : {}),
+  }));
+  const blob = new Blob(
+    [JSON.stringify({ document_id: 'proto-fake-standup', scenario: scen, labels }, null, 2)],
+    { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `labels-${scen}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+/* ---------- init ---------- */
+buildPalette();
+buildRows();
+advance();
+</script>
