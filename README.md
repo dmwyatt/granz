@@ -67,7 +67,8 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `sync` - Sync data from Granola API
 - `list` (`ls`) - List meetings
 - `show` - Show meeting details
-- `search` (`s`) - Search meetings, transcripts, notes, and panels
+- `search` (`s`) - Ranked search across meetings, transcripts, notes, and panels
+- `grep` (`g`) - List every meeting containing given words
 - `with` (`w`) - Show meetings with a person
 - `recent` - Show this week's meetings
 - `today` - Show today's meetings
@@ -132,68 +133,71 @@ grans admin token             # Print to stdout
 grans admin token --clipboard # Copy to clipboard without printing
 ```
 
-### Search
+### Search and Grep
 
-Search across meeting titles, transcripts, notes, and AI-generated panels. By default, `grans search` runs hybrid search: keyword (FTS5) and semantic rankings are fused with reciprocal rank fusion, then the top candidates are reranked by a cross-encoder. Use `--fast` for quicker fusion-only ordering, or `--keyword` for plain keyword search.
+Two verbs query meeting content, with two different promises:
+
+- `grans search` (alias `s`) is ranked discovery: the best few meetings for a query, matched by meaning as well as by words. Keyword (FTS5) and semantic rankings are fused with reciprocal rank fusion, then the top candidates are reranked by a cross-encoder. Results come from bounded candidate pools, so search shows a `Top N match(es)` list and never reports a corpus total.
+- `grans grep` (alias `g`) is complete lexical lookup: every meeting where the words literally appear. Its `Found N meeting(s)` count is a fact about your synced data, and `--limit` only trims how many are shown. Grep never loads models and never prompts.
+
+When search finds any meetings containing the query's literal words, it says so in a footer and points at grep, e.g. `312 meeting(s) contain these words; grans grep "budget" lists them all.`
+
+Migrating from the old flags: `search --keyword` is now `grep`, `search --speaker me` is now `grep --speaker me`, and `--hybrid` is gone because hybrid retrieval is simply what `search` does.
 
 ```bash
-# Hybrid search (the default): fuses keyword + semantic rankings, then reranks
+# Ranked discovery: fuses keyword + semantic rankings, then reranks
 grans search "standup"
 grans s "standup"    # short alias
 grans search "quarterly budget review" --min-score 0.5   # drop low-relevance results
 
-# --hybrid is accepted but redundant; it's already the default
-grans search "quarterly budget review" --hybrid
-
 # Skip the rerank stage for a faster fusion-only search (no relevance scores)
 grans search "quarterly budget review" --fast
 
-# Force plain keyword (FTS5) search, the pre-hybrid default behavior
-grans search "budget" --keyword
+# Complete lookup: every meeting containing these words
+grans grep "budget"
+grans g "budget"     # short alias
 
-# Search specific targets (works with any mode)
+# Complete and speaker-attributed: only that speaker's utterances count
+grans grep "action items" --speaker me      # things you said
+grans grep "deadline" --speaker other       # things others said
+
+# Search specific targets (both verbs)
 grans search "AI" --in titles
-grans search "budget" --in titles,notes
+grans grep "budget" --in titles,notes
 grans search "action items" --in panels
-grans search "demo" --in transcripts --date this-week
+grans grep "demo" --in transcripts --date this-week
 
 # Limit results (default 10, use 0 for no limit)
 grans search "budget" --limit 5
-grans search "budget" --context 2 --limit 3
-grans search "budget" --limit 0  # No limit
+grans grep "budget" --limit 0   # list every match
 
 # Show more match snippets per meeting (default 1)
 grans search "budget" --matches 3
 
 # Show context around each match (utterances for transcripts, sections for
-# AI notes, paragraphs for notes); works with any mode
+# AI notes, paragraphs for notes); both verbs
 grans search "action items" --context 3
-grans search "action items" --keyword --context 2
+grans grep "action items" --context 2
 
-# Limit to a specific meeting
+# Limit to a specific meeting (ID or title substring); both verbs
 grans search "budget" --meeting "Weekly Standup"
+grans grep "budget" --meeting "Weekly Standup"
 
-# Keep only meetings where that speaker's utterances match; works with any mode
-grans search "action items" --speaker me      # things you said
-grans search "deadline" --speaker other        # things others said
-
-# Include soft-deleted meetings in search results
+# Include soft-deleted meetings in results (both verbs)
 grans search "budget" --include-deleted
 ```
 
-Hybrid search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either mode surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do).
+Ranked search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either retriever surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do). Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference; `--fast` skips the stage and returns fusion-order results (no relevance scores) in about 75 milliseconds.
 
-Every search renders the same cards, whichever mode retrieved the results. Each card shows why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1). When a meeting matched semantically but contains none of the query's literal words, the card shows the best-matching passage without highlights; a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` still drops results below a relevance threshold; it conflicts with `--fast` and `--keyword`, since only the rerank stage produces that score. Both modes support `--in`, `--meeting`, date filters, and `--limit` (which counts meetings everywhere); `--hybrid` still works as an explicit (redundant) way to ask for the default.
+Grep matches every word in the query, in any order (`grans grep "budget review"` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans grep '"budget review"'`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. Use grep when completeness is the point, e.g. auditing every mention of a term, or when you need matches attributed to a speaker: `--speaker me|other` keeps only meetings where that speaker's transcript utterances match the query, and the cards show exactly those utterances. Notes and AI notes carry no speaker, so combining `--speaker` with an `--in` list that excludes transcripts is an error. Speaker filtering is grep-only because semantic retrieval has no per-utterance attribution, so search could not honor the filter without capping the answer.
 
-Two options refine what a card shows. `--context N` renders N neighboring units around each shown match inside the card (the utterances around a transcript hit, the sections around an AI-notes hit, the paragraphs around a notes hit), with the matched unit shown whole. `--speaker me|other` keeps only meetings where that speaker's transcript utterances match the query, and the cards show exactly those utterances; matches in notes or AI notes have no speaker to attribute, so they don't count while the filter is on, and a meeting with nothing attributable drops out entirely. Both work with either retrieval mode and with each other.
+Both verbs render the same cards. Each card shows why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1), and `--context N` renders N neighboring units around each shown match inside the card (the utterances around a transcript hit, the sections around an AI-notes hit, the paragraphs around a notes hit), with the matched unit shown whole. In search results, a meeting that matched semantically but contains none of the query's literal words shows its best-matching passage without highlights, and a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` drops search results below a relevance threshold; it conflicts with `--fast`, since only the rerank stage produces that score. Both verbs support `--in`, `--meeting`, date filters, and `--limit` (which counts meetings everywhere).
 
-Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference. `--fast` skips the rerank stage and returns fusion-order results (no relevance scores) in about 75 milliseconds, and now works directly on a bare search instead of requiring `--hybrid`. It conflicts with `--keyword`.
+The JSON envelopes differ where the contracts do: grep JSON reports `total_meetings` (the complete count), while search JSON reports `keyword_total` (the uncapped count of meetings containing the query's words, backing the footer) and no total, because its meeting list is a pooled best-k.
 
-`--keyword` forces plain FTS5 search, the search behavior grans used before hybrid became the default: it matches every word in the query, in any order (`grans search "budget review" --keyword` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans search '"budget review"' --keyword`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. It conflicts with `--hybrid`.
+The semantic half of search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-The semantic half of hybrid search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
-
-Since hybrid is the default, a bare `grans search` touches local models and embeddings; only `--keyword` searches avoid them. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
+A `grans search` touches local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
 
 ```bash
 grans search "deployment" --yes
