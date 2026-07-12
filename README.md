@@ -134,7 +134,7 @@ grans admin token --clipboard # Copy to clipboard without printing
 
 ### Search
 
-Search across meeting titles, transcripts, notes, and AI-generated panels. By default, `grans search` runs hybrid search: keyword (FTS5) and semantic rankings are fused with reciprocal rank fusion, then the top candidates are reranked by a cross-encoder. Use `--fast` for quicker fusion-only ordering, or `--keyword`/`--semantic` to force a single retrieval mode.
+Search across meeting titles, transcripts, notes, and AI-generated panels. By default, `grans search` runs hybrid search: keyword (FTS5) and semantic rankings are fused with reciprocal rank fusion, then the top candidates are reranked by a cross-encoder. Use `--fast` for quicker fusion-only ordering, or `--keyword` for plain keyword search.
 
 ```bash
 # Hybrid search (the default): fuses keyword + semantic rankings, then reranks
@@ -151,25 +151,15 @@ grans search "quarterly budget review" --fast
 # Force plain keyword (FTS5) search, the pre-hybrid default behavior
 grans search "budget" --keyword
 
-# Force semantic search (vector similarity via local embeddings)
-grans search "deployment strategy" --semantic
-grans search "what was decided about the API" --semantic
-
 # Search specific targets (works with any mode)
 grans search "AI" --in titles
 grans search "budget" --in titles,notes
 grans search "action items" --in panels
 grans search "demo" --in transcripts --date this-week
 
-# Filter semantic search by source type with --in
-grans search "budget" --semantic --in panels          # Only AI notes
-grans search "budget" --semantic --in transcripts     # Only transcripts
-grans search "budget" --semantic --in notes,panels    # Notes + AI notes
-
 # Limit results (default 10, use 0 for no limit)
 grans search "budget" --limit 5
 grans search "budget" --context 2 --limit 3
-grans search "budget" --semantic --limit 5
 grans search "budget" --limit 0  # No limit
 
 # Show more match snippets per meeting (default 1)
@@ -179,36 +169,33 @@ grans search "budget" --matches 3
 # --context implies keyword search (context-window mode), even from a bare search
 grans search "action items" --context 3
 grans search "action items" --context 2 --in panels
-grans search "budget discussion" --semantic --context 2
 
 # Limit to a specific meeting
 grans search "budget" --meeting "Weekly Standup"
 
 # Filter transcript matches by speaker; implies keyword search unless combined
-# with --semantic or --context (hybrid search doesn't use speaker data)
+# with --context (hybrid search doesn't use speaker data)
 grans search "action items" --speaker me      # only your matches
 grans search "deadline" --speaker other        # only others' matches
 
 # Include soft-deleted meetings in search results
 grans search "budget" --include-deleted
-grans search "old project" --semantic --include-deleted
 ```
 
 Hybrid search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either mode surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do).
 
-Each result is a card showing why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1). When a meeting matched semantically but contains none of the query's literal words, the card shows the best-matching passage without highlights; a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` still drops results below a relevance threshold; it conflicts with `--fast`, `--keyword`, `--semantic`, `--context`, and `--speaker`, since only the rerank stage produces that score. Hybrid search supports `--in`, `--meeting`, date filters, and `--limit` (which counts meetings), and conflicts with `--semantic`, `--context`, and `--speaker`; `--hybrid` still works as an explicit (redundant) way to ask for it.
+Each result is a card showing why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1). When a meeting matched semantically but contains none of the query's literal words, the card shows the best-matching passage without highlights; a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` still drops results below a relevance threshold; it conflicts with `--fast`, `--keyword`, `--context`, and `--speaker`, since only the rerank stage produces that score. Hybrid search supports `--in`, `--meeting`, date filters, and `--limit` (which counts meetings), and conflicts with `--context` and `--speaker`; `--hybrid` still works as an explicit (redundant) way to ask for it.
 
-Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference. `--fast` skips the rerank stage and returns fusion-order results (no relevance scores) in about 75 milliseconds, and now works directly on a bare search instead of requiring `--hybrid`. It conflicts with `--keyword`, `--semantic`, `--context`, and `--speaker`.
+Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference. `--fast` skips the rerank stage and returns fusion-order results (no relevance scores) in about 75 milliseconds, and now works directly on a bare search instead of requiring `--hybrid`. It conflicts with `--keyword`, `--context`, and `--speaker`.
 
-`--keyword` forces plain FTS5 search, the search behavior grans used before hybrid became the default: it matches every word in the query, in any order (`grans search "budget review" --keyword` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans search '"budget review"' --keyword`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. It conflicts with `--hybrid` and `--semantic`. `--context` and `--speaker` also route a bare search onto this same keyword path (context-window search, and plain keyword search respectively), since hybrid doesn't support either; both still work alongside `--semantic`.
+`--keyword` forces plain FTS5 search, the search behavior grans used before hybrid became the default: it matches every word in the query, in any order (`grans search "budget review" --keyword` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans search '"budget review"' --keyword`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. It conflicts with `--hybrid`. `--context` and `--speaker` also route a bare search onto this same keyword path (context-window search, and plain keyword search respectively), since hybrid doesn't support either.
 
-Semantic search (`--semantic`) uses a local embedding model (`nomic-embed-text-v1.5`) to find meetings by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database. Use `--in` to restrict which sources are searched (e.g. `--in panels` to only search AI notes).
+The semantic half of hybrid search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-Since hybrid is the default, a bare `grans search` now touches local models and embeddings; only searches forced onto the keyword path (`--keyword`, `--context`, or `--speaker`) avoid them. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A hybrid or semantic search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
+Since hybrid is the default, a bare `grans search` touches local models and embeddings; only searches forced onto the keyword path (`--keyword`, `--context`, or `--speaker`) avoid them. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
 
 ```bash
 grans search "deployment" --yes
-grans search "deployment" --semantic --yes
 ```
 
 When an upgrade changes the embedding model, existing embeddings are detected as stale and rebuilt automatically on the next embed or search. This full rebuild is a one-time cost and can take a while on large databases; run `grans embed -y` to do it at a time of your choosing.
@@ -217,7 +204,7 @@ Transcript chunks include speaker labels (`[You]` / `[Other]`) when speaker data
 
 ### Embed
 
-Build embeddings for semantic search. Use this to control when embedding happens instead of waiting for the first semantic search.
+Build embeddings for hybrid search. Use this to control when embedding happens instead of waiting for the first search.
 
 ```bash
 # Build embeddings for new/changed chunks (prompts for confirmation)
@@ -240,7 +227,7 @@ grans embed clear --count 10
 grans embed clear --yes && grans embed --yes
 ```
 
-Embeddings are built automatically during `grans sync --embed` or on the first semantic search if not already present. The `embed` command gives you explicit control over when this happens, which is useful when you have a lot of new content and don't want the first search to block.
+Embeddings are built automatically during `grans sync --embed` or on the first search if not already present. The `embed` command gives you explicit control over when this happens, which is useful when you have a lot of new content and don't want the first search to block.
 
 ### List Meetings
 
@@ -396,7 +383,7 @@ Share your grans database across multiple machines via Dropbox.
 
 1. **Transcript sync** (`grans sync transcripts`) - Fetches transcripts from Granola's API with rate limiting (~1.5s per document). For 200 meetings, that's ~5 minutes.
 
-2. **Embedding generation** - First semantic search builds vector embeddings for transcripts, panel sections, and notes, which takes time on CPU.
+2. **Embedding generation** - The first search builds vector embeddings for transcripts, panel sections, and notes, which takes time on CPU.
 
 Once you've done this work on one machine, Dropbox sync lets you share the results instead of repeating it everywhere.
 
@@ -406,8 +393,8 @@ Once you've done this work on one machine, Dropbox sync lets you share the resul
 # 1. Sync all data including transcripts from Granola API
 grans sync
 
-# 2. Build embeddings by running a semantic search (slow first time)
-grans search "anything" --semantic
+# 2. Build embeddings (slow first time)
+grans embed -y
 
 # 3. Connect to Dropbox (one-time OAuth)
 grans dropbox init
@@ -426,7 +413,7 @@ grans dropbox init
 grans dropbox pull
 
 # 3. Queries now work instantly - no need to re-sync or rebuild
-grans search "deployment" --semantic
+grans search "deployment"
 ```
 
 **Keeping machines in sync:**

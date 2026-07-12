@@ -101,7 +101,6 @@ fn main() -> Result<()> {
             query,
             r#in,
             keyword,
-            semantic,
             // --hybrid is the default; it only exists so clap can reject it
             // alongside the forcing flags, so dispatch never consults it
             hybrid: _,
@@ -122,7 +121,6 @@ fn main() -> Result<()> {
                 *fast,
                 *min_score,
                 *keyword,
-                *semantic,
                 *context,
                 r#in,
                 meeting.as_deref(),

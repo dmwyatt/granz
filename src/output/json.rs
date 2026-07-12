@@ -1,7 +1,5 @@
-use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::embed::search::SemanticSearchResult;
 use crate::models::{
     Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe, TranscriptUtterance,
 };
@@ -133,43 +131,6 @@ pub fn format_mixed_context_windows(
     })
 }
 
-/// JSON-serializable semantic search result.
-#[derive(Debug, Serialize)]
-pub struct SemanticResultJson {
-    pub document_id: String,
-    pub score: f32,
-    pub title: String,
-    pub created_at: String,
-    pub source_type: String,
-    pub matched_text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_context: Option<String>,
-}
-
-/// JSON-serializable semantic search result with context window.
-#[derive(Debug, Serialize)]
-pub struct SemanticResultWithContextJson {
-    pub document_id: String,
-    pub score: f32,
-    pub title: String,
-    pub created_at: String,
-    pub source_type: String,
-    pub matched_text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_context: Option<String>,
-    pub context: ContextWindowJson,
-}
-
-/// Wrapper for semantic search response with metadata.
-#[derive(Debug, Serialize)]
-pub struct SemanticSearchResponse<T> {
-    pub query: String,
-    pub total_matches: usize,
-    pub limit: usize,
-    pub returned: usize,
-    pub results: Vec<T>,
-}
-
 /// One match's evidence in shaped search JSON.
 #[derive(Debug, Serialize)]
 pub struct ShapedMatchJson {
@@ -276,93 +237,6 @@ pub fn format_shaped_meetings(
         meetings,
     };
     to_json(&response)
-}
-
-/// Format semantic search results as JSON with metadata.
-pub fn format_semantic_results(
-    results: &[SemanticSearchResult],
-    query: &str,
-    total_matches: usize,
-    limit: usize,
-    conn: &Connection,
-) -> String {
-    let json_results: Vec<SemanticResultJson> = results
-        .iter()
-        .map(|r| {
-            let (title, created_at) = lookup_document_meta(conn, &r.document_id);
-            SemanticResultJson {
-                document_id: r.document_id.clone(),
-                score: r.score,
-                title,
-                created_at,
-                source_type: r.source_type.clone(),
-                matched_text: r.matched_text.clone(),
-                match_context: r.match_context.clone(),
-            }
-        })
-        .collect();
-
-    let response = SemanticSearchResponse {
-        query: query.to_string(),
-        total_matches,
-        limit,
-        returned: json_results.len(),
-        results: json_results,
-    };
-
-    to_json(&response)
-}
-
-/// Format semantic search results with context windows as JSON with metadata.
-pub fn format_semantic_results_with_context(
-    results: &[(SemanticSearchResult, ContextWindow)],
-    query: &str,
-    total_matches: usize,
-    limit: usize,
-    conn: &Connection,
-) -> String {
-    let json_results: Vec<SemanticResultWithContextJson> = results
-        .iter()
-        .map(|(r, window)| {
-            let (title, created_at) = lookup_document_meta(conn, &r.document_id);
-            SemanticResultWithContextJson {
-                document_id: r.document_id.clone(),
-                score: r.score,
-                title: title.clone(),
-                created_at,
-                source_type: r.source_type.clone(),
-                matched_text: r.matched_text.clone(),
-                match_context: r.match_context.clone(),
-                context: ContextWindowJson::from_window(window, &title),
-            }
-        })
-        .collect();
-
-    let response = SemanticSearchResponse {
-        query: query.to_string(),
-        total_matches,
-        limit,
-        returned: json_results.len(),
-        results: json_results,
-    };
-
-    to_json(&response)
-}
-
-fn lookup_document_meta(conn: &Connection, doc_id: &str) -> (String, String) {
-    let result: Option<(String, String)> = conn
-        .query_row(
-            "SELECT COALESCE(title, ''), COALESCE(created_at, '') FROM documents WHERE id = ?1",
-            [doc_id],
-            |row| {
-                let title: String = row.get(0)?;
-                let created_at: String = row.get(1)?;
-                Ok((title, created_at))
-            },
-        )
-        .ok();
-
-    result.unwrap_or_else(|| (String::new(), String::new()))
 }
 
 /// Format a list of people as JSON.
