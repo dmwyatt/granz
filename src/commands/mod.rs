@@ -8,6 +8,7 @@ pub mod meetings;
 pub mod people;
 pub mod recipes;
 pub mod search;
+pub mod search_common;
 pub mod sync;
 pub mod sync_granola;
 mod sync_panels;

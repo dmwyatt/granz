@@ -1,3 +1,5 @@
+use crate::models::Document;
+
 /// Where to search for text matches in meetings.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchTarget {
@@ -42,6 +44,29 @@ pub fn semantic_source_filter(targets: &[SearchTarget]) -> Option<Vec<&'static s
     }
     let types: Vec<&str> = targets.iter().filter_map(|t| t.to_chunk_source_type()).collect();
     Some(types)
+}
+
+/// True when the document's title or id contains the lowercased filter.
+pub fn matches_meeting_filter(doc: &Document, filter_lower: &str) -> bool {
+    doc.title
+        .as_ref()
+        .map(|t| t.to_lowercase().contains(filter_lower))
+        .unwrap_or(false)
+        || doc
+            .id
+            .as_ref()
+            .map(|id| id.to_lowercase().contains(filter_lower))
+            .unwrap_or(false)
+}
+
+/// Keep only documents whose title or id contains `filter` (case-insensitive).
+/// No filter keeps everything.
+pub fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -> Vec<Document> {
+    let Some(filter) = meeting_filter else {
+        return results;
+    };
+    let filter_lower = filter.to_lowercase();
+    results.into_iter().filter(|doc| matches_meeting_filter(doc, &filter_lower)).collect()
 }
 
 #[cfg(test)]
