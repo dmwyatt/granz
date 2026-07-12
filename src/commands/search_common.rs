@@ -171,6 +171,56 @@ mod tests {
     }
 
     #[test]
+    fn shape_and_page_speaker_filter_pages_survivors_in_ranked_order() {
+        // With a speaker filter and a truncating limit, the total counts
+        // every survivor while the page holds only the leading ones, in
+        // the ranked order they arrived.
+        use crate::db::test_fixtures::build_test_db;
+        use serde_json::json;
+
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-a": {"id": "doc-a", "title": "Alpha", "created_at": "2026-01-01T10:00:00Z",
+                          "notes_plain": "kumquat in notes only"},
+                "doc-b": {"id": "doc-b", "title": "Beta", "created_at": "2026-01-02T10:00:00Z"},
+                "doc-c": {"id": "doc-c", "title": "Gamma", "created_at": "2026-01-03T10:00:00Z"}
+            },
+            "transcripts": {
+                "doc-b": [
+                    {"id": "u1", "document_id": "doc-b", "text": "the kumquat by me",
+                     "start_timestamp": "2026-01-02T10:01:00Z", "end_timestamp": "2026-01-02T10:01:05Z",
+                     "source": "microphone", "is_final": true}
+                ],
+                "doc-c": [
+                    {"id": "u2", "document_id": "doc-c", "text": "another kumquat by me",
+                     "start_timestamp": "2026-01-03T10:01:00Z", "end_timestamp": "2026-01-03T10:01:05Z",
+                     "source": "microphone", "is_final": true}
+                ]
+            }
+        }));
+        let opts = crate::query::evidence::EvidenceOptions {
+            speaker: Some(SpeakerFilter::Me),
+            ..Default::default()
+        };
+
+        // Ranked order is [doc-c, doc-a, doc-b]; doc-a has no attributable
+        // evidence, so the survivors are [doc-c, doc-b].
+        let (shaped, total) = shape_and_page(
+            &conn,
+            ranked_docs(&conn),
+            plain_facts,
+            &crate::query::fts::parse_query("kumquat"),
+            &opts,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(total, 2);
+        assert_eq!(shaped.len(), 1);
+        assert_eq!(shaped[0].document_id, "doc-c");
+    }
+
+    #[test]
     fn apply_limit_zero_means_no_limit() {
         let items = vec![1, 2, 3, 4, 5];
         assert_eq!(apply_limit(items, 0), vec![1, 2, 3, 4, 5]);

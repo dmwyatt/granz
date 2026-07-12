@@ -447,6 +447,38 @@ mod tests {
     }
 
     #[test]
+    fn keyword_total_agrees_with_the_grep_side_count() {
+        // keyword_total backs the footer that promises what grep will
+        // report, but the two counts are computed on different paths:
+        // hybrid_ranked filters ids against an allowed set, grep filters
+        // documents with filter_by_meeting. Pin their agreement.
+        let conn = build_test_db(&hybrid_state());
+        let index = hybrid_index();
+
+        for filter in [None, Some("sync"), Some("sync a"), Some("nowhere")] {
+            let ranking = hybrid_ranked(
+                &conn,
+                &FixedEmbedder,
+                &index,
+                "kumquat",
+                &all_targets(),
+                filter,
+                None,
+                false,
+            )
+            .unwrap();
+
+            let grep_docs = crate::db::meetings::search_meetings(
+                &conn, "kumquat", true, true, true, true, None, false,
+            )
+            .unwrap();
+            let grep_count = crate::query::filter::filter_by_meeting(grep_docs, filter).len();
+
+            assert_eq!(ranking.keyword_total, grep_count, "filter {filter:?}");
+        }
+    }
+
+    #[test]
     fn no_matches_fuse_to_empty() {
         let conn = build_test_db(&hybrid_state());
         let index = EmbeddingIndex { vectors: Vec::new(), stats: None };

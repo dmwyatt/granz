@@ -252,6 +252,32 @@ fn grep_limit_zero_returns_all() {
     assert!(result["meetings"].as_array().unwrap().len() >= 2);
 }
 
+#[test]
+fn grep_tty_header_reports_complete_count_when_limited() {
+    let env = TestEnv::with_fixture();
+    // "prototype" matches doc-alpha and doc-beta transcripts; the header
+    // must report the complete count (grep's contract), not the page size.
+    env.cmd()
+        .args(["grep", "prototype", "--in", "transcripts", "--limit", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Found 2 meeting(s) matching \"prototype\" (showing 1):",
+        ))
+        .stdout(predicate::str::contains("Use --limit 0 to show all 2 results."));
+}
+
+#[test]
+fn grep_tty_header_without_truncation_omits_showing() {
+    let env = TestEnv::with_fixture();
+    env.cmd()
+        .args(["grep", "prototype", "--in", "transcripts"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found 2 meeting(s) matching \"prototype\":"))
+        .stdout(predicate::str::contains("(showing").not());
+}
+
 // --- Speaker filter: restricts match evidence to a speaker's utterances ---
 
 #[test]
