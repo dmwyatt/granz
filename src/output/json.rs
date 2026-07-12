@@ -1,9 +1,8 @@
 use serde::Serialize;
 
 use crate::models::{
-    Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe, TranscriptUtterance,
+    Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe,
 };
-use crate::query::search::ContextWindow;
 
 /// Serialize any serializable value to pretty JSON string.
 pub fn to_json<T: Serialize>(value: &T) -> String {
@@ -20,117 +19,6 @@ pub fn format_meeting_detail(doc: &Document) -> String {
     to_json(doc)
 }
 
-/// JSON-serializable context window.
-#[derive(Debug, Serialize)]
-pub struct ContextWindowJson {
-    pub document_id: String,
-    pub document_title: String,
-    pub before: Vec<UtteranceJson>,
-    pub matched: UtteranceJson,
-    pub after: Vec<UtteranceJson>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UtteranceJson {
-    pub id: String,
-    pub text: String,
-    pub start_timestamp: String,
-    pub end_timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-}
-
-impl ContextWindowJson {
-    pub fn from_window(window: &ContextWindow, doc_title: &str) -> Self {
-        ContextWindowJson {
-            document_id: window
-                .matched
-                .document_id
-                .clone()
-                .unwrap_or_default(),
-            document_title: doc_title.to_string(),
-            before: window.before.iter().map(|u| UtteranceJson::from_utt(u)).collect(),
-            matched: UtteranceJson::from_utt(&window.matched),
-            after: window.after.iter().map(|u| UtteranceJson::from_utt(u)).collect(),
-        }
-    }
-}
-
-impl UtteranceJson {
-    fn from_utt(utt: &TranscriptUtterance) -> Self {
-        UtteranceJson {
-            id: utt.id.clone().unwrap_or_default(),
-            text: utt.text.clone().unwrap_or_default(),
-            start_timestamp: utt.start_timestamp.clone().unwrap_or_default(),
-            end_timestamp: utt.end_timestamp.clone().unwrap_or_default(),
-            source: utt.source.clone(),
-        }
-    }
-}
-
-/// JSON-serializable text context window (panels/notes).
-#[derive(Debug, Serialize)]
-pub struct TextContextWindowJson {
-    pub document_id: String,
-    pub document_title: String,
-    pub source_type: String,
-    pub before: Vec<TextSegmentJson>,
-    pub matched: TextSegmentJson,
-    pub after: Vec<TextSegmentJson>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TextSegmentJson {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub text: String,
-}
-
-impl TextContextWindowJson {
-    pub fn from_window(
-        window: &crate::query::search::TextContextWindow,
-        doc_id: &str,
-        doc_title: &str,
-        source_type: &str,
-    ) -> Self {
-        TextContextWindowJson {
-            document_id: doc_id.to_string(),
-            document_title: doc_title.to_string(),
-            source_type: source_type.to_string(),
-            before: window.before.iter().map(TextSegmentJson::from_segment).collect(),
-            matched: TextSegmentJson::from_segment(&window.matched),
-            after: window.after.iter().map(TextSegmentJson::from_segment).collect(),
-        }
-    }
-}
-
-impl TextSegmentJson {
-    fn from_segment(seg: &crate::query::search::TextSegment) -> Self {
-        TextSegmentJson {
-            label: seg.label.clone(),
-            text: seg.text.clone(),
-        }
-    }
-}
-
-/// Format mixed context windows (transcript + text) as JSON.
-pub fn format_mixed_context_windows(
-    transcript_windows: &[ContextWindowJson],
-    text_windows: &[TextContextWindowJson],
-) -> String {
-    #[derive(Serialize)]
-    struct MixedResponse<'a> {
-        #[serde(skip_serializing_if = "<[ContextWindowJson]>::is_empty")]
-        transcript_results: &'a [ContextWindowJson],
-        #[serde(skip_serializing_if = "<[TextContextWindowJson]>::is_empty")]
-        text_results: &'a [TextContextWindowJson],
-    }
-    to_json(&MixedResponse {
-        transcript_results: transcript_windows,
-        text_results: text_windows,
-    })
-}
-
 /// One match's evidence in shaped search JSON.
 #[derive(Debug, Serialize)]
 pub struct ShapedMatchJson {
@@ -145,6 +33,24 @@ pub struct ShapedMatchJson {
     pub snippet: String,
     /// Char ranges `[start, end)` into `snippet` where query terms occur.
     pub highlights: Vec<(usize, usize)>,
+    /// Neighboring units before the match, oldest first (`--context`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_before: Vec<ContextUnitJson>,
+    /// Neighboring units after the match (`--context`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_after: Vec<ContextUnitJson>,
+}
+
+/// A neighboring content unit around a match in shaped search JSON.
+#[derive(Debug, Serialize)]
+pub struct ContextUnitJson {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
 }
 
 /// One meeting in shaped search JSON.
@@ -181,6 +87,26 @@ fn shaped_source_label(source: crate::query::shape::EvidenceSource) -> &'static 
     }
 }
 
+/// Map a raw utterance source to the JSON speaker label.
+fn shaped_speaker_label(source: Option<&str>) -> Option<String> {
+    source.map(|s| match s {
+        "microphone" => "me".to_string(),
+        "system" => "other".to_string(),
+        other => other.to_string(),
+    })
+}
+
+impl ContextUnitJson {
+    fn from_unit(unit: &crate::query::shape::ContextUnit) -> Self {
+        ContextUnitJson {
+            text: unit.text.clone(),
+            speaker: shaped_speaker_label(unit.speaker.as_deref()),
+            timestamp: unit.timestamp.clone(),
+            section: unit.section.clone(),
+        }
+    }
+}
+
 impl ShapedMeetingJson {
     fn from_shaped(m: &crate::query::shape::ShapedMeeting) -> Self {
         let mut signals = Vec::new();
@@ -205,15 +131,13 @@ impl ShapedMeetingJson {
                 .iter()
                 .map(|ev| ShapedMatchJson {
                     source: shaped_source_label(ev.source),
-                    speaker: ev.speaker.as_deref().map(|s| match s {
-                        "microphone" => "me".to_string(),
-                        "system" => "other".to_string(),
-                        other => other.to_string(),
-                    }),
+                    speaker: shaped_speaker_label(ev.speaker.as_deref()),
                     timestamp: ev.timestamp.clone(),
                     section: ev.section.clone(),
                     snippet: ev.excerpt.text.clone(),
                     highlights: ev.excerpt.highlights.clone(),
+                    context_before: ev.context_before.iter().map(ContextUnitJson::from_unit).collect(),
+                    context_after: ev.context_after.iter().map(ContextUnitJson::from_unit).collect(),
                 })
                 .collect(),
         }
@@ -288,6 +212,8 @@ mod tests {
                 speaker: Some("microphone".to_string()),
                 timestamp: Some("2026-05-12T14:31:07Z".to_string()),
                 section: None,
+                context_before: Vec::new(),
+                context_after: Vec::new(),
             }],
             remaining_sources: vec![EvidenceSource::Notes],
         }

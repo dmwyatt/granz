@@ -63,24 +63,24 @@ pub enum Commands {
         /// Hybrid search: fuse keyword and semantic rankings and rerank the
         /// top candidates with a cross-encoder (the default; flag kept for
         /// compatibility)
-        #[arg(long, conflicts_with_all = ["context", "speaker"])]
+        #[arg(long)]
         hybrid: bool,
 
         /// Skip the cross-encoder rerank stage of hybrid search
         /// (fusion order only; faster, but no relevance scores)
-        #[arg(long, conflicts_with_all = ["keyword", "context", "speaker"])]
+        #[arg(long, conflicts_with = "keyword")]
         fast: bool,
 
         /// Minimum reranker relevance score (0-1) for hybrid results
-        #[arg(long, conflicts_with_all = ["fast", "keyword", "context", "speaker"])]
+        #[arg(long, conflicts_with_all = ["fast", "keyword"])]
         min_score: Option<f32>,
 
-        /// Maximum match snippets shown per meeting in hybrid results
+        /// Maximum match snippets shown per meeting in search results
         /// (0 = headers only)
-        #[arg(long, default_value = "1", conflicts_with_all = ["keyword", "context", "speaker"])]
+        #[arg(long, default_value = "1")]
         matches: usize,
 
-        /// Context window size: utterances for transcripts, sections for panels, paragraphs for notes (0 = disabled; implies keyword search)
+        /// Context shown around each match snippet: utterances for transcripts, sections for AI notes, paragraphs for notes (0 = disabled). Works with any mode
         #[arg(long, default_value = "0")]
         context: usize,
 
@@ -100,7 +100,7 @@ pub enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Filter transcript matches by speaker: "me" (your utterances) or "other" (others' utterances); implies keyword search unless --context
+        /// Filter matches by speaker: "me" (your utterances) or "other" (others' utterances); only meetings where that speaker's utterances match survive. Works with any mode
         #[arg(long, value_parser = parse_speaker_filter)]
         speaker: Option<SpeakerFilter>,
 
@@ -658,16 +658,28 @@ mod tests {
     }
 
     #[test]
-    fn search_fast_conflicts_with_non_hybrid_paths() {
+    fn search_fast_conflicts_with_keyword() {
+        let result = Cli::try_parse_from(["grans", "search", "q", "--fast", "--keyword"]);
+        assert!(result.is_err(), "--fast --keyword should conflict");
+    }
+
+    #[test]
+    fn search_context_composes_with_any_mode() {
+        // --context expands cards; it is not a mode and conflicts with
+        // nothing.
         for extra in [
+            &["--hybrid"][..],
+            &["--fast"][..],
+            &["--min-score", "0.4"][..],
+            &["--matches", "3"][..],
             &["--keyword"][..],
-            &["--context", "3"][..],
             &["--speaker", "me"][..],
+            &[][..],
         ] {
-            let mut argv = vec!["grans", "search", "q", "--fast"];
+            let mut argv = vec!["grans", "search", "q", "--context", "2"];
             argv.extend_from_slice(extra);
             let result = Cli::try_parse_from(argv);
-            assert!(result.is_err(), "--fast {extra:?} should conflict");
+            assert!(result.is_ok(), "--context {extra:?} should parse");
         }
     }
 
@@ -682,13 +694,8 @@ mod tests {
     }
 
     #[test]
-    fn search_min_score_conflicts_with_fast_and_non_hybrid_paths() {
-        for extra in [
-            &["--fast"][..],
-            &["--keyword"][..],
-            &["--context", "3"][..],
-            &["--speaker", "me"][..],
-        ] {
+    fn search_min_score_conflicts_with_fast_and_keyword() {
+        for extra in [&["--fast"][..], &["--keyword"][..]] {
             let mut argv = vec!["grans", "search", "q", "--min-score", "0.4"];
             argv.extend_from_slice(extra);
             let result = Cli::try_parse_from(argv);
@@ -697,10 +704,22 @@ mod tests {
     }
 
     #[test]
-    fn search_speaker_conflicts_with_hybrid() {
-        let result =
-            Cli::try_parse_from(["grans", "search", "q", "--hybrid", "--speaker", "me"]);
-        assert!(result.is_err());
+    fn search_speaker_composes_with_any_mode() {
+        // #60: --speaker is an evidence filter, not a mode; it parses
+        // alongside the hybrid default, its flags, and --keyword.
+        for extra in [
+            &["--hybrid"][..],
+            &["--fast"][..],
+            &["--min-score", "0.4"][..],
+            &["--matches", "3"][..],
+            &["--keyword"][..],
+            &[][..],
+        ] {
+            let mut argv = vec!["grans", "search", "q", "--speaker", "me"];
+            argv.extend_from_slice(extra);
+            let result = Cli::try_parse_from(argv);
+            assert!(result.is_ok(), "--speaker {extra:?} should parse");
+        }
     }
 
     fn quality_compare(cli: &Cli) -> &[QualityMode] {

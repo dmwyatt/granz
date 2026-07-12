@@ -225,27 +225,28 @@ fn meetings_search_by_transcripts() {
 fn transcripts_search_finds_match() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["search", "deadline", "--context", "2"])
+        .args(["search", "deadline", "--keyword", "--context", "2"])
         .assert()
         .success()
         .stdout(predicate::str::contains("deadline"));
 }
 
 #[test]
-fn transcripts_search_json_has_context_window() {
+fn transcripts_search_json_has_context_units() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["search", "deadline", "--context", "1"])
+        .args(["search", "deadline", "--keyword", "--context", "1"])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let windows = result["transcript_results"].as_array().unwrap();
-    assert!(!windows.is_empty());
-    let window = &windows[0];
-    assert!(window["matched"]["text"].as_str().unwrap().contains("deadline"));
+    let meetings = result["meetings"].as_array().unwrap();
+    assert!(!meetings.is_empty());
+    let m = &meetings[0]["matches"][0];
+    assert!(m["snippet"].as_str().unwrap().contains("deadline"));
+    assert!(!m["context_before"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -253,7 +254,7 @@ fn transcripts_search_within_meeting() {
     let env = TestEnv::with_fixture();
     // Search for "prototype" but restrict to doc-beta
     env.cmd()
-        .args(["search", "prototype", "--context", "2", "--meeting", "Beta"])
+        .args(["search", "prototype", "--keyword", "--context", "2", "--meeting", "Beta"])
         .assert()
         .success()
         .stdout(predicate::str::contains("prototype").or(predicate::str::contains("staging")));
