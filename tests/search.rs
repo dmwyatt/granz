@@ -264,7 +264,7 @@ fn grep_tty_header_reports_complete_count_when_limited() {
         .stdout(predicate::str::contains(
             "Found 2 meeting(s) matching \"prototype\" (showing 1):",
         ))
-        .stdout(predicate::str::contains("Use --limit 0 to show all 2 results."));
+        .stdout(predicate::str::contains("Use --limit 0 to show all 2 meetings."));
 }
 
 #[test]
