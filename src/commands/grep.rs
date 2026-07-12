@@ -8,8 +8,9 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::commands::search_common::{fts_meetings, render_shaped_meeting_list, shape_and_page};
+use crate::commands::search_common::{print_shaped_cards, shape_and_page};
 use crate::models::{Document, SpeakerFilter};
+use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
 use crate::query::filter::{filter_by_meeting, SearchTarget};
 
@@ -65,8 +66,67 @@ pub fn grep(
         opts.limit,
     )?;
 
-    render_shaped_meeting_list(&shaped, query, total, opts.limit, ctx);
+    render_grep_meeting_list(&shaped, query, total, opts.limit, ctx);
     Ok(())
+}
+
+/// Run FTS retrieval for `query` over the selected targets.
+fn fts_meetings(
+    conn: &Connection,
+    query: &str,
+    targets: &[SearchTarget],
+    date_range: Option<&DateRange>,
+    include_deleted: bool,
+) -> Result<Vec<Document>> {
+    crate::db::meetings::search_meetings(
+        conn,
+        query,
+        targets.contains(&SearchTarget::Titles),
+        targets.contains(&SearchTarget::Transcripts),
+        targets.contains(&SearchTarget::Notes),
+        targets.contains(&SearchTarget::Panels),
+        date_range,
+        include_deleted,
+    )
+}
+
+/// Print grep results, honoring the output mode. `total` is the complete
+/// match count, so the header states it as a fact.
+fn render_grep_meeting_list(
+    shaped: &[crate::query::shape::ShapedMeeting],
+    query: &str,
+    total: usize,
+    limit: usize,
+    ctx: &RunContext,
+) {
+    match ctx.output_mode {
+        OutputMode::Json => {
+            println!(
+                "{}",
+                crate::output::json::format_grep_meetings(shaped, query, total, limit)
+            );
+        }
+        OutputMode::Tty => {
+            if shaped.is_empty() {
+                println!("No meetings found matching \"{}\".", query);
+                return;
+            }
+            if total > shaped.len() {
+                println!(
+                    "Found {} meeting(s) matching \"{}\" (showing {}):\n",
+                    total,
+                    query,
+                    shaped.len()
+                );
+            } else {
+                println!("Found {} meeting(s) matching \"{}\":\n", shaped.len(), query);
+            }
+            print_shaped_cards(shaped, ctx);
+            if total > shaped.len() {
+                println!("Use --limit 0 to show all {} results.", total);
+            }
+        }
+    }
 }
 
 /// `--speaker` restricts match evidence to transcript utterances, so the

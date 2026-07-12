@@ -17,7 +17,7 @@ use rusqlite::Connection;
 
 use cli::args::{AdminAction, Cli, Commands};
 use cli::context::RunContext;
-use commands::search::SearchMode;
+use commands::search::SearchOptions;
 
 fn main() -> Result<()> {
     setup_broken_pipe_handling();
@@ -100,10 +100,6 @@ fn main() -> Result<()> {
         Commands::Search {
             query,
             r#in,
-            keyword,
-            // --hybrid is the default; it only exists so clap can reject it
-            // alongside the forcing flags, so dispatch never consults it
-            hybrid: _,
             fast,
             min_score,
             matches,
@@ -112,19 +108,16 @@ fn main() -> Result<()> {
             from,
             to,
             date,
-            speaker,
             yes,
             limit,
             include_deleted,
         } => {
-            let mode = SearchMode::from_cli_args(
+            let opts = SearchOptions::from_cli_args(
                 *fast,
                 *min_score,
-                *keyword,
                 *context,
                 r#in,
                 meeting.as_deref(),
-                speaker.as_ref(),
                 *yes,
                 *limit,
                 *matches,
@@ -136,7 +129,7 @@ fn main() -> Result<()> {
                 chrono::Utc::now(),
                 &ctx.tz,
             );
-            commands::search::search(&conn, query, mode, date_range, *include_deleted, &ctx)?;
+            commands::search::search(&conn, query, opts, date_range, *include_deleted, &ctx)?;
         }
 
         Commands::Grep {

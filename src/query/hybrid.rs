@@ -2,8 +2,8 @@
 //!
 //! Both retrievers run over the same query; their document-level ranked
 //! lists are truncated to a candidate pool and fused by rank (see
-//! [`crate::query::fusion`]). Used by `grans search --hybrid` and the
-//! quality benchmark's hybrid mode.
+//! [`crate::query::fusion`]). Used by `grans search` and the quality
+//! benchmark's hybrid mode.
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,6 +39,10 @@ pub struct HybridRanking {
     pub fused: Vec<FusedDoc>,
     pub best_chunks: HashMap<String, BestChunk>,
     pub keyword_ids: HashSet<String>,
+    /// Uncapped FTS match count, taken before fusion truncates the FTS
+    /// list to the candidate pool: the number of meetings `grans grep`
+    /// would report for the same query and filters.
+    pub keyword_total: usize,
 }
 
 /// Run FTS and semantic retrieval for `query` and fuse the rankings.
@@ -94,10 +98,12 @@ pub fn hybrid_ranked(
     }
 
     let keyword_ids: HashSet<String> = fts_ids.iter().cloned().collect();
+    let keyword_total = fts_ids.len();
     Ok(HybridRanking {
         fused: fuse_candidates(fts_ids, semantic_ids),
         best_chunks,
         keyword_ids,
+        keyword_total,
     })
 }
 
@@ -268,6 +274,34 @@ mod tests {
         assert!(ranking.keyword_ids.contains("doc-both"));
         assert!(ranking.keyword_ids.contains("doc-fts"));
         assert!(!ranking.keyword_ids.contains("doc-sem"));
+    }
+
+    #[test]
+    fn keyword_total_counts_fts_matches_beyond_the_pool() {
+        // 120 kumquat-titled docs: fusion truncates the FTS list to the
+        // candidate pool, but keyword_total reports the uncapped corpus
+        // count backing the grep cross-link.
+        let mut docs = serde_json::Map::new();
+        for i in 0..120 {
+            let id = format!("doc-{i:03}");
+            docs.insert(
+                id.clone(),
+                json!({
+                    "id": id,
+                    "title": format!("Kumquat filler {i:03}"),
+                    "created_at": format!("2026-03-01T{:02}:{:02}:00Z", i / 60, i % 60),
+                }),
+            );
+        }
+        let conn = build_test_db(&json!({ "documents": docs }));
+        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+
+        let ranking =
+            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, false)
+                .unwrap();
+
+        assert_eq!(ranking.keyword_total, 120);
+        assert_eq!(ranking.fused.len(), CANDIDATE_POOL);
     }
 
     #[test]

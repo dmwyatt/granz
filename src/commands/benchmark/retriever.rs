@@ -174,7 +174,7 @@ fn retrieve_hybrid_rerank_detailed(
 }
 
 /// Reranked hybrid retrieval in production result shape (the
-/// `grans search --hybrid` default path).
+/// `grans search` default path).
 fn retrieve_hybrid_rerank(
     conn: &Connection,
     embedder: &dyn Embedder,

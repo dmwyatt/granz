@@ -1,178 +1,79 @@
+//! `grans search`: ranked discovery.
+//!
+//! Hybrid retrieval (FTS and semantic rankings fused with RRF) plus a
+//! cross-encoder rerank (skipped by `--fast`). Results are the best few
+//! meetings for the query, cut from bounded candidate pools, so the output
+//! never claims a corpus total; it cross-links `grans grep` with the
+//! uncapped FTS match count instead.
+
 use std::io::{self, Write};
 
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::commands::search_common::{render_shaped_meeting_list, shape_and_page};
-use crate::models::{Document, SpeakerFilter};
+use crate::commands::search_common::{print_shaped_cards, shape_and_page};
+use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
 use crate::query::filter::{matches_meeting_filter, SearchTarget};
 
-/// Threshold for prompting before embedding during hybrid search.
+/// Threshold for prompting before embedding during a search.
 const EMBED_WARN_THRESHOLD: usize = 200;
 
-/// Typed search mode, replacing the old 11-parameter search function.
-/// Each variant carries only the parameters it actually uses.
-pub enum SearchMode {
-    Keyword {
-        targets: Vec<SearchTarget>,
-        meeting_filter: Option<String>,
-        limit: usize,
-        /// Match snippets shown per meeting card.
-        matches: usize,
-        /// Only meetings with matching utterances by this speaker survive.
-        speaker: Option<SpeakerFilter>,
-        /// Neighboring units rendered around each shown match.
-        context: usize,
-    },
-    Hybrid {
-        targets: Vec<SearchTarget>,
-        meeting_filter: Option<String>,
-        rerank: bool,
-        min_score: Option<f32>,
-        yes: bool,
-        limit: usize,
-        /// Match snippets shown per meeting card.
-        matches: usize,
-        /// Only meetings with matching utterances by this speaker survive.
-        speaker: Option<SpeakerFilter>,
-        /// Neighboring units rendered around each shown match.
-        context: usize,
-    },
+/// Options for a ranked search.
+pub struct SearchOptions {
+    pub targets: Vec<SearchTarget>,
+    pub meeting_filter: Option<String>,
+    pub rerank: bool,
+    pub min_score: Option<f32>,
+    pub yes: bool,
+    pub limit: usize,
+    /// Match snippets shown per meeting card.
+    pub matches: usize,
+    /// Neighboring units rendered around each shown match.
+    pub context: usize,
 }
 
-impl SearchMode {
-    /// Construct a SearchMode from CLI arguments.
-    ///
-    /// A bare search runs hybrid and --keyword forces plain FTS; --speaker
-    /// (an evidence filter) and --context (card expansion) compose with
-    /// either retrieval mode. --hybrid needs no parameter here: it is the
-    /// default, and clap conflicts keep it from combining with --keyword.
+impl SearchOptions {
+    /// Construct SearchOptions from CLI arguments. A bare search reranks;
+    /// --fast keeps fusion order.
     #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         fast: bool,
         min_score: Option<f32>,
-        keyword: bool,
         context: usize,
         in_targets: &str,
         meeting_filter: Option<&str>,
-        speaker: Option<&SpeakerFilter>,
         yes: bool,
         limit: usize,
         matches: usize,
     ) -> Self {
-        if keyword {
-            SearchMode::Keyword {
-                targets: SearchTarget::parse_list(in_targets),
-                meeting_filter: meeting_filter.map(String::from),
-                limit,
-                matches,
-                speaker: speaker.cloned(),
-                context,
-            }
-        } else {
-            SearchMode::Hybrid {
-                targets: SearchTarget::parse_list(in_targets),
-                meeting_filter: meeting_filter.map(String::from),
-                rerank: !fast,
-                min_score,
-                yes,
-                limit,
-                matches,
-                speaker: speaker.cloned(),
-                context,
-            }
+        SearchOptions {
+            targets: SearchTarget::parse_list(in_targets),
+            meeting_filter: meeting_filter.map(String::from),
+            rerank: !fast,
+            min_score,
+            yes,
+            limit,
+            matches,
+            context,
         }
-    }
-}
-
-/// Unified search entry point. Dispatches to the appropriate handler
-/// based on the SearchMode variant.
-pub fn search(
-    conn: &Connection,
-    query: &str,
-    mode: SearchMode,
-    date_range: Option<DateRange>,
-    include_deleted: bool,
-    ctx: &RunContext,
-) -> Result<()> {
-    match mode {
-        // The keyword path is the grep verb's lookup; --keyword remains as
-        // an alias for it until the search surface is slimmed.
-        SearchMode::Keyword {
-            targets,
-            meeting_filter,
-            limit,
-            matches,
-            speaker,
-            context,
-        } => crate::commands::grep::grep(
-            conn,
-            query,
-            crate::commands::grep::GrepOptions {
-                targets,
-                meeting_filter,
-                limit,
-                matches,
-                speaker,
-                context,
-            },
-            date_range,
-            include_deleted,
-            ctx,
-        ),
-        SearchMode::Hybrid {
-            targets,
-            meeting_filter,
-            rerank,
-            min_score,
-            yes,
-            limit,
-            matches,
-            speaker,
-            context,
-        } => hybrid_search(
-            conn,
-            query,
-            &targets,
-            meeting_filter.as_deref(),
-            rerank,
-            min_score,
-            yes,
-            limit,
-            matches,
-            speaker,
-            context,
-            date_range,
-            include_deleted,
-            ctx,
-        ),
     }
 }
 
 /// Run keyword and semantic retrieval, fuse the rankings, rerank the top
 /// candidates (unless skipped via --fast), and display the resulting
 /// meetings as shaped cards with match evidence.
-#[allow(clippy::too_many_arguments)]
-fn hybrid_search(
+pub fn search(
     conn: &Connection,
     query: &str,
-    targets: &[SearchTarget],
-    meeting_filter: Option<&str>,
-    rerank: bool,
-    min_score: Option<f32>,
-    yes: bool,
-    limit: usize,
-    matches: usize,
-    speaker: Option<SpeakerFilter>,
-    context: usize,
+    opts: SearchOptions,
     date_range: Option<DateRange>,
     include_deleted: bool,
     ctx: &RunContext,
 ) -> Result<()> {
-    if !confirm_embedding_work(conn, yes, ctx)? {
+    if !confirm_embedding_work(conn, opts.yes, ctx)? {
         return Ok(());
     }
 
@@ -186,14 +87,14 @@ fn hybrid_search(
         &embedder,
         &index,
         query,
-        targets,
+        &opts.targets,
         date_range.as_ref(),
         include_deleted,
     )?;
 
     // Ranked (id, score) pairs; ordering is the pipeline's and is not
     // touched again below.
-    let ordered: Vec<(String, Option<f32>)> = if rerank {
+    let ordered: Vec<(String, Option<f32>)> = if opts.rerank {
         let reranker =
             crate::embed::rerank::FastEmbedReranker::new(crate::embed::rerank::DEFAULT_RERANK_MODEL)?;
         let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
@@ -206,7 +107,7 @@ fn hybrid_search(
             &ranking_ctx,
             &cfg,
         )?;
-        if let Some(min) = min_score {
+        if let Some(min) = opts.min_score {
             reranked.retain(|d| d.score >= min);
         }
         reranked.into_iter().map(|d| (d.document_id, Some(d.score))).collect()
@@ -223,7 +124,7 @@ fn hybrid_search(
         .filter_map(|(id, score)| doc_by_id.remove(&id).map(|doc| (doc, score)))
         .collect();
 
-    let filter_lower = meeting_filter.map(str::to_lowercase);
+    let filter_lower = opts.meeting_filter.as_deref().map(str::to_lowercase);
     let filtered: Vec<(Document, Option<f32>)> = ordered_docs
         .into_iter()
         .filter(|(doc, _)| {
@@ -232,13 +133,12 @@ fn hybrid_search(
         .collect();
 
     let tokens = crate::query::fts::parse_query(query);
-    let opts = crate::query::evidence::EvidenceOptions {
-        max_matches: matches,
-        speaker,
-        context,
+    let evidence_opts = crate::query::evidence::EvidenceOptions {
+        max_matches: opts.matches,
+        context: opts.context,
         ..Default::default()
     };
-    let (shaped, total) = shape_and_page(
+    let (shaped, _) = shape_and_page(
         conn,
         filtered,
         |doc, score| {
@@ -250,12 +150,56 @@ fn hybrid_search(
             }
         },
         &tokens,
-        &opts,
-        limit,
+        &evidence_opts,
+        opts.limit,
     )?;
 
-    render_shaped_meeting_list(&shaped, query, total, limit, ctx);
+    render_ranked_meeting_list(&shaped, query, ranking.keyword_total, opts.limit, ctx);
     Ok(())
+}
+
+/// Header for ranked results: claims only what is shown, never a total.
+fn ranked_header(shown: usize, query: &str) -> String {
+    format!("Top {} match(es) for \"{}\":", shown, query)
+}
+
+/// Cross-link to the complete lookup, backed by the uncapped FTS count.
+fn grep_cross_link(keyword_total: usize, query: &str) -> String {
+    format!(
+        "{} meeting(s) contain these words; grans grep \"{}\" lists them all.",
+        keyword_total, query
+    )
+}
+
+/// Print ranked results, honoring the output mode. The list is a pooled
+/// best-k, so no corpus total is claimed; when the query's words appear
+/// anywhere, the output points at `grans grep` for the complete list.
+fn render_ranked_meeting_list(
+    shaped: &[crate::query::shape::ShapedMeeting],
+    query: &str,
+    keyword_total: usize,
+    limit: usize,
+    ctx: &RunContext,
+) {
+    match ctx.output_mode {
+        OutputMode::Json => {
+            println!(
+                "{}",
+                crate::output::json::format_search_meetings(shaped, query, keyword_total, limit)
+            );
+        }
+        OutputMode::Tty => {
+            if shaped.is_empty() {
+                println!("No matches for \"{}\".", query);
+            } else {
+                println!("{}\n", ranked_header(shaped.len(), query));
+                print_shaped_cards(shaped, ctx);
+            }
+            if keyword_total > 0 {
+                println!("{}", grep_cross_link(keyword_total, query));
+            }
+        }
+    }
 }
 
 /// Check embedding status and, on a TTY, prompt before a large or full
@@ -319,182 +263,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_cli_args_defaults_to_hybrid() {
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 0, "titles,notes", None, None, false, 10, 1,
+    fn from_cli_args_defaults_rerank_on() {
+        let opts = SearchOptions::from_cli_args(
+            false, None, 0, "titles,notes", None, false, 10, 1,
         );
-        match mode {
-            SearchMode::Hybrid {
-                targets,
-                meeting_filter,
-                rerank,
-                min_score,
-                yes,
-                limit,
-                matches,
-                speaker,
-                context,
-            } => {
-                assert_eq!(targets.len(), 2);
-                assert!(targets.contains(&SearchTarget::Titles));
-                assert!(targets.contains(&SearchTarget::Notes));
-                assert!(meeting_filter.is_none());
-                assert!(rerank);
-                assert_eq!(min_score, None);
-                assert!(!yes);
-                assert_eq!(limit, 10);
-                assert_eq!(matches, 1);
-                assert_eq!(speaker, None);
-                assert_eq!(context, 0);
-            }
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_matches_threads_to_hybrid() {
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 0, "titles", None, None, false, 10, 3,
-        );
-        match mode {
-            SearchMode::Hybrid { matches, .. } => assert_eq!(matches, 3),
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_keyword_flag_forces_keyword() {
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 0, "titles,notes", Some("standup"), None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Keyword {
-                targets,
-                meeting_filter,
-                limit,
-                matches,
-                speaker,
-                context,
-            } => {
-                assert_eq!(targets.len(), 2);
-                assert!(targets.contains(&SearchTarget::Titles));
-                assert!(targets.contains(&SearchTarget::Notes));
-                assert_eq!(meeting_filter.as_deref(), Some("standup"));
-                assert_eq!(limit, 10);
-                assert_eq!(matches, 1);
-                assert_eq!(speaker, None);
-                assert_eq!(context, 0);
-            }
-            _ => panic!("Expected Keyword variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_context_threads_to_both_modes() {
-        // --context is a presentation option, not a mode: it no longer
-        // forces the keyword path.
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 3, "titles", None, None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Hybrid { context, .. } => assert_eq!(context, 3),
-            _ => panic!("Expected Hybrid variant"),
-        }
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 2, "titles", None, None, false, 10, 1,
-        );
-        match mode {
-            SearchMode::Keyword { context, .. } => assert_eq!(context, 2),
-            _ => panic!("Expected Keyword variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_matches_threads_to_keyword() {
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 0, "titles", None, None, false, 10, 4,
-        );
-        match mode {
-            SearchMode::Keyword { matches, .. } => assert_eq!(matches, 4),
-            _ => panic!("Expected Keyword variant"),
-        }
+        assert_eq!(opts.targets.len(), 2);
+        assert!(opts.targets.contains(&SearchTarget::Titles));
+        assert!(opts.targets.contains(&SearchTarget::Notes));
+        assert!(opts.meeting_filter.is_none());
+        assert!(opts.rerank);
+        assert_eq!(opts.min_score, None);
+        assert!(!opts.yes);
+        assert_eq!(opts.limit, 10);
+        assert_eq!(opts.matches, 1);
+        assert_eq!(opts.context, 0);
     }
 
     #[test]
     fn from_cli_args_fast_skips_rerank() {
-        let mode = SearchMode::from_cli_args(
-            true, None, false, 0, "titles", None, None, false, 10, 1,
+        let opts = SearchOptions::from_cli_args(true, None, 0, "titles", None, false, 10, 1);
+        assert!(!opts.rerank);
+    }
+
+    #[test]
+    fn from_cli_args_min_score_threads() {
+        let opts =
+            SearchOptions::from_cli_args(false, Some(0.4), 0, "titles", None, false, 10, 1);
+        assert_eq!(opts.min_score, Some(0.4));
+    }
+
+    #[test]
+    fn from_cli_args_meeting_filter_threads() {
+        let opts = SearchOptions::from_cli_args(
+            false, None, 0, "transcripts", Some("daily"), false, 10, 1,
         );
-        match mode {
-            SearchMode::Hybrid { rerank, .. } => assert!(!rerank),
-            _ => panic!("Expected Hybrid variant"),
-        }
+        assert_eq!(opts.meeting_filter.as_deref(), Some("daily"));
     }
 
     #[test]
-    fn from_cli_args_min_score_threads_to_hybrid() {
-        let mode = SearchMode::from_cli_args(
-            false, Some(0.4), false, 0, "titles", None, None, false, 10, 1,
+    fn from_cli_args_matches_and_context_thread() {
+        let opts = SearchOptions::from_cli_args(false, None, 3, "titles", None, false, 10, 4);
+        assert_eq!(opts.context, 3);
+        assert_eq!(opts.matches, 4);
+    }
+
+    #[test]
+    fn ranked_header_claims_only_the_shown_count() {
+        assert_eq!(ranked_header(7, "budget"), "Top 7 match(es) for \"budget\":");
+    }
+
+    #[test]
+    fn grep_cross_link_names_the_complete_verb() {
+        assert_eq!(
+            grep_cross_link(312, "budget"),
+            "312 meeting(s) contain these words; grans grep \"budget\" lists them all."
         );
-        match mode {
-            SearchMode::Hybrid { min_score, .. } => assert_eq!(min_score, Some(0.4)),
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_speaker_stays_on_the_hybrid_default() {
-        // #60: a bare --speaker used to silently route to the keyword path
-        // (which then dropped the filter); it now composes with hybrid.
-        let speaker = SpeakerFilter::Me;
-        let mode = SearchMode::from_cli_args(
-            false, None, false, 0, "transcripts", None, Some(&speaker), false, 10, 1,
-        );
-        match mode {
-            SearchMode::Hybrid { speaker, .. } => assert_eq!(speaker, Some(SpeakerFilter::Me)),
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_speaker_threads_to_keyword() {
-        let speaker = SpeakerFilter::Other;
-        let mode = SearchMode::from_cli_args(
-            false, None, true, 0, "transcripts", None, Some(&speaker), false, 10, 1,
-        );
-        match mode {
-            SearchMode::Keyword { speaker, .. } => {
-                assert_eq!(speaker, Some(SpeakerFilter::Other));
-            }
-            _ => panic!("Expected Keyword variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_meeting_filter_threads_to_hybrid() {
-        let mode =
-            SearchMode::from_cli_args(false, None, false, 0, "transcripts", Some("daily"), None, false, 10, 1);
-        match mode {
-            SearchMode::Hybrid {
-                meeting_filter, ..
-            } => {
-                assert_eq!(meeting_filter.as_deref(), Some("daily"));
-            }
-            _ => panic!("Expected Hybrid variant"),
-        }
-    }
-
-    #[test]
-    fn from_cli_args_meeting_filter_threads_to_keyword() {
-        let mode =
-            SearchMode::from_cli_args(false, None, true, 0, "transcripts", Some("daily"), None, false, 10, 1);
-        match mode {
-            SearchMode::Keyword {
-                meeting_filter, ..
-            } => {
-                assert_eq!(meeting_filter.as_deref(), Some("daily"));
-            }
-            _ => panic!("Expected Keyword variant"),
-        }
     }
 }

@@ -163,7 +163,12 @@ mod tests {
     }
 
     fn make_ranking(fused: Vec<FusedDoc>, best_chunks: HashMap<String, BestChunk>) -> HybridRanking {
-        HybridRanking { fused, best_chunks, keyword_ids: std::collections::HashSet::new() }
+        HybridRanking {
+            fused,
+            best_chunks,
+            keyword_ids: std::collections::HashSet::new(),
+            keyword_total: 0,
+        }
     }
 
     #[test]

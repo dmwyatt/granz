@@ -5,9 +5,6 @@ use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
 use crate::models::Document;
-use crate::output::format::OutputMode;
-use crate::query::dates::DateRange;
-use crate::query::filter::SearchTarget;
 
 /// Truncate a vec to `limit` items. A limit of 0 means no limit.
 pub fn apply_limit<T>(mut items: Vec<T>, limit: usize) -> Vec<T> {
@@ -15,26 +12,6 @@ pub fn apply_limit<T>(mut items: Vec<T>, limit: usize) -> Vec<T> {
         items.truncate(limit);
     }
     items
-}
-
-/// Run FTS retrieval for `query` over the selected targets.
-pub fn fts_meetings(
-    conn: &Connection,
-    query: &str,
-    targets: &[SearchTarget],
-    date_range: Option<&DateRange>,
-    include_deleted: bool,
-) -> Result<Vec<Document>> {
-    crate::db::meetings::search_meetings(
-        conn,
-        query,
-        targets.contains(&SearchTarget::Titles),
-        targets.contains(&SearchTarget::Transcripts),
-        targets.contains(&SearchTarget::Notes),
-        targets.contains(&SearchTarget::Panels),
-        date_range,
-        include_deleted,
-    )
 }
 
 /// Shape ranked documents into meeting cards, in the order given, and cut
@@ -73,46 +50,13 @@ pub fn shape_and_page<'a>(
     }
 }
 
-/// Print shaped meeting cards, honoring the output mode.
-pub fn render_shaped_meeting_list(
-    shaped: &[crate::query::shape::ShapedMeeting],
-    query: &str,
-    total: usize,
-    limit: usize,
-    ctx: &RunContext,
-) {
-    match ctx.output_mode {
-        OutputMode::Json => {
-            println!(
-                "{}",
-                crate::output::json::format_shaped_meetings(shaped, query, total, limit)
-            );
-        }
-        OutputMode::Tty => {
-            if shaped.is_empty() {
-                println!("No meetings found matching \"{}\".", query);
-                return;
-            }
-            if total > shaped.len() {
-                println!(
-                    "Found {} meeting(s) matching \"{}\" (showing {}):\n",
-                    total,
-                    query,
-                    shaped.len()
-                );
-            } else {
-                println!("Found {} meeting(s) matching \"{}\":\n", shaped.len(), query);
-            }
-            for (i, meeting) in shaped.iter().enumerate() {
-                println!(
-                    "{}\n",
-                    crate::output::card::format_shaped_meeting(meeting, i + 1, &ctx.tz)
-                );
-            }
-            if total > shaped.len() {
-                println!("Use --limit 0 to show all {} results.", total);
-            }
-        }
+/// Print numbered meeting cards to stdout.
+pub fn print_shaped_cards(shaped: &[crate::query::shape::ShapedMeeting], ctx: &RunContext) {
+    for (i, meeting) in shaped.iter().enumerate() {
+        println!(
+            "{}\n",
+            crate::output::card::format_shaped_meeting(meeting, i + 1, &ctx.tz)
+        );
     }
 }
 

@@ -68,11 +68,26 @@ pub struct ShapedMeetingJson {
     pub matches: Vec<ShapedMatchJson>,
 }
 
-/// Response envelope for shaped search results.
+/// Response envelope for grep results. `total_meetings` is the complete
+/// count of matching meetings, a fact about the corpus; `returned` is the
+/// page cut by `limit`.
 #[derive(Debug, Serialize)]
-pub struct ShapedSearchResponse {
+pub struct GrepResponse {
     pub query: String,
     pub total_meetings: usize,
+    pub limit: usize,
+    pub returned: usize,
+    pub meetings: Vec<ShapedMeetingJson>,
+}
+
+/// Response envelope for ranked search results. The meeting list is a
+/// pooled best-k, so no total is claimed; `keyword_total` is the uncapped
+/// count of meetings containing the query words (what `grans grep` would
+/// report).
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub keyword_total: usize,
     pub limit: usize,
     pub returned: usize,
     pub meetings: Vec<ShapedMeetingJson>,
@@ -144,8 +159,8 @@ impl ShapedMeetingJson {
     }
 }
 
-/// Format shaped search results as JSON with metadata.
-pub fn format_shaped_meetings(
+/// Format grep results as JSON with the complete match count.
+pub fn format_grep_meetings(
     results: &[crate::query::shape::ShapedMeeting],
     query: &str,
     total_meetings: usize,
@@ -153,9 +168,28 @@ pub fn format_shaped_meetings(
 ) -> String {
     let meetings: Vec<ShapedMeetingJson> =
         results.iter().map(ShapedMeetingJson::from_shaped).collect();
-    let response = ShapedSearchResponse {
+    let response = GrepResponse {
         query: query.to_string(),
         total_meetings,
+        limit,
+        returned: meetings.len(),
+        meetings,
+    };
+    to_json(&response)
+}
+
+/// Format ranked search results as JSON with the uncapped FTS count.
+pub fn format_search_meetings(
+    results: &[crate::query::shape::ShapedMeeting],
+    query: &str,
+    keyword_total: usize,
+    limit: usize,
+) -> String {
+    let meetings: Vec<ShapedMeetingJson> =
+        results.iter().map(ShapedMeetingJson::from_shaped).collect();
+    let response = SearchResponse {
+        query: query.to_string(),
+        keyword_total,
         limit,
         returned: meetings.len(),
         meetings,
@@ -220,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn shaped_json_shape_and_signals() {
-        let out = format_shaped_meetings(&[shaped()], "migration", 12, 10);
+    fn grep_json_shape_and_signals() {
+        let out = format_grep_meetings(&[shaped()], "migration", 12, 10);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["query"], "migration");
         assert_eq!(v["total_meetings"], 12);
@@ -239,10 +273,31 @@ mod tests {
     }
 
     #[test]
-    fn shaped_json_omits_score_when_rerank_skipped() {
+    fn grep_json_carries_no_keyword_total() {
+        let out = format_grep_meetings(&[shaped()], "migration", 12, 10);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("keyword_total").is_none());
+    }
+
+    #[test]
+    fn search_json_carries_keyword_total_not_total_meetings() {
+        // The ranked list is a pooled best-k, so no total is claimed; the
+        // uncapped FTS count backs the grep cross-link instead.
+        let out = format_search_meetings(&[shaped()], "migration", 312, 10);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["query"], "migration");
+        assert_eq!(v["keyword_total"], 312);
+        assert_eq!(v["returned"], 1);
+        assert_eq!(v["limit"], 10);
+        assert!(v.get("total_meetings").is_none());
+        assert_eq!(v["meetings"][0]["id"], "doc-1");
+    }
+
+    #[test]
+    fn search_json_omits_score_when_rerank_skipped() {
         let mut m = shaped();
         m.score = None;
-        let out = format_shaped_meetings(&[m], "q", 1, 0);
+        let out = format_search_meetings(&[m], "q", 1, 0);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v["meetings"][0].get("score").is_none());
     }

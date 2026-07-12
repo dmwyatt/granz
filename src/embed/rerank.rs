@@ -27,7 +27,7 @@ pub enum RerankModel {
     BgeBase,
 }
 
-/// Model used by `grans search --hybrid` (winner of the Phase 3 benchmark).
+/// Model used by `grans search` (winner of the Phase 3 benchmark).
 pub const DEFAULT_RERANK_MODEL: RerankModel = RerankModel::JinaTurbo;
 
 impl RerankModel {
