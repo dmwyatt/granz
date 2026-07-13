@@ -106,7 +106,7 @@ fn grep_parses_with_lookup_flags() {
     };
     assert_eq!(query, "kumquat");
     assert_eq!(*speaker, Some(SpeakerFilter::Me));
-    assert_eq!(r#in, "titles,transcripts");
+    assert_eq!(r#in, &vec![SearchTarget::Titles, SearchTarget::Transcripts]);
     assert_eq!(meeting.as_deref(), Some("standup"));
     assert_eq!(*context, 2);
     assert_eq!(*matches, 3);
@@ -118,6 +118,61 @@ fn grep_parses_with_lookup_flags() {
 fn grep_visible_alias_g_parses() {
     let cli = Cli::try_parse_from(["grans", "g", "kumquat"]).unwrap();
     assert!(matches!(cli.command, Commands::Grep { .. }));
+}
+
+fn grep_in_targets(cli: &Cli) -> &[SearchTarget] {
+    match &cli.command {
+        Commands::Grep { r#in, .. } => r#in,
+        _ => panic!("expected grep subcommand"),
+    }
+}
+
+#[test]
+fn grep_in_defaults_to_every_target() {
+    // Omitting --in searches every source (#74 preserves this default).
+    let cli = Cli::try_parse_from(["grans", "grep", "budget"]).unwrap();
+    assert_eq!(grep_in_targets(&cli), SearchTarget::all().as_slice());
+}
+
+#[test]
+fn grep_in_parses_a_valid_comma_separated_list() {
+    let cli =
+        Cli::try_parse_from(["grans", "grep", "budget", "--in", "titles,transcripts"]).unwrap();
+    assert_eq!(
+        grep_in_targets(&cli),
+        &[SearchTarget::Titles, SearchTarget::Transcripts]
+    );
+}
+
+#[test]
+fn grep_in_rejects_an_unknown_target() {
+    // `transcript` (singular typo) must fail loudly instead of collapsing to
+    // an empty target set that greps nothing (#74). The error names the bad
+    // value and lists the valid ones.
+    let err = Cli::try_parse_from(["grans", "grep", "budget", "--in", "transcript"])
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("transcript"), "error should name the bad value: {msg}");
+    assert!(
+        msg.contains("titles") && msg.contains("transcripts") && msg.contains("notes")
+            && msg.contains("panels"),
+        "error should list the valid targets: {msg}"
+    );
+}
+
+#[test]
+fn grep_in_rejects_an_unknown_target_inside_a_valid_list() {
+    // `titles,transcript` must not silently search titles only (#74); one
+    // bad token fails the whole list.
+    let result = Cli::try_parse_from(["grans", "grep", "budget", "--in", "titles,transcript"]);
+    assert!(result.is_err(), "an unknown token anywhere must fail the list");
+}
+
+#[test]
+fn search_in_rejects_an_unknown_target() {
+    // The rejection applies to search's --in as well.
+    let result = Cli::try_parse_from(["grans", "search", "budget", "--in", "transcript"]);
+    assert!(result.is_err(), "search --in must reject unknown targets");
 }
 
 #[test]

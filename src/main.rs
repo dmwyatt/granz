@@ -153,7 +153,7 @@ fn main() -> Result<()> {
             include_deleted,
         } => {
             let opts = commands::grep::GrepOptions {
-                targets: query::filter::SearchTarget::parse_list(r#in),
+                targets: r#in.clone(),
                 meeting_filter: meeting.clone(),
                 limit: *limit,
                 matches: *matches,

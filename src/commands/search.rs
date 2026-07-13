@@ -16,17 +16,19 @@ use crate::commands::search_common::{print_shaped_cards, shape_and_page};
 use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::{SearchTarget, DEFAULT_SEARCH_TARGETS};
+use crate::query::filter::{targets_to_flag_value, SearchTarget, DEFAULT_SEARCH_TARGETS};
 
 /// Threshold for prompting before embedding during a search.
 const EMBED_WARN_THRESHOLD: usize = 200;
 
-/// Raw filter values as given on the command line. The grep cross-link
-/// echoes them verbatim so the suggested command reproduces the count the
-/// footer claims; only filters that change the match count belong here.
+/// Filter values that affect the match count, kept so the grep cross-link
+/// can reproduce that count. Dates and the meeting filter are echoed as the
+/// user typed them; `in_targets` is the parsed target list, re-joined into
+/// the flag when the suggested command is built. Only filters that change
+/// the match count belong here.
 pub struct FilterEcho {
-    /// Raw `--in` value.
-    pub in_targets: String,
+    /// Parsed `--in` targets.
+    pub in_targets: Vec<SearchTarget>,
     pub meeting: Option<String>,
     pub date: Option<String>,
     pub from: Option<String>,
@@ -37,7 +39,7 @@ pub struct FilterEcho {
 impl Default for FilterEcho {
     fn default() -> Self {
         FilterEcho {
-            in_targets: DEFAULT_SEARCH_TARGETS.to_string(),
+            in_targets: SearchTarget::all(),
             meeting: None,
             date: None,
             from: None,
@@ -78,7 +80,7 @@ impl SearchOptions {
         echo: FilterEcho,
     ) -> Self {
         SearchOptions {
-            targets: SearchTarget::parse_list(&echo.in_targets),
+            targets: echo.in_targets.clone(),
             meeting_filter: echo.meeting.clone(),
             rerank: !fast,
             min_score,
@@ -192,8 +194,9 @@ fn ranked_header(shown: usize, query: &str) -> String {
 /// change what counts as a match.
 fn grep_command_echo(query: &str, filters: &FilterEcho) -> String {
     let mut cmd = format!("grans grep \"{}\"", query);
-    if filters.in_targets != DEFAULT_SEARCH_TARGETS {
-        cmd.push_str(&format!(" --in {}", filters.in_targets));
+    let in_flag = targets_to_flag_value(&filters.in_targets);
+    if in_flag != DEFAULT_SEARCH_TARGETS {
+        cmd.push_str(&format!(" --in {}", in_flag));
     }
     if let Some(meeting) = &filters.meeting {
         cmd.push_str(&format!(" --meeting \"{}\"", meeting));
@@ -333,7 +336,7 @@ mod tests {
             false,
             10,
             1,
-            echo_with(|e| e.in_targets = "titles,notes".to_string()),
+            echo_with(|e| e.in_targets = vec![SearchTarget::Titles, SearchTarget::Notes]),
         );
         assert_eq!(opts.targets.len(), 2);
         assert!(opts.targets.contains(&SearchTarget::Titles));
@@ -418,7 +421,7 @@ mod tests {
 
     #[test]
     fn grep_command_echo_echoes_a_non_default_in_list() {
-        let echo = echo_with(|e| e.in_targets = "titles,notes".to_string());
+        let echo = echo_with(|e| e.in_targets = vec![SearchTarget::Titles, SearchTarget::Notes]);
         assert_eq!(
             grep_command_echo("budget", &echo),
             "grans grep \"budget\" --in titles,notes"
@@ -467,7 +470,7 @@ mod tests {
     #[test]
     fn grep_command_echo_combines_every_count_affecting_filter() {
         let echo = FilterEcho {
-            in_targets: "transcripts".to_string(),
+            in_targets: vec![SearchTarget::Transcripts],
             meeting: Some("Weekly Standup".to_string()),
             date: Some("last-week".to_string()),
             from: None,

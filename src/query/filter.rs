@@ -1,10 +1,17 @@
+use clap::ValueEnum;
+
 use crate::models::Document;
 
 /// The default `--in` target list for search and grep: every source.
 pub const DEFAULT_SEARCH_TARGETS: &str = "titles,transcripts,notes,panels";
 
 /// Where to search for text matches in meetings.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Parsed directly by clap as a `ValueEnum`, so `--in` rejects unknown
+/// targets at parse time and names the valid ones, rather than silently
+/// dropping typos.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
 pub enum SearchTarget {
     Titles,
     Transcripts,
@@ -13,16 +20,26 @@ pub enum SearchTarget {
 }
 
 impl SearchTarget {
-    pub fn parse_list(s: &str) -> Vec<SearchTarget> {
-        s.split(',')
-            .filter_map(|part| match part.trim().to_lowercase().as_str() {
-                "titles" => Some(SearchTarget::Titles),
-                "transcripts" => Some(SearchTarget::Transcripts),
-                "notes" => Some(SearchTarget::Notes),
-                "panels" => Some(SearchTarget::Panels),
-                _ => None,
-            })
-            .collect()
+    /// Every target, in canonical `--in` order. Matches
+    /// [`DEFAULT_SEARCH_TARGETS`] and is the set used when `--in` is omitted.
+    pub fn all() -> Vec<SearchTarget> {
+        vec![
+            SearchTarget::Titles,
+            SearchTarget::Transcripts,
+            SearchTarget::Notes,
+            SearchTarget::Panels,
+        ]
+    }
+
+    /// The canonical `--in` token for this target (the same spelling clap
+    /// accepts on the command line).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchTarget::Titles => "titles",
+            SearchTarget::Transcripts => "transcripts",
+            SearchTarget::Notes => "notes",
+            SearchTarget::Panels => "panels",
+        }
     }
 
     /// Map a search target to the corresponding chunk source type string.
@@ -35,6 +52,12 @@ impl SearchTarget {
             SearchTarget::Panels => Some("panel_section"),
         }
     }
+}
+
+/// Re-join parsed targets into an `--in` flag value, so a suggested command
+/// can echo the active filter as the user could re-type it.
+pub fn targets_to_flag_value(targets: &[SearchTarget]) -> String {
+    targets.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(",")
 }
 
 /// Compute a source type filter for semantic search from search targets.
@@ -73,24 +96,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_search_target_parse_list() {
-        let targets = SearchTarget::parse_list("titles,notes");
-        assert_eq!(targets.len(), 2);
-        assert!(targets.contains(&SearchTarget::Titles));
-        assert!(targets.contains(&SearchTarget::Notes));
+    fn test_all_matches_the_default_target_string() {
+        // `all()` and DEFAULT_SEARCH_TARGETS must stay in lockstep so the
+        // clap default and the footer's "is this the default?" check agree.
+        assert_eq!(targets_to_flag_value(&SearchTarget::all()), DEFAULT_SEARCH_TARGETS);
     }
 
     #[test]
-    fn test_search_target_parse_all() {
-        let targets = SearchTarget::parse_list("titles,transcripts,notes,panels");
-        assert_eq!(targets.len(), 4);
-        assert!(targets.contains(&SearchTarget::Panels));
+    fn test_as_str_round_trips_through_value_enum() {
+        // Every target's `as_str` spelling is one clap accepts back.
+        for target in SearchTarget::all() {
+            let parsed = SearchTarget::from_str(target.as_str(), false).unwrap();
+            assert_eq!(parsed, target);
+        }
     }
 
     #[test]
-    fn test_search_target_parse_unknown() {
-        let targets = SearchTarget::parse_list("titles,unknown");
-        assert_eq!(targets.len(), 1);
+    fn test_targets_to_flag_value_preserves_order() {
+        let flag = targets_to_flag_value(&[SearchTarget::Notes, SearchTarget::Titles]);
+        assert_eq!(flag, "notes,titles");
     }
 
     #[test]
