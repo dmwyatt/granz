@@ -236,6 +236,12 @@ fn create_test_tables(conn: &Connection) {
             content_rowid='rowid'
         );
 
+        CREATE VIRTUAL TABLE titles_fts USING fts5(
+            title,
+            content='documents',
+            content_rowid='rowid'
+        );
+
         CREATE VIRTUAL TABLE panels_fts USING fts5(
             content_markdown,
             content='panels',
@@ -243,7 +249,7 @@ fn create_test_tables(conn: &Connection) {
         );
 
         -- Set schema version via user_version pragma (used by rusqlite_migration)
-        PRAGMA user_version = 13;
+        PRAGMA user_version = 14;
         "#,
     )
     .unwrap();
@@ -474,6 +480,7 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
     // Populate FTS indexes
     conn.execute("INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')", []).unwrap();
     conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", []).unwrap();
+    conn.execute("INSERT INTO titles_fts(titles_fts) VALUES('rebuild')", []).unwrap();
     conn.execute("INSERT INTO panels_fts(panels_fts) VALUES('rebuild')", []).unwrap();
 }
 

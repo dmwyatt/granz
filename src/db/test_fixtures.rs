@@ -441,6 +441,7 @@ pub fn build_test_db(state: &Value) -> Connection {
     conn.execute("INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')", []).unwrap();
     conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", []).unwrap();
     conn.execute("INSERT INTO panels_fts(panels_fts) VALUES('rebuild')", []).unwrap();
+    conn.execute("INSERT INTO titles_fts(titles_fts) VALUES('rebuild')", []).unwrap();
 
     conn
 }
