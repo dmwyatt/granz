@@ -270,6 +270,20 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 Enables fast text search across meeting notes (both plain and markdown formats). This is a contentless FTS table that references `documents`.
 
+### titles_fts
+
+Full-text search index for meeting titles.
+
+```sql
+CREATE VIRTUAL TABLE titles_fts USING fts5(
+    title,
+    content='documents',
+    content_rowid='rowid'
+);
+```
+
+Makes title matching word-based (implicit-AND tokens, any order) and BM25-scored, so titles rank alongside the other sources instead of pre-empting them. This is a contentless FTS table that references `documents`; `upsert_documents` rebuilds it after writing titles.
+
 ## Data Flow
 
 ```mermaid
