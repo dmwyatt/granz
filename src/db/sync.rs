@@ -168,6 +168,11 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
     stats.updated = documents.len() - stats.unchanged - stats.inserted
         - documents.iter().filter(|d| d.id.is_none()).count();
 
+    // Keep the titles FTS index in sync with the titles just written. The
+    // index is external-content over `documents`, so a rebuild reindexes every
+    // title (cheap: titles are short and few relative to transcripts).
+    conn.execute("INSERT INTO titles_fts(titles_fts) VALUES('rebuild')", [])?;
+
     Ok(stats)
 }
 
