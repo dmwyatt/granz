@@ -233,37 +233,38 @@ pub fn search_meetings(
     date_range: Option<&DateRange>,
     include_deleted: bool,
 ) -> Result<Vec<Document>> {
-    // Each enabled source contributes (doc_id, title_hit, score) rows; a
-    // document's rank is its best (lowest) bm25 score across sources.
+    // Each enabled source contributes (doc_id, score) rows, all bm25-scored
+    // through FTS5. A document's rank is its best (lowest) bm25 score across
+    // sources; titles compete on relevance like every other source.
     let mut union_parts: Vec<&str> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
+    let fts_query = sanitize_fts_query(query);
+
     if search_titles {
         union_parts.push(
-            "SELECT id AS doc_id, 1 AS title_hit, NULL AS score FROM documents WHERE title LIKE ? COLLATE NOCASE",
+            "SELECT d.id AS doc_id, bm25(titles_fts) AS score FROM titles_fts JOIN documents d ON titles_fts.rowid = d.rowid WHERE titles_fts MATCH ?",
         );
-        params.push(Box::new(format!("%{}%", query)));
+        params.push(Box::new(fts_query.clone()));
     }
-
-    let fts_query = sanitize_fts_query(query);
 
     if search_notes {
         union_parts.push(
-            "SELECT d.id AS doc_id, 0 AS title_hit, bm25(notes_fts) AS score FROM notes_fts JOIN documents d ON notes_fts.rowid = d.rowid WHERE notes_fts MATCH ?",
+            "SELECT d.id AS doc_id, bm25(notes_fts) AS score FROM notes_fts JOIN documents d ON notes_fts.rowid = d.rowid WHERE notes_fts MATCH ?",
         );
         params.push(Box::new(fts_query.clone()));
     }
 
     if search_transcripts {
         union_parts.push(
-            "SELECT tu.document_id AS doc_id, 0 AS title_hit, bm25(transcript_fts) AS score FROM transcript_fts JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid WHERE transcript_fts MATCH ?",
+            "SELECT tu.document_id AS doc_id, bm25(transcript_fts) AS score FROM transcript_fts JOIN transcript_utterances tu ON transcript_fts.rowid = tu.rowid WHERE transcript_fts MATCH ?",
         );
         params.push(Box::new(fts_query.clone()));
     }
 
     if search_panels {
         union_parts.push(
-            "SELECT p.document_id AS doc_id, 0 AS title_hit, bm25(panels_fts) AS score FROM panels_fts JOIN panels p ON panels_fts.rowid = p.rowid WHERE p.deleted_at IS NULL AND panels_fts MATCH ?",
+            "SELECT p.document_id AS doc_id, bm25(panels_fts) AS score FROM panels_fts JOIN panels p ON panels_fts.rowid = p.rowid WHERE p.deleted_at IS NULL AND panels_fts MATCH ?",
         );
         params.push(Box::new(fts_query));
     }
@@ -278,7 +279,7 @@ pub fn search_meetings(
         "WITH hits AS MATERIALIZED ({})
          SELECT d.id, d.title, d.created_at, d.updated_at, d.deleted_at, d.doc_type, d.notes_plain, d.notes_markdown, d.summary, d.people_json, d.google_calendar_event_json
          FROM documents d
-         JOIN (SELECT doc_id, MAX(title_hit) AS title_hit, MIN(score) AS best_score
+         JOIN (SELECT doc_id, MIN(score) AS best_score
                FROM hits GROUP BY doc_id) m ON d.id = m.doc_id
          WHERE 1=1",
         union_parts.join(" UNION ALL ")
@@ -289,11 +290,11 @@ pub fn search_meetings(
     }
     append_date_filter(&mut sql, &mut params, date_range, "d.created_at");
 
-    // bm25 is lower-is-better. Title matches carry no bm25 score: a title
-    // hit (the whole query as a substring of the title) outranks content
-    // matches, and within that tier title-only matches sort after scored
-    // ones. Recency breaks remaining ties.
-    sql.push_str(" ORDER BY m.title_hit DESC, m.best_score ASC NULLS LAST, d.created_at DESC");
+    // bm25 is lower-is-better, so the strongest match across sources (titles
+    // included) sorts first. bm25 values are not calibrated across FTS
+    // tables, but mixing them via MIN(score) is already how notes, transcripts
+    // and panels combine; titles join that same pool. Recency breaks ties.
+    sql.push_str(" ORDER BY m.best_score ASC, d.created_at DESC");
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -606,6 +607,52 @@ mod tests {
         assert_eq!(results[0].title.as_deref(), Some("AI Strategy Meeting"));
     }
 
+    /// Titles chosen to exercise word-based FTS matching: reordered words,
+    /// non-adjacent words across separators, and a query that is a substring
+    /// inside a longer word (which must not match under word semantics).
+    fn title_search_state() -> serde_json::Value {
+        serde_json::json!({
+            "documents": {
+                "doc-budget": {"id": "doc-budget", "title": "Budget review", "created_at": "2026-01-10T10:00:00Z"},
+                "doc-standup": {"id": "doc-standup", "title": "Daily Standup - Integrations", "created_at": "2026-01-11T10:00:00Z"},
+                "doc-quarter": {"id": "doc-quarter", "title": "Quarterly Planning", "created_at": "2026-01-12T10:00:00Z"}
+            }
+        })
+    }
+
+    #[test]
+    fn test_search_meetings_title_words_match_any_order() {
+        // Regression for #75: the old titles arm matched the whole query as
+        // one substring, so "review budget" missed a "Budget review" title.
+        let conn = build_test_db(&title_search_state());
+        let results =
+            search_meetings(&conn, "review budget", true, false, false, false, None, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id.as_deref(), Some("doc-budget"));
+    }
+
+    #[test]
+    fn test_search_meetings_title_matches_non_adjacent_words() {
+        // Words separated by other words (and punctuation) in the title must
+        // still match under implicit-AND word semantics.
+        let conn = build_test_db(&title_search_state());
+        let results =
+            search_meetings(&conn, "integrations standup", true, false, false, false, None, false)
+                .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id.as_deref(), Some("doc-standup"));
+    }
+
+    #[test]
+    fn test_search_meetings_title_ignores_substring_inside_word() {
+        // "art" is a substring of "Quarterly" but not a word token. The old
+        // LIKE '%art%' arm matched it; word-based FTS must not.
+        let conn = build_test_db(&title_search_state());
+        let results =
+            search_meetings(&conn, "art", true, false, false, false, None, false).unwrap();
+        assert!(results.is_empty());
+    }
+
     #[test]
     fn test_search_meetings_by_transcript() {
         let conn = build_test_db(&meetings_state());
@@ -657,12 +704,20 @@ mod tests {
     }
 
     #[test]
-    fn test_search_meetings_title_match_ranks_first() {
+    fn test_search_meetings_title_matches_pool_with_content() {
+        // Before #75 a title hit was forced ahead of every scored content
+        // match. Now titles go through FTS and compete on bm25, so the title
+        // match is pooled with the transcript matches rather than pre-empting
+        // them. All three documents that contain "kubernetes" are returned;
+        // their order is decided by bm25 across sources, not a title tier.
         let conn = build_test_db(&ranking_state());
         let results =
             search_meetings(&conn, "kubernetes", true, true, false, false, None, false).unwrap();
+        let ids: Vec<&str> = results.iter().filter_map(|d| d.id.as_deref()).collect();
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].id.as_deref(), Some("doc-titled"));
+        assert!(ids.contains(&"doc-titled"));
+        assert!(ids.contains(&"doc-relevant"));
+        assert!(ids.contains(&"doc-mention"));
     }
 
     #[test]
