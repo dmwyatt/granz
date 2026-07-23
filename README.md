@@ -126,6 +126,8 @@ grans sync panels --retry             # Retry previously failed panel fetches
 grans --token <TOKEN> sync
 ```
 
+On macOS, the decryption key lives in the login Keychain, so the first sync shows a Keychain access prompt ("grans wants to use your confidential information stored in 'Granola Safe Storage'"). Choose "Always Allow" to skip it on later runs, or pass `--token` to avoid reading the Keychain at all.
+
 To get the token from a machine with Granola installed:
 
 ```bash

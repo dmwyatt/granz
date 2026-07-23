@@ -33,6 +33,10 @@ self-replace = "1.5"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["color"] }
 aes-gcm = "0.10"
+aes = { version = "0.8", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+cbc = "0.1"
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
@@ -47,3 +51,6 @@ codegen-units = 4   # More parallelism (release default is 1)
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
