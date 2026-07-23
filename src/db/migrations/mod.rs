@@ -28,6 +28,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("v011_raw_json_templates_recipes_events.sql")),
         M::up(include_str!("v012_rename_is_primary_to_primary.sql")),
         M::up(include_str!("v013_api_snapshot.sql")),
+        M::up(include_str!("v014_titles_fts.sql")),
     ])
 }
 
@@ -51,7 +52,7 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         rusqlite_migration::SchemaVersion::Inside(v) => {
             // Check if current version is less than the number of migrations
             let current = v.get();
-            let total = 13; // We have 13 migrations (v001-v013)
+            let total = 14; // We have 14 migrations (v001-v014)
             current < total
         }
         rusqlite_migration::SchemaVersion::Outside(_) => false,
@@ -163,8 +164,8 @@ mod tests {
         let conn = open_and_migrate(&db_path).unwrap();
         let version = get_schema_version(&conn).unwrap();
 
-        // Should be version 13 after all migrations
-        assert_eq!(version, 13);
+        // Should be version 14 after all migrations
+        assert_eq!(version, 14);
     }
 
     #[test]
@@ -676,6 +677,66 @@ mod tests {
             )
             .unwrap();
         assert!(snapshot.is_none());
+    }
+
+    #[test]
+    fn test_titles_fts_table_searchable_on_fresh_db() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_and_migrate(&db_path).unwrap();
+
+        // A document inserted after the migration is searchable via the
+        // titles_fts index once the index reflects it.
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc1', 'Budget Review')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO titles_fts(titles_fts) VALUES('rebuild')", [])
+            .unwrap();
+
+        // Word-based, order-independent match.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM titles_fts WHERE titles_fts MATCH '\"review\" \"budget\"'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_titles_fts_backfills_preexisting_documents() {
+        // The migration must index documents that already exist, so a
+        // database synced before v014 works without a re-sync.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut conn = Connection::open(&db_path).unwrap();
+
+        let m = migrations();
+        // Migrate to just before titles_fts.
+        m.to_version(&mut conn, 13).unwrap();
+
+        // A document that predates the titles_fts index.
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc-old', 'Quarterly Budget Review')",
+            [],
+        )
+        .unwrap();
+
+        // Applying v014 must backfill the index from this pre-existing row.
+        m.to_version(&mut conn, 14).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM titles_fts WHERE titles_fts MATCH '\"budget\"'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
