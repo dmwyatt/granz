@@ -8,7 +8,7 @@ Granola API explorer with encrypted token storage.
 
 The API token is encrypted with a user-provided password (Fernet + PBKDF2)
 and stored in ~/.config/grans/api-token.enc. Each invocation prompts for
-the password via a zenity GUI dialog — completely outside Claude Code's
+the password via a tkinter GUI dialog, completely outside AI agents'
 reach, with no "remember" checkbox or session caching.
 
 Setup (one-time):
@@ -25,8 +25,9 @@ import base64
 import getpass
 import json
 import os
-import subprocess
 import sys
+import tkinter
+from tkinter import simpledialog
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -50,17 +51,20 @@ def _derive_key(password: str, salt: bytes) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
 
-def _zenity_password(title: str) -> str:
-    """Prompt for a password via zenity GUI dialog. Exits on cancel."""
-    result = subprocess.run(
-        ["zenity", "--password", "--title", title],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+def _password_prompt(title: str) -> str:
+    """Prompt for a password via a tkinter GUI dialog. Exits on cancel."""
+    root = tkinter.Tk()
+    root.withdraw()
+    # Without topmost the dialog can open buried behind the terminal.
+    root.attributes("-topmost", True)
+    try:
+        password = simpledialog.askstring(title, "Password:", show="*", parent=root)
+    finally:
+        root.destroy()
+    if password is None:
         print("Cancelled.", file=sys.stderr)
         sys.exit(1)
-    return result.stdout.strip()
+    return password
 
 
 def setup():
@@ -73,12 +77,12 @@ def setup():
             print("Aborted.")
             return
 
-    password = _zenity_password("Set password for Granola API token")
+    password = _password_prompt("Set password for Granola API token")
     if not password:
         print("Error: empty password.", file=sys.stderr)
         sys.exit(1)
 
-    confirm = _zenity_password("Confirm password")
+    confirm = _password_prompt("Confirm password")
     if password != confirm:
         print("Error: passwords do not match.", file=sys.stderr)
         sys.exit(1)
@@ -95,13 +99,14 @@ def setup():
     os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
     with open(TOKEN_PATH, "wb") as f:
         f.write(salt + encrypted)
+    # POSIX-only protection; on Windows the password encryption is the safeguard.
     os.chmod(TOKEN_PATH, 0o600)
 
     print(f"Token encrypted and saved to {TOKEN_PATH}")
 
 
 def read_token() -> str:
-    """Prompt for password via zenity, decrypt and return the token."""
+    """Prompt for the password via a GUI dialog, decrypt and return the token."""
     if not os.path.exists(TOKEN_PATH):
         print(
             f"Error: no token file at {TOKEN_PATH}. Run --setup first.",
@@ -115,7 +120,7 @@ def read_token() -> str:
     salt = data[:SALT_SIZE]
     encrypted = data[SALT_SIZE:]
 
-    password = _zenity_password("Unlock Granola API token")
+    password = _password_prompt("Unlock Granola API token")
     key = _derive_key(password, salt)
 
     try:
