@@ -55,8 +55,17 @@ def _password_prompt(title: str) -> str:
     """Prompt for a password via a tkinter GUI dialog. Exits on cancel."""
     root = tkinter.Tk()
     root.withdraw()
-    # Without topmost the dialog can open buried behind the terminal.
-    root.attributes("-topmost", True)
+
+    def raise_dialog():
+        # askstring's dialog is a transient child of the hidden root; topmost
+        # must be set on the dialog itself or it can open buried behind other
+        # windows.
+        for child in root.winfo_children():
+            if isinstance(child, tkinter.Toplevel):
+                child.attributes("-topmost", True)
+                child.focus_force()
+
+    root.after(200, raise_dialog)
     try:
         password = simpledialog.askstring(title, "Password:", show="*", parent=root)
     finally:
