@@ -76,10 +76,7 @@ impl CredentialStore {
             Self::Keychain(entry) => {
                 let json = serde_json::to_string(credentials)
                     .context("Failed to serialize credentials")?;
-                entry
-                    .set_password(&json)
-                    .context("Failed to store credentials in the keychain")?;
-                grant_prompt_free_access()
+                store_secret(entry, &json)
             }
         }
     }
@@ -146,24 +143,25 @@ fn reachable_keychain() -> Option<keyring::Entry> {
     }
 }
 
-/// Keep the item readable by the next build of grans as well as this one.
+/// Write the secret so the next build of grans can still read it.
 ///
-/// Applied on every save rather than at first login: it is idempotent, and an
-/// entry written by an earlier version still needs upgrading. Only macOS ties
-/// reads to the caller's code signature, so no other platform has anything to
-/// do here.
+/// macOS goes around `keyring` here. Only it ties reads to the caller's code
+/// signature, and the item has to carry a permissive ACL from the moment it
+/// exists for that not to matter; `keyring` offers no way to say so at
+/// creation, and attaching one afterwards is the thing
+/// [`super::keychain_acl`] exists to avoid. Reads and deletes still go through
+/// `keyring` on every platform.
 #[cfg(target_os = "macos")]
-fn grant_prompt_free_access() -> Result<()> {
-    keychain_acl::allow_any_application(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).context(
-        "Stored the credentials, but could not stop the macOS keychain from asking \
-         for a password on every read. Run `grans auth logout` then `grans auth login` \
-         to rewrite the entry.",
-    )
+fn store_secret(_entry: &keyring::Entry, json: &str) -> Result<()> {
+    keychain_acl::store_with_open_access(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, json.as_bytes())
+        .context("Failed to store credentials in the keychain")
 }
 
 #[cfg(not(target_os = "macos"))]
-fn grant_prompt_free_access() -> Result<()> {
-    Ok(())
+fn store_secret(entry: &keyring::Entry, json: &str) -> Result<()> {
+    entry
+        .set_password(json)
+        .context("Failed to store credentials in the keychain")
 }
 
 /// What the platform calls its keychain.

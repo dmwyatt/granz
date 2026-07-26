@@ -1,20 +1,35 @@
-//! Making grans's keychain item readable without a password prompt.
+//! Storing grans's session where macOS will hand it back without a prompt.
 //!
-//! macOS ties a keychain item to the *code signature* of the application that
-//! created it, not to its path. A cargo-built binary has no stable one: on
-//! Apple Silicon the linker applies an ad-hoc signature, which carries no
-//! signing identity, so the designated requirement degrades to a hash of those
-//! exact bytes. Every rebuild is a different application as far as the keychain
-//! is concerned, so the ACL written during `grans auth login` matches one build
-//! and nothing after it, and "Always Allow" only pins whichever binary happens
-//! to be running at the time.
+//! macOS decides who may read a keychain item from the *code signature* of the
+//! application that created it, not from its path. A cargo-built binary has no
+//! stable one: on Apple Silicon the linker applies an ad-hoc signature, which
+//! carries no signing identity, so the designated requirement degrades to a
+//! hash of those exact bytes. Every rebuild is a different application as far
+//! as the keychain is concerned, the ACL written during `grans auth login`
+//! matches one build and nothing after it, and "Always Allow" only ever pins
+//! whichever binary happens to be running at the time.
 //!
-//! The item is therefore given the permissive ACL that
+//! So the item is created carrying the permissive ACL that
 //! `security add-generic-password -A` writes: a trusted-application list of
 //! NULL, which macOS reads as "any application, no prompt". The refresh token
 //! stays encrypted at rest and out of readable backups, which is what the
 //! keychain buys over the `0600` fallback file, but any process running as the
-//! user can now read it without being challenged.
+//! user can read it without being challenged.
+//!
+//! # Why it creates rather than amends
+//!
+//! Attaching that ACL to an item that already exists means `ChangeACL`, and
+//! `ChangeACL` is the one authorization grans can least rely on: it is granted
+//! against the same unstable signature the ACL is being rewritten to stop
+//! depending on. Where a prompt can be drawn that costs the user a password;
+//! where one cannot, `SecKeychainItemSetAccess` does not fail, it never
+//! returns. A CI run measured that as a test binary held open for 22 minutes
+//! against a 38 second baseline.
+//!
+//! Creating the item with its access already attached needs no such
+//! authorization, so [`store_with_open_access`] deletes whatever is there and
+//! writes a new item rather than amending one. That also upgrades an entry left
+//! by an older grans, without the prompt an amend would have cost.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -28,7 +43,9 @@ use core_foundation_sys::string::CFStringRef;
 use security_framework::os::macos::access::SecAccess;
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework::os::macos::keychain_item::SecKeychainItem;
-use security_framework_sys::base::{SecAccessRef, SecKeychainItemRef};
+use security_framework_sys::base::{
+    SecAccessRef, SecKeychainAttribute, SecKeychainAttributeList, SecKeychainItemRef,
+};
 
 /// An entry in a `SecAccess`'s ACL list. Opaque; only handed back to Security.
 type SecACLRef = *const c_void;
@@ -36,6 +53,16 @@ type SecACLRef = *const c_void;
 /// `SecKeychainPromptSelector`, a bitfield of the conditions that force a
 /// prompt even for a trusted caller. Zero forces none of them.
 type SecKeychainPromptSelector = u16;
+
+/// `errSecItemNotFound`. A miss, rather than something going wrong.
+const ITEM_NOT_FOUND: OSStatus = -25300;
+
+// Four-character codes, spelled out because the `-sys` crate binds none of
+// them: 'genp' (a generic password), 'svce' (its service), 'acct' (its
+// account).
+const GENERIC_PASSWORD_CLASS: u32 = 0x6765_6E70;
+const SERVICE_ATTR: u32 = 0x7376_6365;
+const ACCOUNT_ATTR: u32 = 0x6163_6374;
 
 // Neither `security-framework` nor its `-sys` crate binds these: the former
 // declares the `SecAccess` type and nothing that builds one, and the latter
@@ -56,8 +83,6 @@ unsafe extern "C" {
         promptSelector: SecKeychainPromptSelector,
     ) -> OSStatus;
 
-    fn SecKeychainItemSetAccess(itemRef: SecKeychainItemRef, accessRef: SecAccessRef) -> OSStatus;
-
     fn SecKeychainFindGenericPassword(
         keychainOrArray: CFTypeRef,
         serviceNameLength: u32,
@@ -68,64 +93,118 @@ unsafe extern "C" {
         passwordData: *mut *mut c_void,
         itemRef: *mut SecKeychainItemRef,
     ) -> OSStatus;
+
+    fn SecKeychainItemCreateFromContent(
+        itemClass: u32,
+        attrList: *const SecKeychainAttributeList,
+        length: u32,
+        data: *const c_void,
+        keychainRef: CFTypeRef,
+        initialAccess: SecAccessRef,
+        itemRef: *mut SecKeychainItemRef,
+    ) -> OSStatus;
+
+    fn SecKeychainItemDelete(itemRef: SecKeychainItemRef) -> OSStatus;
 }
 
-/// Let every application read the item under `service`/`account` in the
-/// default keychain without a password prompt.
-pub fn allow_any_application(service: &str, account: &str) -> Result<()> {
-    set_permissive_access(None, service, account)
+/// Store `secret` under `service`/`account` so any application can read it back
+/// without a password prompt.
+///
+/// Replaces whatever is already stored there. See the module docs for why it
+/// replaces rather than amends.
+pub fn store_with_open_access(service: &str, account: &str, secret: &[u8]) -> Result<()> {
+    store(None, service, account, secret)
 }
 
 /// The same, against a specific keychain. Tests pass a throwaway one rather
 /// than touching the login keychain.
-fn set_permissive_access(
+fn store(keychain: Option<&SecKeychain>, service: &str, account: &str, secret: &[u8]) -> Result<()> {
+    if let Some(existing) = find_item(keychain, service, account)? {
+        check(
+            unsafe { SecKeychainItemDelete(existing.as_concrete_TypeRef()) },
+            "remove the keychain entry being replaced",
+        )?;
+    }
+
+    let access = permissive_access(&CFString::new(service))?;
+    create_item(keychain, service, account, secret, &access)
+}
+
+/// Write a new generic password carrying `access` from the moment it exists.
+fn create_item(
     keychain: Option<&SecKeychain>,
     service: &str,
     account: &str,
+    secret: &[u8],
+    access: &SecAccess,
 ) -> Result<()> {
-    let item = find_item(keychain, service, account)?;
-    let descriptor = CFString::new(service);
-    let access = permissive_access(&descriptor)?;
+    let mut attributes = [
+        SecKeychainAttribute {
+            tag: SERVICE_ATTR,
+            length: service.len() as u32,
+            data: service.as_ptr() as *mut c_void,
+        },
+        SecKeychainAttribute {
+            tag: ACCOUNT_ATTR,
+            length: account.len() as u32,
+            data: account.as_ptr() as *mut c_void,
+        },
+    ];
+    let list = SecKeychainAttributeList {
+        count: attributes.len() as u32,
+        attr: attributes.as_mut_ptr(),
+    };
 
     check(
         unsafe {
-            SecKeychainItemSetAccess(item.as_concrete_TypeRef(), access.as_concrete_TypeRef())
+            SecKeychainItemCreateFromContent(
+                GENERIC_PASSWORD_CLASS,
+                &list,
+                secret.len() as u32,
+                secret.as_ptr().cast(),
+                // A null keychain means the user's default one.
+                keychain.map_or(ptr::null(), |keychain| keychain.as_CFTypeRef()),
+                access.as_concrete_TypeRef(),
+                ptr::null_mut(),
+            )
         },
-        "attach a permissive ACL to the keychain item",
+        "write the keychain entry",
     )
 }
 
-/// Locate the stored item without decrypting it.
+/// Locate the stored item without decrypting it, or `None` if there is none.
 ///
 /// `security-framework` only exposes a lookup that returns the secret too, and
-/// reading it is its own authorization: on an entry still carrying the old ACL
-/// that is a second password prompt for a value this has no use for.
+/// reading the secret is its own keychain authorization, spent here on a value
+/// this has no use for.
 fn find_item(
     keychain: Option<&SecKeychain>,
     service: &str,
     account: &str,
-) -> Result<SecKeychainItem> {
+) -> Result<Option<SecKeychainItem>> {
     let mut item: SecKeychainItemRef = ptr::null_mut();
 
-    check(
-        unsafe {
-            SecKeychainFindGenericPassword(
-                // A null search list means the user's default keychains.
-                keychain.map_or(ptr::null(), |keychain| keychain.as_CFTypeRef()),
-                service.len() as u32,
-                service.as_ptr().cast(),
-                account.len() as u32,
-                account.as_ptr().cast(),
-                // Null out-params for the secret skip returning it at all.
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut item,
-            )
-        },
-        "find grans's entry in the keychain",
-    )?;
+    let status = unsafe {
+        SecKeychainFindGenericPassword(
+            // A null search list means the user's default keychains.
+            keychain.map_or(ptr::null(), |keychain| keychain.as_CFTypeRef()),
+            service.len() as u32,
+            service.as_ptr().cast(),
+            account.len() as u32,
+            account.as_ptr().cast(),
+            // Null out-params for the secret skip returning it at all.
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut item,
+        )
+    };
 
-    Ok(unsafe { SecKeychainItem::wrap_under_create_rule(item) })
+    if status == ITEM_NOT_FOUND {
+        return Ok(None);
+    }
+    check(status, "look for grans's entry in the keychain")?;
+
+    Ok(Some(unsafe { SecKeychainItem::wrap_under_create_rule(item) }))
 }
 
 /// Build an access object that challenges nobody.
@@ -221,13 +300,18 @@ mod tests {
     const SERVICE: &str = "grans-acl-test";
     const ACCOUNT: &str = "granola-session";
 
-    /// A throwaway keychain holding one secret, so the tests never touch the
-    /// login keychain.
-    fn keychain_with_secret(dir: &TempDir) -> SecKeychain {
-        let keychain = CreateOptions::new()
+    /// A throwaway keychain, so the tests never touch the login keychain.
+    fn keychain(dir: &TempDir) -> SecKeychain {
+        CreateOptions::new()
             .password("test-password")
             .create(dir.path().join("grans-test.keychain"))
-            .unwrap();
+            .unwrap()
+    }
+
+    /// A keychain holding an item written the way macOS does by default, which
+    /// pins it to whichever binary created it.
+    fn keychain_pinned_to_creator(dir: &TempDir) -> SecKeychain {
+        let keychain = keychain(dir);
         keychain
             .set_generic_password(SERVICE, ACCOUNT, b"secret")
             .unwrap();
@@ -237,7 +321,7 @@ mod tests {
     /// For each ACL on the stored item, whether it trusts a fixed list of
     /// applications rather than all of them.
     fn acls_naming_applications(keychain: &SecKeychain) -> Vec<bool> {
-        let item = find_item(Some(keychain), SERVICE, ACCOUNT).unwrap();
+        let item = find_item(Some(keychain), SERVICE, ACCOUNT).unwrap().unwrap();
 
         let mut access: SecAccessRef = ptr::null_mut();
         let status = unsafe { SecKeychainItemCopyAccess(item.as_concrete_TypeRef(), &mut access) };
@@ -265,69 +349,71 @@ mod tests {
     }
 
     #[test]
-    fn test_stored_item_starts_pinned_to_its_creator() {
-        // The control for the test below, and the bug itself: left alone,
-        // macOS pins the item to the binary that wrote it, whose ad-hoc
-        // signature changes with every rebuild.
+    fn test_default_write_is_pinned_to_its_creator() {
+        // The premise of this whole module. Left to macOS, the item is pinned
+        // to the binary that wrote it, whose ad-hoc signature changes with
+        // every rebuild.
         let dir = TempDir::new().unwrap();
-        let keychain = keychain_with_secret(&dir);
+        let keychain = keychain_pinned_to_creator(&dir);
 
         assert!(acls_naming_applications(&keychain).contains(&true));
     }
 
-    /// Rewriting an ACL blocks where no one can answer a prompt.
-    ///
-    /// Reading works headless, but `SecKeychainItemSetAccess` needs ChangeACL
-    /// on an item pinned to a binary whose code signature a CI runner cannot
-    /// match. Security escalates that to `SecurityAgent`, which has no window
-    /// server to draw on and never returns, so the test hangs rather than
-    /// failing. `cargo test` has no per-test timeout, so one of these holds the
-    /// whole binary open until the job is killed.
-    ///
-    /// Run them with `--ignored` on a Mac with a desktop session, or through
-    /// the macos-keychain-probe workflow, which times each one out.
-    const HEADLESS: &str = "writes an ACL: hangs on a headless runner, see the module docs";
-
     #[test]
-    #[ignore = "writes an ACL: hangs on a headless runner"]
-    fn test_permissive_access_trusts_every_application() {
+    fn test_stored_item_is_open_to_every_application() {
         let dir = TempDir::new().unwrap();
-        let keychain = keychain_with_secret(&dir);
+        let keychain = keychain(&dir);
 
-        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).expect(HEADLESS);
+        store(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
 
         assert!(!acls_naming_applications(&keychain).contains(&true));
     }
 
     #[test]
-    #[ignore = "writes an ACL: hangs on a headless runner"]
-    fn test_permissive_access_leaves_the_secret_readable() {
+    fn test_stored_secret_reads_back() {
         let dir = TempDir::new().unwrap();
-        let keychain = keychain_with_secret(&dir);
+        let keychain = keychain(&dir);
 
-        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).expect(HEADLESS);
+        store(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
 
         let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
         assert_eq!(&*password, b"secret");
     }
 
-    /// Which of the two writing calls blocks.
-    ///
-    /// This one stops before `SecKeychainItemSetAccess`: it builds the access
-    /// object and rewrites its ACLs in memory, touching no stored item. If it
-    /// passes where the two above hang, the block is attaching the access, not
-    /// composing it.
     #[test]
-    #[ignore = "probe: splits SecACLSetContents from SecKeychainItemSetAccess"]
-    fn probe_building_permissive_access_does_not_block() {
-        permissive_access(&CFString::new(SERVICE)).unwrap();
+    fn test_store_replaces_an_earlier_value() {
+        let dir = TempDir::new().unwrap();
+        let keychain = keychain(&dir);
+
+        store(Some(&keychain), SERVICE, ACCOUNT, b"first").unwrap();
+        store(Some(&keychain), SERVICE, ACCOUNT, b"second").unwrap();
+
+        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
+        assert_eq!(&*password, b"second");
     }
 
     #[test]
-    fn test_missing_item_is_an_error() {
+    fn test_store_opens_up_an_entry_left_pinned_by_an_older_grans() {
+        // The upgrade path. Amending that item's ACL would need ChangeACL
+        // against a signature that has since changed; replacing it does not.
         let dir = TempDir::new().unwrap();
-        let keychain = keychain_with_secret(&dir);
+        let keychain = keychain_pinned_to_creator(&dir);
+        assert!(acls_naming_applications(&keychain).contains(&true));
 
-        assert!(set_permissive_access(Some(&keychain), SERVICE, "nobody").is_err());
+        store(Some(&keychain), SERVICE, ACCOUNT, b"rotated").unwrap();
+
+        assert!(!acls_naming_applications(&keychain).contains(&true));
+        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
+        assert_eq!(&*password, b"rotated");
+    }
+
+    #[test]
+    fn test_missing_item_is_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        let keychain = keychain(&dir);
+
+        assert!(find_item(Some(&keychain), SERVICE, "nobody")
+            .unwrap()
+            .is_none());
     }
 }

@@ -190,8 +190,10 @@ being challenged, the same posture `gh` and `aws` take. What the keychain still
 gives you over the `auth.toml` fallback is encryption at rest and a token that
 stays unreadable in backups and disk images.
 
-An item written by a grans older than this change keeps its original ACL until
-the next save rewrites it, so expect one last password prompt.
+grans creates the item already carrying that marking rather than applying it
+afterwards, because changing an existing item's access control is itself gated
+on the signature that keeps changing. Upgrading an entry left by an older grans
+therefore replaces it rather than amending it, and costs no prompt either.
 
 ### Reading Granola's local token
 
