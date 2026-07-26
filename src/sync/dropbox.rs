@@ -3,9 +3,11 @@
 //! Implements upload, download, and metadata operations using the Dropbox HTTP API.
 //! Files under 150 MB use single-request uploads; larger files use chunked upload sessions.
 
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::Instant;
 
 use super::transfer::{self, UPLOAD_TIMEOUT};
 use super::{SyncError, SyncResult};
@@ -88,12 +90,24 @@ impl DropboxClient {
     /// Files over 150 MB are automatically uploaded using chunked upload sessions.
     pub fn upload(&self, local_path: &Path, dropbox_path: &str) -> SyncResult<FileMetadata> {
         let file_size = std::fs::metadata(local_path)?.len();
+        let start = Instant::now();
 
-        if file_size <= UPLOAD_SINGLE_LIMIT {
+        let result = if file_size <= UPLOAD_SINGLE_LIMIT {
+            debug!("upload {} ({} bytes, single request)", dropbox_path, file_size);
             self.upload_single(local_path, dropbox_path)
         } else {
+            debug!("upload {} ({} bytes, chunked session)", dropbox_path, file_size);
             self.upload_chunked(local_path, dropbox_path, file_size)
+        };
+
+        if result.is_ok() {
+            debug!(
+                "  upload complete: {}",
+                transfer::describe_throughput(file_size, start.elapsed())
+            );
         }
+
+        result
     }
 
     /// Upload a file in a single request (for files <= 150 MB).
@@ -332,22 +346,61 @@ impl DropboxClient {
             path: dropbox_path.to_string(),
         })?;
 
+        debug!("POST {} (download {})", DOWNLOAD_URL, dropbox_path);
+        let start = Instant::now();
+
         let mut response = self
             .http
             .post(DOWNLOAD_URL)
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Dropbox-API-Arg", arg_json)
             .send()
-            .map_err(|e| transfer::transport_error(format!("download of {}", dropbox_path), e))?;
+            .map_err(|e| {
+                debug!("  network error after {:?}: {}", start.elapsed(), e);
+                transfer::transport_error(format!("download of {}", dropbox_path), e)
+            })?;
 
         let status = response.status();
+        debug!("  response: {} in {:?}", status, start.elapsed());
+
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
             return Err(self.parse_error(status, &body));
         }
 
-        transfer::stream_with_progress(&mut response, writer, on_progress)
-            .map_err(|e| transfer::stream_error(format!("download of {}", dropbox_path), e))
+        // Mirror the running count so a failed transfer can still report how far
+        // it got, which is what distinguishes a mid-transfer drop from a stall
+        // that never delivered anything.
+        let body_start = Instant::now();
+        let mut transferred = 0u64;
+        let result = {
+            let mut track = |bytes: u64| {
+                transferred = bytes;
+                on_progress(bytes);
+            };
+            transfer::stream_with_progress(&mut response, writer, &mut track)
+        };
+
+        let elapsed = body_start.elapsed();
+        match result {
+            Ok(written) => {
+                debug!(
+                    "  body complete: {}",
+                    transfer::describe_throughput(written, elapsed)
+                );
+                Ok(written)
+            }
+            Err(e) => {
+                debug!(
+                    "  body failed after {}",
+                    transfer::describe_throughput(transferred, elapsed)
+                );
+                Err(transfer::stream_error(
+                    format!("download of {}", dropbox_path),
+                    e,
+                ))
+            }
+        }
     }
 
     /// Get metadata for a file on Dropbox.
@@ -363,6 +416,9 @@ impl DropboxClient {
             path: dropbox_path.to_string(),
         };
 
+        debug!("POST {} (metadata for {})", METADATA_URL, dropbox_path);
+        let start = Instant::now();
+
         let response = self
             .http
             .post(METADATA_URL)
@@ -371,15 +427,18 @@ impl DropboxClient {
             .json(&arg)
             .send()
             .map_err(|e| {
+                debug!("  network error after {:?}: {}", start.elapsed(), e);
                 transfer::transport_error(format!("metadata lookup for {}", dropbox_path), e)
             })?;
 
         let status = response.status();
+        debug!("  response: {} in {:?}", status, start.elapsed());
         let body = response.text().unwrap_or_default();
 
         if status.as_u16() == 409 {
             // Check if it's a "not found" error
             if body.contains("not_found") {
+                debug!("  {} does not exist on Dropbox", dropbox_path);
                 return Ok(None);
             }
         }

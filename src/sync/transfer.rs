@@ -110,6 +110,21 @@ pub fn stream_error(operation: impl Into<String>, err: io::Error) -> SyncError {
     }
 }
 
+/// Describe a completed transfer, including the throughput it achieved.
+///
+/// Throughput is the number that separates "the network is slow" from "grans is
+/// stuck", so it is the first thing worth seeing under `--verbose`.
+pub fn describe_throughput(bytes: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    let mib = bytes as f64 / 1_048_576.0;
+
+    if secs <= 0.0 {
+        return format!("{:.2} MB in {:?}", mib, elapsed);
+    }
+
+    format!("{:.2} MB in {:?} ({:.2} MB/s)", mib, elapsed, mib / secs)
+}
+
 /// Fail when a transfer delivered a different number of bytes than advertised.
 ///
 /// A download cut short still produces a readable file, so without this check a
@@ -323,6 +338,22 @@ mod tests {
         let err = response.bytes().expect_err("buffering should time out");
 
         assert!(err.is_timeout(), "expected a timeout, got: {}", err);
+    }
+
+    #[test]
+    fn describe_throughput_reports_rate() {
+        let text = describe_throughput(10 * 1_048_576, Duration::from_secs(5));
+
+        assert!(text.contains("10.00 MB"), "{}", text);
+        assert!(text.contains("2.00 MB/s"), "{}", text);
+    }
+
+    #[test]
+    fn describe_throughput_survives_a_zero_duration() {
+        let text = describe_throughput(1_048_576, Duration::ZERO);
+
+        assert!(text.contains("1.00 MB"), "{}", text);
+        assert!(!text.contains("inf"), "must not divide by zero: {}", text);
     }
 
     #[test]
