@@ -36,6 +36,11 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
+    # A test that blocks rather than fails would otherwise run to the 360
+    # minute default, and macOS minutes bill at ten times the ubuntu rate. The
+    # slowest healthy leg is Windows at under two minutes, so anything past
+    # this is hung, not slow.
+    timeout-minutes: 15
     strategy:
       # Each leg is here to report on its own platform, so one failing leg
       # must not cancel the others.
