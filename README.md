@@ -42,7 +42,7 @@ grans [OPTIONS] <COMMAND>
 | Flag | Description |
 |------|-------------|
 | `--db <path>` | Use a specific database file instead of the default |
-| `--token <token>` | Use a specific API token instead of reading from Granola's config |
+| `--token <token>` | Use a specific API token (also read from `GRANS_TOKEN`) |
 | `--json` | Output as JSON |
 | `--no-color` | Disable colored output (human-readable format without ANSI codes) |
 | `--utc` | Display timestamps in UTC instead of local time |
@@ -82,6 +82,11 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `browse templates` - List/show panel templates
 - `browse recipes` - List/show recipes
 
+**Auth Commands** (Granola sign-in):
+- `auth login` - Sign in to Granola and store credentials for grans
+- `auth status` - Show whether grans has its own session, and its expiry
+- `auth logout` - Remove the stored credentials
+
 **Admin Commands** (maintenance):
 - `admin db` - Database management (clear, info, list)
 - `admin token` - Print the current Granola API token
@@ -120,19 +125,60 @@ grans sync panels --limit 10          # Fetch panels for up to 10 documents
 grans sync panels --retry             # Retry previously failed panel fetches
 ```
 
-**Note:** Sync requires a Granola auth token. By default, it reads the token from Granola's local config, transparently decrypting the `supabase.json.enc` store that recent Granola versions use (falling back to the legacy plaintext `supabase.json`). You can also provide a token explicitly with `--token`:
+**Note:** Sync requires a Granola auth token. grans looks for one in this order:
+
+1. `--token <TOKEN>`, or the `GRANS_TOKEN` environment variable
+2. grans's own stored credentials, from `grans auth login`
+3. The token Granola's desktop app stored locally
+
+### Signing in
 
 ```bash
-grans --token <TOKEN> sync
+grans auth login              # Sign in and store credentials for grans
+grans auth login --provider microsoft
+grans auth status             # Show whether grans has a session, and its expiry
+grans auth logout             # Remove the stored credentials
 ```
 
-On macOS, the decryption key lives in the login Keychain, so the first sync shows a Keychain access prompt ("grans wants to use your confidential information stored in 'Granola Safe Storage'"). Choose "Always Allow" to skip it on later runs, or pass `--token` to avoid reading the Keychain at all.
+`grans auth login` opens your browser to Granola's login. When it finishes,
+the browser offers to open the Granola app. **Cancel that dialog** and copy the
+`granola://login-complete?...` URL instead, then paste it back into grans. The
+authorization code is tied to grans's login attempt, so letting Granola open
+the link consumes the code and the sign-in fails.
 
-To get the token from a machine with Granola installed:
+This creates a session on your Granola account, separate from the desktop
+app's. It appears in Granola's session list and you can revoke it there.
+`grans auth logout` only removes the local copy.
+
+Once signed in, grans refreshes its own access token and does not need Granola
+running, or installed.
+
+### Reading Granola's local token
+
+Without `grans auth login`, grans falls back to the token Granola's desktop app
+stored, decrypting the `supabase.json.enc` store that recent versions use
+(falling back to the legacy plaintext `supabase.json`).
+
+**This no longer works on current macOS builds.** Granola moved its
+data-encryption key into the macOS data-protection keychain, gated on Granola's
+own code signature, so no other program can read it. Use `grans auth login`
+instead. The fallback still works on Windows.
+
+To print whichever token grans resolves:
 
 ```bash
 grans admin token             # Print to stdout
 grans admin token --clipboard # Copy to clipboard without printing
+```
+
+### If login reports an out-of-date client
+
+grans identifies itself to Granola with a desktop client version, which Granola
+rejects if it falls below their minimum. Override it without waiting for a
+grans release:
+
+```bash
+export GRANS_GRANOLA_VERSION=7.441.6   # your installed Granola version
 ```
 
 ### Search and Grep
