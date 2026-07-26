@@ -32,10 +32,47 @@ jobs:
               - '.github/workflows/ci.yml'
 
   test:
-    name: Tests
+    name: Tests (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Each leg is here to report on its own platform, so one failing leg
+      # must not cancel the others.
+      fail-fast: false
+      matrix:
+        # `scope` is what each platform is here to prove.
+        #
+        # Every platform-gated line in this repo sits in src/ -- the macOS
+        # keychain path and local-store cutoff in api/auth.rs, the Windows
+        # os_crypt/DPAPI path in api/token_store.rs, the cfg(unix) branches in
+        # api/credential_store.rs -- so its tests are all unit tests in the bin
+        # target, and `--bins` compiles and runs every one of them. Nothing in
+        # tests/*.rs is platform-gated at all.
+        #
+        # Those integration suites cost 225s on the Windows leg against 16s on
+        # ubuntu, because each of their 75 tests spawns `grans.exe` and a spawn
+        # costs ~2s on that runner. Paying it three times over on every push
+        # bought no platform coverage, so ubuntu carries them for the PR and
+        # platform-tests.yml runs them everywhere once the branch is merged.
+        include:
+          - os: ubuntu-latest
+            scope: ""
+          - os: macos-latest
+            scope: "--bins"
+          - os: windows-latest
+            scope: "--bins"
+    env:
+      # Full debuginfo writes a 194 MB PDB beside the binary and leaves a 2.4 GB
+      # target/. Line tables cut those to 103 MB and 1.7 GB: less to link, and
+      # far less for the cache step to pack and upload. Measured on Windows,
+      # where the .exe itself barely moves (52 -> 50 MB) because MSVC keeps
+      # debuginfo in the PDB rather than the image.
+      #
+      # The `file:line` a CI failure report is read for survives, because the
+      # location in a panic message comes from the panic site, not debuginfo.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -44,10 +81,25 @@ jobs:
         with:
           toolchain: stable
 
+      # A run can only restore caches from its own ref or from the default
+      # branch, and this workflow is pull_request-only, so it never ran on main
+      # and left no cache for a new PR to find. Every first push to a branch
+      # paid a cold compile: 2m54s on Windows against the 36s it takes warm.
+      #
+      # `shared-key` replaces the per-job component of the key, so the
+      # post-merge platform-tests.yml run on main seeds the cache these legs
+      # restore. Its full-suite build is a superset of what `--bins` needs here.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: grans-tests
 
+      # Without --no-fail-fast, cargo stops after the first test binary that
+      # fails. On the ubuntu leg that means one broken unit test in src/ hides
+      # all 75 integration tests in tests/*.rs, and the red leg reports nothing
+      # about them. A failing run costs more wall clock this way; it buys a
+      # complete failure list instead of another round trip to find the rest.
       - name: Run tests
-        run: cargo test
+        run: cargo test --no-fail-fast ${{ matrix.scope }}
 
   code-review:
     name: Code Review
@@ -201,13 +253,22 @@ jobs:
             Use `gh pr comment` only if you need a top-level summary.
             Only post GitHub comments — don't submit review text as messages.
 
+  # The one check name branch protection can require: it is stable across
+  # changes to the matrix, and `needs.test.result` aggregates every leg.
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
     needs: [test]
     if: always()
     steps:
-      - run: |
-          if [ "${{ needs.test.result }}" = "failure" ]; then
-            exit 1
-          fi
+      - name: Report aggregate test result
+        run: |
+          result="${{ needs.test.result }}"
+          # `skipped` is a non-Rust PR the paths filter excluded. Anything
+          # other than that or a clean pass has to hold the merge, cancelled
+          # runs included -- this job is the gate, so it cannot wave through
+          # a result it never saw.
+          case "$result" in
+            success | skipped) ;;
+            *) echo "Tests: $result"; exit 1 ;;
+          esac

@@ -134,10 +134,19 @@ mod tests {
         let _ = clipboard_command();
     }
 
+    /// A command on PATH on every host of this platform, so `command_exists`
+    /// has something it is obliged to say yes to.
+    ///
+    /// `ls` is not that command on Windows: it is a PowerShell alias and a Git
+    /// Bash binary, neither of which `where.exe` resolves.
+    #[cfg(target_os = "windows")]
+    const KNOWN_COMMAND: &str = "cmd";
+    #[cfg(not(target_os = "windows"))]
+    const KNOWN_COMMAND: &str = "ls";
+
     #[test]
     fn test_command_exists_known() {
-        // `which` itself should always exist on unix
-        assert!(command_exists("ls"));
+        assert!(command_exists(KNOWN_COMMAND));
     }
 
     #[test]
