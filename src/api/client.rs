@@ -19,7 +19,6 @@ use crate::models::{
 const API_V1_URL: &str = "https://api.granola.ai/v1";
 const API_V2_URL: &str = "https://api.granola.ai/v2";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const CLIENT_VERSION: &str = "6.518.0";
 
 /// Safely slice a string at UTF-8 character boundaries.
 /// Returns a substring from `start` to `end` byte positions, adjusted to valid char boundaries.
@@ -61,6 +60,7 @@ pub enum ApiError {
 
 pub struct ApiClient {
     token: String,
+    client_version: String,
     client: reqwest::blocking::Client,
 }
 
@@ -71,7 +71,11 @@ impl ApiClient {
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
-        Ok(Self { token, client })
+        Ok(Self {
+            token,
+            client_version: super::identity::client_version(),
+            client,
+        })
     }
 
     /// Internal helper to make a POST request to the v1 API
@@ -110,7 +114,7 @@ impl ApiClient {
             .post(url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
-            .header("X-Client-Version", CLIENT_VERSION)
+            .header("X-Client-Version", &self.client_version)
             .json(body)
             .send()
             .map_err(|e| {
@@ -211,7 +215,7 @@ impl ApiClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
-            .header("X-Client-Version", CLIENT_VERSION)
+            .header("X-Client-Version", &self.client_version)
             .json(&request_body)
             .send()
             .map_err(|e| {
