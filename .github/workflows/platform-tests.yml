@@ -64,3 +64,53 @@ jobs:
 
       - name: Run tests
         run: cargo test --no-fail-fast
+
+  # These runs sit off the critical path: nothing blocks on them and no PR shows
+  # their result, so the only signal a failure otherwise gives is an email to
+  # whoever happened to trigger the run. That is indistinguishable from silence,
+  # and for the weekly cron it is worse, since GitHub attributes those runs to
+  # the repository rather than to an author. So file the failure where the work
+  # is actually tracked.
+  #
+  # Skipped on pull_request: a change to this workflow already shows its own red
+  # X on the PR that made it, and filing an issue for that would be noise.
+  report-failure:
+    name: Report failure
+    needs: full-suite
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: File or update the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          body="The full suite failed on \`${GITHUB_REF_NAME}\` at \`${SHA:0:8}\` (\`${TRIGGER}\`).
+
+          ${RUN_URL}
+
+          ci.yml runs the integration suites on ubuntu only, so a failure here
+          that the PR did not catch is most likely macOS- or Windows-specific."
+
+          # One open issue per outage, not one per run: a cron that fails every
+          # Monday should grow a comment thread rather than a pile of duplicates.
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --label 'ci: platform-tests' --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "Commented on existing issue #${existing}"
+          else
+            gh issue create --repo "$REPO" \
+              --title "Platform tests are failing on ${GITHUB_REF_NAME}" \
+              --label 'ci: platform-tests' --label 'type: bug' --label 'status: triage' \
+              --body "$body"
+          fi
