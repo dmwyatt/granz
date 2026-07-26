@@ -38,6 +38,11 @@ pub struct FileMetadata {
     pub server_modified: String,
     #[serde(rename = ".tag")]
     pub tag: Option<String>,
+    /// Dropbox's hash of the stored file, for verifying a download.
+    ///
+    /// Optional so that a response without it still deserializes; callers that
+    /// require verification reject its absence themselves.
+    pub content_hash: Option<String>,
 }
 
 /// Error response from Dropbox API.

@@ -125,6 +125,22 @@ pub fn describe_throughput(bytes: u64, elapsed: Duration) -> String {
     format!("{:.2} MB in {:?} ({:.2} MB/s)", mib, elapsed, mib / secs)
 }
 
+/// Fail when the bytes received do not match the hash Dropbox holds for the file.
+///
+/// A byte count only proves the transfer was not cut short; this proves the
+/// content is the file Dropbox has.
+pub fn verify_content_hash(actual: &str, expected: &str, what: &str) -> SyncResult<()> {
+    if actual.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+
+    Err(SyncError::ContentMismatch {
+        what: what.to_string(),
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+    })
+}
+
 /// Fail when a transfer delivered a different number of bytes than advertised.
 ///
 /// A download cut short still produces a readable file, so without this check a
@@ -354,6 +370,30 @@ mod tests {
 
         assert!(text.contains("1.00 MB"), "{}", text);
         assert!(!text.contains("inf"), "must not divide by zero: {}", text);
+    }
+
+    #[test]
+    fn verify_content_hash_accepts_a_match() {
+        assert!(verify_content_hash("abc123", "abc123", "database").is_ok());
+    }
+
+    /// Dropbox documents the hash as hex; casing should not decide the outcome.
+    #[test]
+    fn verify_content_hash_ignores_case() {
+        assert!(verify_content_hash("ABC123", "abc123", "database").is_ok());
+    }
+
+    #[test]
+    fn verify_content_hash_rejects_a_mismatch() {
+        let err = verify_content_hash("aaaa", "bbbb", "database").unwrap_err();
+        let msg = err.to_string();
+
+        assert!(msg.contains("aaaa") && msg.contains("bbbb"), "{}", msg);
+        assert!(
+            msg.contains("left untouched"),
+            "should say the local file is safe: {}",
+            msg
+        );
     }
 
     #[test]

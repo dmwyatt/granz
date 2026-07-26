@@ -4,7 +4,7 @@ use std::io::{self, BufWriter, IsTerminal, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use chrono::FixedOffset;
@@ -18,7 +18,10 @@ use crate::pkce::PkceChallenge;
 use crate::sync::oauth::{
     build_auth_url, exchange_code, refresh_access_token, PKCE_ENTROPY_BYTES,
 };
-use crate::sync::transfer::verify_transfer_size;
+use crate::db::integrity::check_pulled_database;
+use crate::output::progress::create_spinner;
+use crate::sync::content_hash::HashingWriter;
+use crate::sync::transfer::{verify_content_hash, verify_transfer_size};
 use crate::sync::SyncError;
 
 /// Remote paths on Dropbox (within app folder)
@@ -258,9 +261,28 @@ fn pull_file(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Download into a temp file so a failed transfer never replaces a good database.
+    // Verification needs the hash before the transfer starts; refusing early
+    // beats discovering it after moving hundreds of megabytes.
+    let expected_hash = remote
+        .content_hash
+        .as_deref()
+        .ok_or_else(|| SyncError::MissingContentHash {
+            path: remote_path.to_string(),
+        })?;
+
+    // Download into a temp file so nothing replaces a good database until every
+    // check has passed.
     let temp_path = local_path.with_extension("db.tmp");
-    let downloaded = download_to_temp(client, remote_path, &temp_path, remote.size, name);
+    let downloaded = download_and_verify(
+        client,
+        remote_path,
+        &temp_path,
+        &Expected {
+            size: remote.size,
+            hash: expected_hash,
+            name,
+        },
+    );
 
     match downloaded {
         Ok(()) => {
@@ -275,25 +297,69 @@ fn pull_file(
     }
 }
 
-/// Stream a remote file to `temp_path`, showing a progress bar, and verify its size.
-fn download_to_temp(
+/// What a download has to match before it is allowed to replace the database.
+struct Expected<'a> {
+    size: u64,
+    hash: &'a str,
+    name: &'a str,
+}
+
+/// Stream a remote file to `temp_path` and prove it is safe to install.
+///
+/// Checks run cheapest first, so a failure costs as little as possible: the byte
+/// count and content hash both come free with the transfer, while the integrity
+/// check has to read the file back.
+fn download_and_verify(
+    client: &DropboxClient,
+    remote_path: &str,
+    temp_path: &Path,
+    expected: &Expected<'_>,
+) -> Result<()> {
+    let (written, actual_hash) = stream_to_file(client, remote_path, temp_path, expected.size)?;
+
+    verify_transfer_size(written, expected.size, expected.name)?;
+    verify_content_hash(&actual_hash, expected.hash, expected.name)?;
+
+    let spinner = create_spinner(&format!("Checking {} integrity...", expected.name));
+    let result = check_pulled_database(temp_path);
+    spinner.finish_and_clear();
+
+    result.with_context(|| {
+        format!(
+            "the {} downloaded from Dropbox failed its integrity check; \
+             the local file was left untouched",
+            expected.name
+        )
+    })
+}
+
+/// Write the download to disk, hashing as it streams, and flush it to the device.
+///
+/// Returns the byte count and the Dropbox content hash of what was written.
+fn stream_to_file(
     client: &DropboxClient,
     remote_path: &str,
     temp_path: &Path,
     expected_size: u64,
-    name: &str,
-) -> Result<()> {
+) -> Result<(u64, String)> {
     let progress = DownloadProgress::new(expected_size);
 
-    let mut file = BufWriter::new(std::fs::File::create(temp_path)?);
+    let file = std::fs::File::create(temp_path)?;
+    let mut writer = HashingWriter::new(BufWriter::new(file));
+
     let written =
-        client.download_to_writer(remote_path, &mut file, &mut |bytes| progress.set(bytes))?;
-    file.flush()?;
-    drop(file);
+        client.download_to_writer(remote_path, &mut writer, &mut |bytes| progress.set(bytes))?;
 
-    verify_transfer_size(written, expected_size, name)?;
+    let (buffered, actual_hash) = writer.finish();
+    let file = buffered
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("flushing the download to disk: {}", e))?;
 
-    Ok(())
+    // Without this the rename can publish a file whose contents never reached
+    // the device, leaving a corrupt database after a crash.
+    file.sync_all()?;
+
+    Ok((written, actual_hash))
 }
 
 /// Byte-count progress bar, shown only when stderr is a terminal.
