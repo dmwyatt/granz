@@ -99,13 +99,27 @@ pub fn build_auth_url(challenge: &str, provider: Provider) -> (String, String) {
     (url.into(), sign_in_click_id)
 }
 
-/// Extract the authorization code from what the user pasted back.
+/// What the login callback hands back.
+///
+/// Beyond the code, the callback restates the terms the login ran under.
+/// Echoing those back at the exchange keeps grans consistent with what
+/// Granola's own client sends, rather than with what grans guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Callback {
+    pub code: String,
+    pub platform: Option<String>,
+    pub is_dev: Option<bool>,
+    pub sso: Option<bool>,
+    pub sign_in_click_id: Option<String>,
+}
+
+/// Read the callback the user pasted back.
 ///
 /// The login hands the same code to two URLs: the `app-redirect` page the
 /// browser shows, and the `granola://login-complete` deep link it triggers.
 /// Either is a valid thing to copy, as is a bare code, so this takes the
-/// `code` parameter from any URL rather than insisting on one scheme.
-pub fn parse_callback_code(pasted: &str) -> Result<String> {
+/// parameters from any URL rather than insisting on one scheme.
+pub fn parse_callback(pasted: &str) -> Result<Callback> {
     let pasted = pasted.trim();
     if pasted.is_empty() {
         bail!("No authorization code provided");
@@ -115,23 +129,36 @@ pub fn parse_callback_code(pasted: &str) -> Result<String> {
         if pasted.split_whitespace().count() > 1 {
             bail!("Expected a single authorization code or a callback URL, got text with spaces");
         }
-        return Ok(pasted.to_string());
+        return Ok(Callback {
+            code: pasted.to_string(),
+            ..Callback::default()
+        });
     }
 
     let url = Url::parse(pasted).context("Could not parse the pasted callback URL")?;
+    let parameter = |name: &str| {
+        url.query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .filter(|value| !value.is_empty())
+    };
 
-    url.query_pairs()
-        .find(|(key, _)| key == "code")
-        .map(|(_, value)| value.into_owned())
-        .filter(|code| !code.is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "That URL has no 'code' parameter.\n\
-                 Copy the URL your browser lands on after signing in; it looks like\n\
-                 {}?code=...",
-                REDIRECT_PAGE
-            )
-        })
+    let code = parameter("code").ok_or_else(|| {
+        anyhow!(
+            "That URL has no 'code' parameter.\n\
+             Copy the URL your browser lands on after signing in; it looks like\n\
+             {}?code=...",
+            REDIRECT_PAGE
+        )
+    })?;
+
+    Ok(Callback {
+        code,
+        platform: parameter("platform"),
+        is_dev: parameter("isDev").and_then(|value| value.parse().ok()),
+        sso: parameter("sso").and_then(|value| value.parse().ok()),
+        sign_in_click_id: parameter("signInClickId"),
+    })
 }
 
 /// Check that Granola will accept our reported client version before sending
@@ -176,13 +203,20 @@ pub fn check_client_version_accepted(auth_url: &str) -> Result<()> {
 /// Exchange an authorization code for tokens.
 ///
 /// Unauthenticated, which is what makes bootstrapping a session possible.
-pub fn exchange_code(code: &str, verifier: &str, sign_in_click_id: &str) -> Result<TokenSet> {
+/// `started_with` is the click id grans sent when it built the auth URL, used
+/// only when the callback did not restate it.
+pub fn exchange_code(
+    callback: &Callback,
+    verifier: &str,
+    started_with: &str,
+) -> Result<TokenSet> {
     let body = serde_json::json!({
-        "code": code,
+        "code": callback.code,
         "codeVerifier": verifier,
-        "platform": identity::platform(),
-        "isDev": false,
-        "signInClickId": sign_in_click_id,
+        "platform": callback.platform.clone().unwrap_or_else(|| identity::platform().to_string()),
+        "isDev": callback.is_dev.unwrap_or(false),
+        "sso": callback.sso.unwrap_or(false),
+        "signInClickId": callback.sign_in_click_id.as_deref().unwrap_or(started_with),
     });
 
     let response = post_json(AUTH_COMPLETE_URL, &body, None)
@@ -242,23 +276,86 @@ fn post_json(
     Ok(text)
 }
 
+/// How deep to look for the token object, and to describe a response.
+const MAX_JSON_DEPTH: usize = 5;
+
 /// Pull the token set out of an auth response.
 ///
-/// Granola nests these under `workos_tokens`, which it sometimes writes as a
-/// JSON-encoded string rather than an object, and some responses carry the
-/// fields at the top level instead.
+/// Granola's endpoints do not agree on where the tokens sit: some nest them
+/// under `workos_tokens`, which is sometimes JSON-encoded text rather than an
+/// object, and some return them at the top level. Rather than encode one path
+/// per endpoint, find the object carrying the pair.
 fn extract_token_set(body: &str) -> Result<TokenSet> {
     let value: serde_json::Value =
         serde_json::from_str(body).context("Response was not valid JSON")?;
 
-    let tokens = match value.get("workos_tokens") {
-        Some(serde_json::Value::String(encoded)) => serde_json::from_str(encoded)
-            .context("workos_tokens was a string but not valid JSON")?,
-        Some(nested) => nested.clone(),
-        None => value,
-    };
+    let tokens = locate_tokens(&value, MAX_JSON_DEPTH).ok_or_else(|| {
+        anyhow!(
+            "No access_token/refresh_token pair in the response. Its shape was:\n{}",
+            describe_json_shape(&value, MAX_JSON_DEPTH)
+        )
+    })?;
 
-    serde_json::from_value(tokens).context("Response did not match the expected token shape")
+    serde_json::from_value(tokens.clone()).with_context(|| {
+        format!(
+            "Token object did not match the expected fields. Its shape was:\n{}",
+            describe_json_shape(&tokens, MAX_JSON_DEPTH)
+        )
+    })
+}
+
+/// Find the object holding both tokens, descending into JSON-encoded strings.
+///
+/// Keys naming WorkOS are searched first: a response may carry the identity
+/// provider's tokens alongside Granola's, and those are not interchangeable.
+fn locate_tokens(value: &serde_json::Value, depth: usize) -> Option<serde_json::Value> {
+    if let Some(decoded) = decode_json_string(value) {
+        return locate_tokens(&decoded, depth.checked_sub(1)?);
+    }
+
+    let object = value.as_object()?;
+    if object.contains_key("access_token") && object.contains_key("refresh_token") {
+        return Some(value.clone());
+    }
+
+    let depth = depth.checked_sub(1)?;
+    let mut keys: Vec<&String> = object.keys().collect();
+    keys.sort_by_key(|key| !key.to_lowercase().contains("workos"));
+
+    keys.into_iter()
+        .find_map(|key| locate_tokens(&object[key], depth))
+}
+
+/// Parse a string value that itself contains JSON, as Granola writes
+/// `workos_tokens` in its own token store.
+fn decode_json_string(value: &serde_json::Value) -> Option<serde_json::Value> {
+    serde_json::from_str(value.as_str()?).ok()
+}
+
+/// Render a value's keys and types, never its values.
+///
+/// Auth responses carry token material, so a shape is the most that can be
+/// safely put in an error message.
+fn describe_json_shape(value: &serde_json::Value, depth: usize) -> String {
+    match value {
+        serde_json::Value::Object(map) if depth == 0 => format!("{{ {} keys }}", map.len()),
+        serde_json::Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(key, nested)| format!("{}: {}", key, describe_json_shape(nested, depth - 1)))
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+        serde_json::Value::Array(items) => match items.first() {
+            Some(_) if depth == 0 => format!("[{} items]", items.len()),
+            Some(first) => format!("[{}; {}]", describe_json_shape(first, depth - 1), items.len()),
+            None => "[]".to_string(),
+        },
+        serde_json::Value::String(_) => "string".to_string(),
+        serde_json::Value::Number(_) => "number".to_string(),
+        serde_json::Value::Bool(_) => "bool".to_string(),
+        serde_json::Value::Null => "null".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -298,52 +395,70 @@ mod tests {
     #[test]
     fn test_parse_app_redirect_url() {
         // What the browser actually lands on, and what the address bar shows.
-        let pasted = "https://www.granola.ai/app-redirect?code=01KYE1X5RCRJE7VSWQ452PCK3C\
-                      &isDev=false&platform=windows&sso=false";
-
-        assert_eq!(
-            parse_callback_code(pasted).unwrap(),
-            "01KYE1X5RCRJE7VSWQ452PCK3C"
+        let pasted = concat!(
+            "https://www.granola.ai/app-redirect?code=01KYE1X5RCRJE7VSWQ452PCK3C",
+            "&isDev=false&platform=windows&sso=false"
         );
+
+        let callback = parse_callback(pasted).unwrap();
+
+        assert_eq!(callback.code, "01KYE1X5RCRJE7VSWQ452PCK3C");
+        assert_eq!(callback.platform, Some("windows".to_string()));
+        assert_eq!(callback.is_dev, Some(false));
+        assert_eq!(callback.sso, Some(false));
     }
 
     #[test]
     fn test_parse_callback_url() {
         // The deep link that page hands off to, for anyone who copies it.
-        let code = parse_callback_code("granola://login-complete?code=abc123&sso=false").unwrap();
+        let callback = parse_callback("granola://login-complete?code=abc123&sso=false").unwrap();
 
-        assert_eq!(code, "abc123");
+        assert_eq!(callback.code, "abc123");
     }
 
     #[test]
     fn test_parse_callback_url_percent_decodes() {
-        let code = parse_callback_code("granola://login-complete?code=a%2Fb%2Bc").unwrap();
+        let callback = parse_callback("granola://login-complete?code=a%2Fb%2Bc").unwrap();
 
-        assert_eq!(code, "a/b+c");
+        assert_eq!(callback.code, "a/b+c");
     }
 
     #[test]
-    fn test_parse_callback_url_ignores_other_parameters() {
-        let code =
-            parse_callback_code("granola://login-complete?signInClickId=x&code=zzz&handoff=1")
+    fn test_parse_callback_keeps_the_click_id_it_was_given() {
+        let callback =
+            parse_callback("granola://login-complete?signInClickId=click-7&code=zzz&handoff=1")
                 .unwrap();
 
-        assert_eq!(code, "zzz");
+        assert_eq!(callback.code, "zzz");
+        assert_eq!(callback.sign_in_click_id, Some("click-7".to_string()));
     }
 
     #[test]
-    fn test_parse_bare_code() {
-        assert_eq!(parse_callback_code("  raw-code-42  ").unwrap(), "raw-code-42");
+    fn test_parse_bare_code_leaves_terms_unstated() {
+        let callback = parse_callback("  raw-code-42  ").unwrap();
+
+        assert_eq!(callback.code, "raw-code-42");
+        assert_eq!(callback.platform, None);
+        assert_eq!(callback.sign_in_click_id, None);
+    }
+
+    #[test]
+    fn test_parse_ignores_unparseable_flags() {
+        // A malformed boolean should not fail the login; the exchange falls
+        // back to grans's own value.
+        let callback = parse_callback("granola://login-complete?code=c&sso=maybe").unwrap();
+
+        assert_eq!(callback.sso, None);
     }
 
     #[test]
     fn test_parse_rejects_empty() {
-        assert!(parse_callback_code("   ").is_err());
+        assert!(parse_callback("   ").is_err());
     }
 
     #[test]
     fn test_parse_rejects_url_without_code() {
-        let err = parse_callback_code("granola://login-complete?sso=false").unwrap_err();
+        let err = parse_callback("granola://login-complete?sso=false").unwrap_err();
 
         assert!(err.to_string().contains("no 'code' parameter"));
     }
@@ -352,7 +467,7 @@ mod tests {
     fn test_parse_rejects_the_starting_auth_url() {
         // Pasting the URL grans printed, rather than where it ends up, is the
         // likeliest mistake. It carries a code_challenge but no code.
-        let err = parse_callback_code(
+        let err = parse_callback(
             "https://api.granola.ai/v1/auth?dev=false&code_challenge=abc&provider=google",
         )
         .unwrap_err();
@@ -363,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_parse_rejects_prose() {
-        assert!(parse_callback_code("I could not find the code").is_err());
+        assert!(parse_callback("I could not find the code").is_err());
     }
 
     #[test]
@@ -411,6 +526,67 @@ mod tests {
         let body = r#"{"access_token": "at", "expires_in": 3600}"#;
 
         assert!(extract_token_set(body).is_err());
+    }
+
+    #[test]
+    fn test_extract_token_set_from_an_unexpected_key() {
+        let body = r#"{"user": {"id": "u1"},
+                       "session": {"tokens": {"access_token": "at", "refresh_token": "rt"}}}"#;
+
+        let tokens = extract_token_set(body).unwrap();
+
+        assert_eq!(tokens.access_token, "at");
+    }
+
+    #[test]
+    fn test_extract_token_set_prefers_workos_over_provider_tokens() {
+        // Google's tokens can ride along in the same response and are not
+        // interchangeable with Granola's. Alphabetically google sorts first,
+        // so this would pick the wrong pair without the preference.
+        let body = r#"{
+            "google_tokens": {"access_token": "google-at", "refresh_token": "google-rt"},
+            "workos_tokens": {"access_token": "workos-at", "refresh_token": "workos-rt"}
+        }"#;
+
+        let tokens = extract_token_set(body).unwrap();
+
+        assert_eq!(tokens.access_token, "workos-at");
+    }
+
+    #[test]
+    fn test_missing_tokens_error_describes_shape_without_values() {
+        let body = r#"{"user": {"email": "someone@example.com"}, "count": 2}"#;
+
+        let message = extract_token_set(body).unwrap_err().to_string();
+
+        assert!(message.contains("user: {email: string}"));
+        assert!(message.contains("count: number"));
+        assert!(!message.contains("someone@example.com"));
+    }
+
+    #[test]
+    fn test_describe_json_shape_stops_at_max_depth() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"a": {"b": {"c": "deep"}}}"#).unwrap();
+
+        let described = describe_json_shape(&value, 1);
+
+        assert!(described.contains("a: { 1 keys }"));
+        assert!(!described.contains("deep"));
+    }
+
+    #[test]
+    fn test_locate_tokens_gives_up_rather_than_recursing_forever() {
+        // Deeply nested junk must not blow the stack looking for tokens.
+        let mut body = String::new();
+        for _ in 0..50 {
+            body.push_str(r#"{"nested": "#);
+        }
+        body.push_str("null");
+        body.push_str(&"}".repeat(50));
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert!(locate_tokens(&value, MAX_JSON_DEPTH).is_none());
     }
 
     #[test]

@@ -116,10 +116,10 @@ fn credentials_from_browser_login(provider: Provider) -> Result<GranolaCredentia
         .read_line(&mut pasted)
         .context("Failed to read the callback URL from stdin")?;
 
-    let code = granola_auth::parse_callback_code(&pasted)?;
+    let callback = granola_auth::parse_callback(&pasted)?;
 
     println!("Exchanging the code for tokens...");
-    let tokens = granola_auth::exchange_code(&code, &pkce.verifier, &sign_in_click_id)?;
+    let tokens = granola_auth::exchange_code(&callback, &pkce.verifier, &sign_in_click_id)?;
 
     Ok(tokens.into_credentials(Utc::now().timestamp(), None))
 }
