@@ -8,6 +8,7 @@
 //! Persisted as TOML at `data_dir()/auth.toml`.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -88,18 +89,14 @@ impl GranolaCredentials {
 
         let content = toml::to_string_pretty(self).context("Failed to serialize credentials")?;
 
-        // Write to a temp file, tighten permissions, then rename into place so
-        // a crash mid-write cannot leave a truncated credential file behind.
+        // Write to a temp file and rename into place, so a crash mid-write
+        // cannot leave a truncated credential file behind.
         let temp_path = path.with_extension("toml.tmp");
-        fs::write(&temp_path, &content)
+        let mut file = create_private_file(&temp_path)
+            .with_context(|| format!("Failed to create {}", temp_path.display()))?;
+        file.write_all(content.as_bytes())
             .with_context(|| format!("Failed to write {}", temp_path.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("Failed to set permissions on {}", temp_path.display()))?;
-        }
+        drop(file);
 
         fs::rename(&temp_path, path)
             .with_context(|| format!("Failed to replace {}", path.display()))
@@ -114,6 +111,36 @@ impl GranolaCredentials {
     pub fn save(&self) -> Result<()> {
         self.save_to(&credentials_path()?)
     }
+}
+
+/// Create a file readable only by its owner.
+///
+/// The permissions are set at creation rather than tightened afterward:
+/// writing the refresh token first and calling `chmod` second leaves a window
+/// where another local user can read it. On Windows the file inherits the
+/// directory's ACL, which is why the refresh token is not protected there.
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    // Clear anything an interrupted run left behind: the mode below applies
+    // only when the open creates the file, so reusing one would silently keep
+    // whatever permissions it already had.
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    let mut options = fs::OpenOptions::new();
+    // create_new refuses to write through a file, or symlink, that appeared
+    // between the remove and the open.
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    options.open(path)
 }
 
 /// Remove the credential file at `path`. Succeeds if it is already gone.
@@ -290,5 +317,39 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_private_file_is_owner_only_from_creation() {
+        // The permissions must come from the open, not from a later chmod:
+        // between the two, the refresh token would be readable by anyone who
+        // can traverse the directory.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("fresh.tmp");
+
+        let file = create_private_file(&path).unwrap();
+        let mode = file.metadata().unwrap().permissions().mode();
+
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_private_file_tightens_permissions_on_reuse() {
+        // A temp file left behind by an earlier run with loose permissions
+        // must not be inherited as-is.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("stale.tmp");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let file = create_private_file(&path).unwrap();
+
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
