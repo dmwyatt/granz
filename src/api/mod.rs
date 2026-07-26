@@ -1,5 +1,6 @@
 mod auth;
 pub mod client;
+pub mod credentials;
 mod token_store;
 pub mod types;
 
