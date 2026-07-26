@@ -127,12 +127,15 @@ fn credentials_from_browser_login(provider: Provider) -> Result<GranolaCredentia
 /// Explain how to get the callback URL out of the browser.
 ///
 /// The dialog matters: the authorization code is bound to the PKCE verifier
-/// grans generated, so letting Granola.app open the link consumes the code
-/// against a verifier it does not have. That fails inside Granola and leaves
-/// grans with a dead code and no obvious cause.
+/// grans generated, so letting Granola.app open the link hands the code to a
+/// verifier it does not have. That fails inside Granola and can leave grans
+/// with a spent code and no obvious cause.
 fn print_callback_instructions() {
-    println!("After signing in, your browser will offer to open Granola.");
-    println!("Cancel that dialog. Copy the granola://login-complete?... URL instead.");
+    println!("After signing in you land on a granola.ai page, which offers to open");
+    println!("the Granola app. Cancel that dialog, then copy the URL from your");
+    println!("browser's address bar. It looks like:");
+    println!();
+    println!("  https://www.granola.ai/app-redirect?code=...");
     println!();
 }
 

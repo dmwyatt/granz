@@ -4,10 +4,11 @@
 //! session rather than scavenging the one Granola stored locally. See
 //! [`crate::api::credentials`] for why that scavenging no longer works.
 //!
-//! The callback lands on `granola://login-complete?code=...`, which macOS and
-//! Windows both route to Granola.app rather than to grans, so the code is
-//! pasted back by hand instead of caught on a loopback listener. Granola's
-//! `/v1/auth` rejects a loopback `redirect` parameter with a 403.
+//! The login ends on a `granola.ai/app-redirect?code=...` page that hands off
+//! to `granola://login-complete?code=...`, which the operating system routes to
+//! Granola.app rather than to grans. So the code is pasted back by hand instead
+//! of caught on a loopback listener: Granola's `/v1/auth` rejects a loopback
+//! `redirect` parameter with a 403.
 
 use std::time::Duration;
 
@@ -23,8 +24,9 @@ const AUTH_URL: &str = "https://api.granola.ai/v1/auth";
 const AUTH_COMPLETE_URL: &str = "https://api.granola.ai/v1/workos-auth-complete";
 const REFRESH_URL: &str = "https://api.granola.ai/v1/refresh-access-token";
 
-/// Scheme Granola registers for its login callback.
-const CALLBACK_SCHEME: &str = "granola";
+/// Page the browser lands on when the login succeeds. Shown in error messages
+/// so the user knows which URL to copy.
+const REDIRECT_PAGE: &str = "https://www.granola.ai/app-redirect";
 
 /// Entropy for the PKCE verifier: 32 bytes is the 43-character verifier
 /// Granola's own client sends.
@@ -99,8 +101,10 @@ pub fn build_auth_url(challenge: &str, provider: Provider) -> (String, String) {
 
 /// Extract the authorization code from what the user pasted back.
 ///
-/// Accepts the whole `granola://login-complete?code=...` callback URL, or a
-/// bare code for anyone who copied only that.
+/// The login hands the same code to two URLs: the `app-redirect` page the
+/// browser shows, and the `granola://login-complete` deep link it triggers.
+/// Either is a valid thing to copy, as is a bare code, so this takes the
+/// `code` parameter from any URL rather than insisting on one scheme.
 pub fn parse_callback_code(pasted: &str) -> Result<String> {
     let pasted = pasted.trim();
     if pasted.is_empty() {
@@ -115,19 +119,19 @@ pub fn parse_callback_code(pasted: &str) -> Result<String> {
     }
 
     let url = Url::parse(pasted).context("Could not parse the pasted callback URL")?;
-    if url.scheme() != CALLBACK_SCHEME {
-        bail!(
-            "Expected a {}:// callback URL, got a {}:// URL",
-            CALLBACK_SCHEME,
-            url.scheme()
-        );
-    }
 
     url.query_pairs()
         .find(|(key, _)| key == "code")
         .map(|(_, value)| value.into_owned())
         .filter(|code| !code.is_empty())
-        .ok_or_else(|| anyhow!("The callback URL has no 'code' parameter"))
+        .ok_or_else(|| {
+            anyhow!(
+                "That URL has no 'code' parameter.\n\
+                 Copy the URL your browser lands on after signing in; it looks like\n\
+                 {}?code=...",
+                REDIRECT_PAGE
+            )
+        })
 }
 
 /// Check that Granola will accept our reported client version before sending
@@ -292,7 +296,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_app_redirect_url() {
+        // What the browser actually lands on, and what the address bar shows.
+        let pasted = "https://www.granola.ai/app-redirect?code=01KYE1X5RCRJE7VSWQ452PCK3C\
+                      &isDev=false&platform=windows&sso=false";
+
+        assert_eq!(
+            parse_callback_code(pasted).unwrap(),
+            "01KYE1X5RCRJE7VSWQ452PCK3C"
+        );
+    }
+
+    #[test]
     fn test_parse_callback_url() {
+        // The deep link that page hands off to, for anyone who copies it.
         let code = parse_callback_code("granola://login-complete?code=abc123&sso=false").unwrap();
 
         assert_eq!(code, "abc123");
@@ -332,12 +349,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_rejects_wrong_scheme() {
-        // A user who pasted the WorkOS URL from the address bar instead of the
-        // callback should be told what went wrong.
-        let err = parse_callback_code("https://api.workos.com/authorize?code=abc").unwrap_err();
+    fn test_parse_rejects_the_starting_auth_url() {
+        // Pasting the URL grans printed, rather than where it ends up, is the
+        // likeliest mistake. It carries a code_challenge but no code.
+        let err = parse_callback_code(
+            "https://api.granola.ai/v1/auth?dev=false&code_challenge=abc&provider=google",
+        )
+        .unwrap_err();
 
-        assert!(err.to_string().contains("granola:// callback URL"));
+        assert!(err.to_string().contains("no 'code' parameter"));
+        assert!(err.to_string().contains("app-redirect"));
     }
 
     #[test]

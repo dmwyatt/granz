@@ -642,10 +642,9 @@ pub enum DbAction {
 pub enum AuthAction {
     /// Sign in to Granola and store credentials for grans
     ///
-    /// Opens a browser to Granola's login. The callback is a granola:// URL
-    /// that your operating system routes to the Granola app rather than to
-    /// grans, so cancel the dialog offering to open Granola and paste the URL
-    /// back here instead.
+    /// Opens a browser to Granola's login. It ends on a granola.ai page that
+    /// tries to hand off to the Granola app rather than to grans, so cancel
+    /// that dialog and paste the address bar URL back here instead.
     Login {
         /// Identity provider to sign in with
         #[arg(long, value_enum, default_value_t = AuthProvider::Google)]

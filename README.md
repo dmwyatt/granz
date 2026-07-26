@@ -140,11 +140,16 @@ grans auth status             # Show whether grans has a session, and its expiry
 grans auth logout             # Remove the stored credentials
 ```
 
-`grans auth login` opens your browser to Granola's login. When it finishes,
-the browser offers to open the Granola app. **Cancel that dialog** and copy the
-`granola://login-complete?...` URL instead, then paste it back into grans. The
-authorization code is tied to grans's login attempt, so letting Granola open
-the link consumes the code and the sign-in fails.
+`grans auth login` opens your browser to Granola's login. When it finishes, you
+land on a `granola.ai` page that offers to open the Granola app. **Cancel that
+dialog**, then copy the URL from your address bar and paste it back into grans:
+
+```
+https://www.granola.ai/app-redirect?code=...
+```
+
+The authorization code is tied to grans's login attempt, so letting Granola
+open the link hands the code to an app that cannot complete the sign-in.
 
 This creates a session on your Granola account, separate from the desktop
 app's. It appears in Granola's session list and you can revoke it there.
