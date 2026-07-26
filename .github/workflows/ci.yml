@@ -52,8 +52,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      # Without --no-fail-fast, cargo stops after the first test binary that
+      # fails, so one broken unit test in src/ means the 75 integration tests
+      # across tests/*.rs never launch and the red leg reports nothing about
+      # them. A failing run costs more wall clock this way; it buys a complete
+      # failure list instead of another round trip to find the rest.
       - name: Run tests
-        run: cargo test
+        run: cargo test --no-fail-fast
 
   code-review:
     name: Code Review
