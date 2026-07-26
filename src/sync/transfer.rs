@@ -27,6 +27,52 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// download path this has to cover the whole transfer rather than a stall.
 pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Reports the running byte total of a transfer.
+///
+/// Owned and `Send` rather than borrowed, because a streaming upload body has
+/// to satisfy reqwest's `Send + 'static` bound.
+pub type ProgressFn = Box<dyn FnMut(u64) + Send>;
+
+/// A progress sink that reports nothing, for transfers too small to bother.
+pub fn no_progress() -> ProgressFn {
+    Box::new(|_| {})
+}
+
+/// Wraps a reader, reporting the running total as bytes are consumed.
+///
+/// Lets an upload report progress while reqwest pulls the request body, without
+/// first loading the file into memory.
+pub struct ProgressReader<R> {
+    inner: R,
+    transferred: u64,
+    on_progress: ProgressFn,
+}
+
+impl<R: Read> ProgressReader<R> {
+    pub fn new(inner: R, on_progress: ProgressFn) -> Self {
+        Self {
+            inner,
+            transferred: 0,
+            on_progress,
+        }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.inner.read(buf)?;
+
+        // Staying silent at end of stream keeps the final total from being
+        // reported twice.
+        if bytes_read > 0 {
+            self.transferred += bytes_read as u64;
+            (self.on_progress)(self.transferred);
+        }
+
+        Ok(bytes_read)
+    }
+}
+
 /// Build the HTTP client used for every Dropbox call.
 pub fn build_client() -> SyncResult<reqwest::blocking::Client> {
     build_client_with_stall_timeout(STALL_TIMEOUT)
@@ -161,6 +207,7 @@ pub fn verify_transfer_size(actual: u64, expected: u64, what: &str) -> SyncResul
 mod tests {
     use super::*;
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     /// Serve one HTTP response whose body arrives in timed pieces, standing in
@@ -370,6 +417,135 @@ mod tests {
 
         assert!(text.contains("1.00 MB"), "{}", text);
         assert!(!text.contains("inf"), "must not divide by zero: {}", text);
+    }
+
+    /// Collect what a `ProgressFn` was told, from outside the box it lives in.
+    fn recording_progress() -> (ProgressFn, Arc<Mutex<Vec<u64>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (Box::new(move |n| sink.lock().unwrap().push(n)), seen)
+    }
+
+    #[test]
+    fn progress_reader_passes_bytes_through_unchanged() {
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
+        let (progress, _seen) = recording_progress();
+        let mut reader = ProgressReader::new(ChunkedReader::new(data.clone(), 256), progress);
+
+        let mut got = Vec::new();
+        reader.read_to_end(&mut got).unwrap();
+
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn progress_reader_reports_a_running_total_ending_at_the_length() {
+        let (progress, seen) = recording_progress();
+        let mut reader = ProgressReader::new(ChunkedReader::new(vec![9u8; 4096], 512), progress);
+
+        io::copy(&mut reader, &mut io::sink()).unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "progress was never reported");
+        assert!(
+            seen.windows(2).all(|w| w[0] < w[1]),
+            "totals must increase: {:?}",
+            seen
+        );
+        assert_eq!(*seen.last().unwrap(), 4096);
+    }
+
+    #[test]
+    fn progress_reader_stays_quiet_on_an_empty_source() {
+        let (progress, seen) = recording_progress();
+        let mut reader = ProgressReader::new(ChunkedReader::new(Vec::new(), 512), progress);
+
+        io::copy(&mut reader, &mut io::sink()).unwrap();
+
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn progress_reader_propagates_read_errors() {
+        let (progress, _seen) = recording_progress();
+        let mut reader = ProgressReader::new(
+            FailingReader {
+                before_error: 512,
+                sent: 0,
+            },
+            progress,
+        );
+
+        let err = io::copy(&mut reader, &mut io::sink()).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    /// Accept one request, return how many body bytes actually arrived.
+    ///
+    /// Returns the URL and a handle yielding the received body length.
+    fn accept_one_upload() -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if stream.read(&mut byte).unwrap_or(0) == 0 {
+                    return 0;
+                }
+                head.push(byte[0]);
+            }
+
+            let head = String::from_utf8_lossy(&head).to_lowercase();
+            let declared: usize = head
+                .split("content-length:")
+                .nth(1)
+                .and_then(|rest| rest.split("\r\n").next())
+                .and_then(|v| v.trim().parse().ok())
+                .expect("upload must declare a Content-Length");
+
+            let mut body = vec![0u8; declared];
+            stream.read_exact(&mut body).expect("read body");
+
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}",
+            );
+            body.len()
+        });
+
+        (format!("http://{}/", addr), handle)
+    }
+
+    /// A streamed upload body must deliver every byte and report progress as it
+    /// goes, which is what lets `dropbox push` show a bar without first reading
+    /// the whole file into memory.
+    #[test]
+    fn a_streamed_upload_body_delivers_every_byte_and_reports_progress() {
+        const LEN: usize = 300_000;
+        let (url, server) = accept_one_upload();
+        let (progress, seen) = recording_progress();
+
+        let client = build_client().unwrap();
+        let body = reqwest::blocking::Body::sized(
+            ProgressReader::new(io::Cursor::new(vec![7u8; LEN]), progress),
+            LEN as u64,
+        );
+
+        let response = client.post(&url).body(body).send().expect("upload");
+        assert!(response.status().is_success());
+
+        assert_eq!(server.join().unwrap(), LEN, "server received a short body");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen.last().expect("progress was never reported"),
+            LEN as u64
+        );
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "{:?}", seen);
     }
 
     #[test]
