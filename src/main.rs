@@ -39,6 +39,13 @@ fn main() -> Result<()> {
 
     let ctx = RunContext::from_args(cli.json, cli.no_color, cli.utc)?;
 
+    // Resolve the token override once, here at the boundary, so nothing below
+    // reads the environment for itself.
+    let token_override = api::token_override(
+        cli.token.as_deref(),
+        std::env::var(api::TOKEN_ENV_VAR).ok(),
+    );
+
     // Admin DB commands don't need a database connection
     if let Commands::Admin {
         action: AdminAction::Db { action },
@@ -60,7 +67,13 @@ fn main() -> Result<()> {
     // Sync command (from Granola API)
     if let Commands::Sync { action, dry_run } = &cli.command {
         let conn = get_connection(cli.db.as_deref())?;
-        commands::sync_granola::run(&conn, action, *dry_run, cli.token.as_deref(), ctx.output_mode)?;
+        commands::sync_granola::run(
+            &conn,
+            action,
+            *dry_run,
+            token_override.as_deref(),
+            ctx.output_mode,
+        )?;
         return Ok(());
     }
 
@@ -254,7 +267,7 @@ fn main() -> Result<()> {
         Commands::Admin { action } => match action {
             AdminAction::Db { .. } => unreachable!(), // Handled above
             AdminAction::Token { clipboard } => {
-                let token = api::get_auth_token()?;
+                let token = api::resolve_token(token_override.as_deref())?;
                 if *clipboard {
                     platform::copy_to_clipboard(&token)?;
                     eprintln!("Token copied to clipboard.");
