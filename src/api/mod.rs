@@ -1,5 +1,6 @@
 mod auth;
 pub mod client;
+pub mod credential_store;
 pub mod credentials;
 pub mod granola_auth;
 pub mod identity;

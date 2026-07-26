@@ -1,16 +1,15 @@
 //! Deciding which token grans authenticates with.
 //!
-//! The sources themselves live elsewhere: [`super::credentials`] holds grans's
-//! own session and [`super::local_store`] reads the one Granola's desktop app
-//! stored. This module is the order they are tried in.
-
-use std::path::Path;
+//! The sources themselves live elsewhere: [`super::credential_store`] holds
+//! grans's own session and [`super::local_store`] reads the one Granola's desktop
+//! app stored. This module is the order they are tried in.
 
 use anyhow::{bail, Result};
 use chrono::Utc;
 use log::debug;
 
-use super::credentials::{self, GranolaCredentials};
+use super::credential_store::CredentialStore;
+use super::credentials::GranolaCredentials;
 use super::{granola_auth, local_store};
 
 /// Environment variable supplying a token when `--token` is absent.
@@ -54,10 +53,12 @@ pub fn resolve_token(override_token: Option<&str>) -> Result<String> {
 
 /// Use grans's own credentials if it has any, otherwise Granola's local store.
 fn stored_or_local_token() -> Result<String> {
-    match GranolaCredentials::load()? {
+    let store = CredentialStore::open()?;
+
+    match store.load()? {
         Some(credentials) => {
             debug!("Using grans's own stored credentials");
-            token_from_credentials(credentials)
+            token_from_credentials(credentials, &store)
         }
         None => {
             debug!("No stored credentials; reading Granola's local token store");
@@ -67,7 +68,10 @@ fn stored_or_local_token() -> Result<String> {
 }
 
 /// Return the stored access token, refreshing it first if it has expired.
-fn token_from_credentials(credentials: GranolaCredentials) -> Result<String> {
+fn token_from_credentials(
+    credentials: GranolaCredentials,
+    store: &CredentialStore,
+) -> Result<String> {
     let now = Utc::now().timestamp();
 
     if let Some(token) = credentials.valid_access_token(now) {
@@ -75,8 +79,7 @@ fn token_from_credentials(credentials: GranolaCredentials) -> Result<String> {
     }
 
     debug!("Stored access token is missing or expired; refreshing");
-    let path = credentials::credentials_path()?;
-    refresh_and_persist(credentials, now, &path, live_refresh)
+    refresh_and_persist(credentials, now, store, live_refresh)
 }
 
 /// Ask Granola for a new token set.
@@ -92,10 +95,10 @@ fn live_refresh(credentials: &GranolaCredentials) -> Result<granola_auth::TokenS
 fn refresh_and_persist(
     credentials: GranolaCredentials,
     now: i64,
-    path: &Path,
+    store: &CredentialStore,
     refresh: impl Fn(&GranolaCredentials) -> Result<granola_auth::TokenSet>,
 ) -> Result<String> {
-    let error = match refresh_once(&credentials, now, path, &refresh) {
+    let error = match refresh_once(&credentials, now, store, &refresh) {
         Ok(token) => return Ok(token),
         Err(error) => error,
     };
@@ -105,13 +108,13 @@ fn refresh_and_persist(
     // would consume the token we just sent. If what is on disk has moved on,
     // that invocation succeeded and its result is usable; only a chain that
     // has genuinely stalled is an error.
-    if let Some(current) = GranolaCredentials::load_from(path)? {
+    if let Some(current) = store.load()? {
         if current.refresh_token != credentials.refresh_token {
             debug!("Refresh token was rotated concurrently; using the newer credentials");
             if let Some(token) = current.valid_access_token(now) {
                 return Ok(token.to_string());
             }
-            return refresh_once(&current, now, path, &refresh);
+            return refresh_once(&current, now, store, &refresh);
         }
     }
 
@@ -124,7 +127,7 @@ fn refresh_and_persist(
 fn refresh_once(
     credentials: &GranolaCredentials,
     now: i64,
-    path: &Path,
+    store: &CredentialStore,
     refresh: impl Fn(&GranolaCredentials) -> Result<granola_auth::TokenSet>,
 ) -> Result<String> {
     let tokens = refresh(credentials)?;
@@ -133,9 +136,7 @@ fn refresh_once(
     // Persist before returning. The refresh token comes back unchanged today,
     // but if Granola starts rotating it, handing back an access token without
     // saving what replaced it would strand the chain if the process died here.
-    tokens
-        .into_credentials(now, credentials.session_id.clone())
-        .save_to(path)?;
+    store.save(&tokens.into_credentials(now, credentials.session_id.clone()))?;
 
     Ok(access_token)
 }
@@ -215,16 +216,16 @@ mod tests {
     #[test]
     fn test_refresh_persists_rotated_token_before_returning() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
+        let store = CredentialStore::file(dir.path().join("auth.toml"));
         let old = stored("refresh-old", None, None);
 
-        let token = refresh_and_persist(old, 1_000, &path, |_| {
+        let token = refresh_and_persist(old, 1_000, &store, |_| {
             Ok(token_set("access-new", "refresh-new"))
         })
         .unwrap();
 
         assert_eq!(token, "access-new");
-        let saved = GranolaCredentials::load_from(&path).unwrap().unwrap();
+        let saved = store.load().unwrap().unwrap();
         assert_eq!(saved.refresh_token, "refresh-new");
         assert_eq!(saved.access_token, Some("access-new".to_string()));
         assert_eq!(saved.expires_at, Some(4_600));
@@ -233,25 +234,25 @@ mod tests {
     #[test]
     fn test_refresh_carries_session_id_forward() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
+        let store = CredentialStore::file(dir.path().join("auth.toml"));
 
-        refresh_and_persist(stored("refresh-old", None, None), 1_000, &path, |_| {
+        refresh_and_persist(stored("refresh-old", None, None), 1_000, &store, |_| {
             Ok(token_set("access-new", "refresh-new"))
         })
         .unwrap();
 
-        let saved = GranolaCredentials::load_from(&path).unwrap().unwrap();
+        let saved = store.load().unwrap().unwrap();
         assert_eq!(saved.session_id, Some("sess_original".to_string()));
     }
 
     #[test]
     fn test_refresh_failure_reports_relogin() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
+        let store = CredentialStore::file(dir.path().join("auth.toml"));
         let creds = stored("refresh-dead", None, None);
-        creds.save_to(&path).unwrap();
+        store.save(&creds).unwrap();
 
-        let err = refresh_and_persist(creds, 1_000, &path, |_| bail!("token expired"))
+        let err = refresh_and_persist(creds, 1_000, &store, |_| bail!("token expired"))
             .unwrap_err();
 
         assert!(err.to_string().contains("grans auth login"));
@@ -262,13 +263,13 @@ mod tests {
         // Another grans consumed our refresh token and wrote a fresh access
         // token. Ours fails, but the chain is intact and its result is usable.
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
+        let store = CredentialStore::file(dir.path().join("auth.toml"));
         let ours = stored("refresh-old", None, None);
-        stored("refresh-rotated", Some("access-from-other-run"), Some(9_000))
-            .save_to(&path)
+        store
+            .save(&stored("refresh-rotated", Some("access-from-other-run"), Some(9_000)))
             .unwrap();
 
-        let token = refresh_and_persist(ours, 1_000, &path, |_| bail!("token already used"))
+        let token = refresh_and_persist(ours, 1_000, &store, |_| bail!("token already used"))
             .unwrap();
 
         assert_eq!(token, "access-from-other-run");
@@ -279,13 +280,13 @@ mod tests {
         // The concurrent run rotated the refresh token but its access token is
         // already expired, so we refresh again with what it left behind.
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
+        let store = CredentialStore::file(dir.path().join("auth.toml"));
         let ours = stored("refresh-old", None, None);
-        stored("refresh-rotated", Some("stale"), Some(0))
-            .save_to(&path)
+        store
+            .save(&stored("refresh-rotated", Some("stale"), Some(0)))
             .unwrap();
 
-        let token = refresh_and_persist(ours, 1_000, &path, |credentials| {
+        let token = refresh_and_persist(ours, 1_000, &store, |credentials| {
             if credentials.refresh_token == "refresh-rotated" {
                 Ok(token_set("access-second-try", "refresh-newest"))
             } else {
@@ -295,7 +296,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(token, "access-second-try");
-        let saved = GranolaCredentials::load_from(&path).unwrap().unwrap();
+        let saved = store.load().unwrap().unwrap();
         assert_eq!(saved.refresh_token, "refresh-newest");
     }
 
@@ -304,12 +305,12 @@ mod tests {
         // Nothing rotated it, so the failure is real and must not be retried
         // against the same dead token.
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
+        let store = CredentialStore::file(dir.path().join("auth.toml"));
         let creds = stored("refresh-same", None, None);
-        creds.save_to(&path).unwrap();
+        store.save(&creds).unwrap();
         let attempts = std::cell::Cell::new(0);
 
-        let result = refresh_and_persist(creds, 1_000, &path, |_| {
+        let result = refresh_and_persist(creds, 1_000, &store, |_| {
             attempts.set(attempts.get() + 1);
             bail!("refresh rejected")
         });

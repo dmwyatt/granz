@@ -59,7 +59,8 @@ CLI (main.rs, cli/) → Commands (commands/) → DB queries (db/) → SQLite
 - **commands/**: Dispatch to db/ queries or api/ calls, select output formatter
 - **api/**: Granola API client and authentication
   - `auth.rs`: Token resolution order (`--token`/`GRANS_TOKEN`, stored credentials, local store)
-  - `credentials.rs`: grans's own Granola session, stored in `auth.toml`
+  - `credentials.rs`: The `GranolaCredentials` type (refresh token, access token, expiry)
+  - `credential_store.rs`: Where they live: platform keychain, falling back to a `0600` `auth.toml`
   - `granola_auth.rs`: Granola PKCE login and token refresh
   - `local_store.rs`: Reads the token Granola's desktop app stored (legacy fallback)
   - `identity.rs`: Client version/platform reported to Granola (`GRANS_GRANOLA_VERSION`)

@@ -158,6 +158,27 @@ app's. It appears in Granola's session list and you can revoke it there.
 Once signed in, grans refreshes its own access token and does not need Granola
 running, or installed.
 
+### Where credentials are stored
+
+grans stores its session in the platform keychain: Windows Credential Manager,
+the macOS Keychain, or the Secret Service on Linux. `grans auth status` names
+the one in use.
+
+The refresh token is the part worth protecting. It mints new access tokens
+until the session is revoked, so unlike the six-hour access token it stays
+valuable.
+
+Where no keychain is reachable (a headless Linux box, some WSL setups), grans
+falls back to `data_dir()/auth.toml`, written `0600`, and warns you at login
+and in `grans auth status`. That keeps other local users out, but the token is
+unencrypted: anyone with a copy of that file, from a backup or a disk image,
+holds a working session until you revoke it. If a keychain later becomes
+available, the next grans command moves the credentials into it and deletes
+the file.
+
+On macOS the keychain item is tied to the binary that created it, so a rebuilt
+or self-updated grans may ask for keychain access again.
+
 ### Reading Granola's local token
 
 Without `grans auth login`, grans falls back to the token Granola's desktop app

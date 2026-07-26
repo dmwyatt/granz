@@ -39,6 +39,7 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 cbc = "0.1"
 url = "2.5.8"
 uuid = { version = "1.24.0", features = ["v4"] }
+keyring = { version = "4.1.5", features = ["apple-native-keyring-store"] }
 
 [dev-dependencies]
 assert_cmd = "2.1.2"

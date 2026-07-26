@@ -1,20 +1,13 @@
-//! Storage for grans's own Granola credentials.
+//! grans's own Granola session.
 //!
 //! Granola's desktop app keeps its data-encryption key in the macOS
 //! data-protection keychain, gated on its own code signature, so grans cannot
 //! read the app's stored session there. Instead grans holds its own refresh
 //! token, obtained through the same PKCE login the desktop client uses.
 //!
-//! Persisted as TOML at `data_dir()/auth.toml`.
+//! Where that lives is [`super::credential_store`]'s problem.
 
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-
-use crate::platform::data_dir;
 
 /// Treat an access token expiring within this window as already expired, so a
 /// long-running command does not start with a token that dies mid-flight.
@@ -64,108 +57,11 @@ impl GranolaCredentials {
         }
         self.access_token.as_deref()
     }
-
-    /// Load credentials from `path`, or `None` if the file does not exist.
-    pub fn load_from(path: &Path) -> Result<Option<Self>> {
-        let content = match fs::read_to_string(path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to read {}", path.display()))
-            }
-        };
-
-        toml::from_str(&content)
-            .map(Some)
-            .with_context(|| format!("Failed to parse credentials at {}", path.display()))
-    }
-
-    /// Write credentials to `path`, replacing any existing file atomically.
-    pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-
-        let content = toml::to_string_pretty(self).context("Failed to serialize credentials")?;
-
-        // Write to a temp file and rename into place, so a crash mid-write
-        // cannot leave a truncated credential file behind.
-        let temp_path = path.with_extension("toml.tmp");
-        let mut file = create_private_file(&temp_path)
-            .with_context(|| format!("Failed to create {}", temp_path.display()))?;
-        file.write_all(content.as_bytes())
-            .with_context(|| format!("Failed to write {}", temp_path.display()))?;
-        drop(file);
-
-        fs::rename(&temp_path, path)
-            .with_context(|| format!("Failed to replace {}", path.display()))
-    }
-
-    /// Load credentials from the default location.
-    pub fn load() -> Result<Option<Self>> {
-        Self::load_from(&credentials_path()?)
-    }
-
-    /// Save credentials to the default location.
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&credentials_path()?)
-    }
-}
-
-/// Create a file readable only by its owner.
-///
-/// The permissions are set at creation rather than tightened afterward:
-/// writing the refresh token first and calling `chmod` second leaves a window
-/// where another local user can read it. On Windows the file inherits the
-/// directory's ACL, which is why the refresh token is not protected there.
-fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
-    // Clear anything an interrupted run left behind: the mode below applies
-    // only when the open creates the file, so reusing one would silently keep
-    // whatever permissions it already had.
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-
-    let mut options = fs::OpenOptions::new();
-    // create_new refuses to write through a file, or symlink, that appeared
-    // between the remove and the open.
-    options.write(true).create_new(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    options.open(path)
-}
-
-/// Remove the credential file at `path`. Succeeds if it is already gone.
-pub fn delete_from(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("Failed to remove {}", path.display())),
-    }
-}
-
-/// Remove the credential file at the default location.
-pub fn delete() -> Result<()> {
-    delete_from(&credentials_path()?)
-}
-
-/// Path to grans's credential file.
-pub fn credentials_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("auth.toml"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     const NOW: i64 = 1_800_000_000;
 
@@ -176,70 +72,6 @@ mod tests {
             expires_at: Some(NOW + 3600),
             session_id: Some("session_01ABC".to_string()),
         }
-    }
-
-    #[test]
-    fn test_load_from_missing_file_is_none() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-
-        assert_eq!(GranolaCredentials::load_from(&path).unwrap(), None);
-    }
-
-    #[test]
-    fn test_save_load_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-
-        creds().save_to(&path).unwrap();
-
-        assert_eq!(GranolaCredentials::load_from(&path).unwrap(), Some(creds()));
-    }
-
-    #[test]
-    fn test_save_creates_missing_parent_directory() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("nested").join("deeper").join("auth.toml");
-
-        creds().save_to(&path).unwrap();
-
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn test_save_replaces_existing_and_leaves_no_temp_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-
-        creds().save_to(&path).unwrap();
-        let rotated = GranolaCredentials::from_refresh_token("refresh-rotated".to_string());
-        rotated.save_to(&path).unwrap();
-
-        assert_eq!(
-            GranolaCredentials::load_from(&path).unwrap(),
-            Some(rotated)
-        );
-        assert!(!path.with_extension("toml.tmp").exists());
-    }
-
-    #[test]
-    fn test_refresh_token_only_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-        let bare = GranolaCredentials::from_refresh_token("refresh-only".to_string());
-
-        bare.save_to(&path).unwrap();
-
-        assert_eq!(GranolaCredentials::load_from(&path).unwrap(), Some(bare));
-    }
-
-    #[test]
-    fn test_load_from_malformed_file_errors() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-        fs::write(&path, "this is not toml {{{").unwrap();
-
-        assert!(GranolaCredentials::load_from(&path).is_err());
     }
 
     #[test]
@@ -289,67 +121,10 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_removes_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-        creds().save_to(&path).unwrap();
+    fn test_from_refresh_token_has_nothing_else() {
+        let bare = GranolaCredentials::from_refresh_token("rt".to_string());
 
-        delete_from(&path).unwrap();
-
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn test_delete_missing_file_succeeds() {
-        let dir = TempDir::new().unwrap();
-
-        assert!(delete_from(&dir.path().join("auth.toml")).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_saved_file_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("auth.toml");
-        creds().save_to(&path).unwrap();
-
-        let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_private_file_is_owner_only_from_creation() {
-        // The permissions must come from the open, not from a later chmod:
-        // between the two, the refresh token would be readable by anyone who
-        // can traverse the directory.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("fresh.tmp");
-
-        let file = create_private_file(&path).unwrap();
-        let mode = file.metadata().unwrap().permissions().mode();
-
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_private_file_tightens_permissions_on_reuse() {
-        // A temp file left behind by an earlier run with loose permissions
-        // must not be inherited as-is.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("stale.tmp");
-        fs::write(&path, "old").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-
-        let file = create_private_file(&path).unwrap();
-
-        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(bare.refresh_token, "rt");
+        assert_eq!(bare.valid_access_token(NOW), None);
     }
 }

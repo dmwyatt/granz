@@ -5,7 +5,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::{bail, Context, Result};
 use chrono::{FixedOffset, TimeZone, Utc};
 
-use crate::api::credentials::{self, GranolaCredentials};
+use crate::api::credential_store::CredentialStore;
+use crate::api::credentials::GranolaCredentials;
 use crate::api::granola_auth::{self, Provider};
 use crate::cli::args::{AuthAction, AuthProvider};
 use crate::pkce::PkceChallenge;
@@ -32,7 +33,9 @@ pub fn run(action: &AuthAction, tz: &FixedOffset) -> Result<()> {
 }
 
 fn login(provider: AuthProvider, refresh_token_stdin: bool) -> Result<()> {
-    if existing_session_kept()? {
+    let store = CredentialStore::open()?;
+
+    if existing_session_kept(&store)? {
         return Ok(());
     }
 
@@ -42,18 +45,34 @@ fn login(provider: AuthProvider, refresh_token_stdin: bool) -> Result<()> {
         credentials_from_browser_login(provider.into())?
     };
 
-    credentials.save()?;
+    store.save(&credentials)?;
 
     println!("\nSigned in. grans now holds its own Granola session.");
+    println!("  Credentials: {}", store.describe());
+    if !store.is_keychain() {
+        print_no_keychain_warning();
+    }
     println!("Run `grans sync` to fetch your meetings.");
     Ok(())
+}
+
+/// Warn that the refresh token is only as protected as the file holding it.
+///
+/// The refresh token mints access tokens until the session is revoked, so a
+/// copy of that file from a backup or disk image is a live credential.
+fn print_no_keychain_warning() {
+    eprintln!();
+    eprintln!("Warning: no keychain was reachable, so the refresh token is stored");
+    eprintln!("unencrypted. File permissions keep other local users out, but anyone");
+    eprintln!("who obtains a copy of the file can use the session until it is revoked.");
+    eprintln!();
 }
 
 /// Ask before replacing a session that already works.
 ///
 /// Returns true when the caller should stop, leaving the session alone.
-fn existing_session_kept() -> Result<bool> {
-    if GranolaCredentials::load()?.is_none() {
+fn existing_session_kept(store: &CredentialStore) -> Result<bool> {
+    if store.load()?.is_none() {
         return Ok(false);
     }
 
@@ -140,7 +159,9 @@ fn print_callback_instructions() {
 }
 
 fn status(tz: &FixedOffset) -> Result<()> {
-    let Some(credentials) = GranolaCredentials::load()? else {
+    let store = CredentialStore::open()?;
+
+    let Some(credentials) = store.load()? else {
         println!("Not signed in.");
         println!("grans falls back to the token Granola's desktop app stored locally,");
         println!("which no longer works on current macOS builds. Run `grans auth login`.");
@@ -148,13 +169,17 @@ fn status(tz: &FixedOffset) -> Result<()> {
     };
 
     println!("Signed in.");
-    println!("  Credentials: {}", credentials::credentials_path()?.display());
+    println!("  Credentials: {}", store.describe());
 
     if let Some(session_id) = &credentials.session_id {
         println!("  Session:     {}", session_id);
     }
 
     println!("  Access token: {}", describe_expiry(&credentials, tz));
+
+    if !store.is_keychain() {
+        print_no_keychain_warning();
+    }
 
     Ok(())
 }
@@ -185,12 +210,14 @@ fn describe_expiry(credentials: &GranolaCredentials, tz: &FixedOffset) -> String
 }
 
 fn logout() -> Result<()> {
-    if GranolaCredentials::load()?.is_none() {
+    let store = CredentialStore::open()?;
+
+    if store.load()?.is_none() {
         println!("Not signed in; nothing to remove.");
         return Ok(());
     }
 
-    credentials::delete()?;
+    store.delete()?;
 
     println!("Removed grans's stored Granola credentials.");
     println!("The session itself remains active in Granola until you revoke it there.");
