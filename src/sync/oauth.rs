@@ -2,10 +2,7 @@
 //!
 //! Implements RFC 7636 (PKCE) for secure authorization without embedding secrets.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use super::{SyncError, SyncResult};
 
@@ -16,34 +13,8 @@ const CLIENT_ID: &str = "bqkd8myq8v5w7xu";
 const AUTHORIZE_URL: &str = "https://www.dropbox.com/oauth2/authorize";
 const TOKEN_URL: &str = "https://api.dropboxapi.com/oauth2/token";
 
-/// PKCE verifier/challenge pair for OAuth flow.
-#[derive(Debug)]
-pub struct PkceChallenge {
-    /// Random verifier string (sent during token exchange)
-    pub verifier: String,
-    /// SHA256 hash of verifier (sent during authorization)
-    pub challenge: String,
-}
-
-impl PkceChallenge {
-    /// Generate a new PKCE challenge pair.
-    pub fn generate() -> Self {
-        // Generate 64 random bytes
-        let mut bytes = [0u8; 64];
-        OsRng.fill_bytes(&mut bytes);
-
-        // Base64url encode for verifier
-        let verifier = URL_SAFE_NO_PAD.encode(bytes);
-
-        // SHA256 hash then base64url encode for challenge
-        let mut hasher = Sha256::new();
-        hasher.update(verifier.as_bytes());
-        let hash = hasher.finalize();
-        let challenge = URL_SAFE_NO_PAD.encode(hash);
-
-        Self { verifier, challenge }
-    }
-}
+/// Entropy for the PKCE verifier, in bytes.
+pub const PKCE_ENTROPY_BYTES: usize = 64;
 
 /// Build the authorization URL for the user to visit.
 pub fn build_auth_url(challenge: &str) -> String {
@@ -143,34 +114,6 @@ pub fn refresh_access_token(refresh_token: &str) -> SyncResult<TokenResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_pkce_challenge_generation() {
-        let pkce = PkceChallenge::generate();
-
-        // Verifier should be base64url encoded 64 bytes = 86 chars
-        assert_eq!(pkce.verifier.len(), 86);
-
-        // Challenge should be base64url encoded SHA256 hash = 43 chars
-        assert_eq!(pkce.challenge.len(), 43);
-
-        // Challenge should be deterministic from verifier
-        let mut hasher = Sha256::new();
-        hasher.update(pkce.verifier.as_bytes());
-        let hash = hasher.finalize();
-        let expected_challenge = URL_SAFE_NO_PAD.encode(hash);
-        assert_eq!(pkce.challenge, expected_challenge);
-    }
-
-    #[test]
-    fn test_pkce_uniqueness() {
-        let pkce1 = PkceChallenge::generate();
-        let pkce2 = PkceChallenge::generate();
-
-        // Each generation should produce unique values
-        assert_ne!(pkce1.verifier, pkce2.verifier);
-        assert_ne!(pkce1.challenge, pkce2.challenge);
-    }
 
     #[test]
     fn test_auth_url_format() {

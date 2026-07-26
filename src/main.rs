@@ -5,6 +5,7 @@ mod db;
 mod embed;
 mod models;
 mod output;
+mod pkce;
 mod platform;
 mod query;
 mod sync;
