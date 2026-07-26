@@ -3,6 +3,7 @@ pub mod client;
 pub mod credentials;
 pub mod granola_auth;
 pub mod identity;
+pub mod local_store;
 mod token_store;
 pub mod types;
 
