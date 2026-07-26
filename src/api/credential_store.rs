@@ -6,6 +6,11 @@
 //! `data_dir()/auth.toml`, which keeps other local users out but leaves the
 //! token readable in a backup or a copy of the disk. Callers tell the user
 //! when that fallback is in use.
+//!
+//! On macOS the stored item is given a permissive ACL, which lets any process
+//! running as the user read it without a keychain prompt. That is a real
+//! concession, and [`super::keychain_acl`] explains why the alternative is
+//! being challenged for a password on every single read.
 
 use std::fs;
 use std::io::Write;
@@ -15,6 +20,8 @@ use anyhow::{Context, Result};
 use log::debug;
 
 use super::credentials::GranolaCredentials;
+#[cfg(target_os = "macos")]
+use super::keychain_acl;
 use crate::platform::data_dir;
 
 /// Keychain service name grans stores its session under.
@@ -71,7 +78,8 @@ impl CredentialStore {
                     .context("Failed to serialize credentials")?;
                 entry
                     .set_password(&json)
-                    .context("Failed to store credentials in the keychain")
+                    .context("Failed to store credentials in the keychain")?;
+                grant_prompt_free_access()
             }
         }
     }
@@ -136,6 +144,26 @@ fn reachable_keychain() -> Option<keyring::Entry> {
             None
         }
     }
+}
+
+/// Keep the item readable by the next build of grans as well as this one.
+///
+/// Applied on every save rather than at first login: it is idempotent, and an
+/// entry written by an earlier version still needs upgrading. Only macOS ties
+/// reads to the caller's code signature, so no other platform has anything to
+/// do here.
+#[cfg(target_os = "macos")]
+fn grant_prompt_free_access() -> Result<()> {
+    keychain_acl::allow_any_application(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).context(
+        "Stored the credentials, but could not stop the macOS keychain from asking \
+         for a password on every read. Run `grans auth logout` then `grans auth login` \
+         to rewrite the entry.",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn grant_prompt_free_access() -> Result<()> {
+    Ok(())
 }
 
 /// What the platform calls its keychain.
