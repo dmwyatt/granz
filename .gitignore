@@ -16,3 +16,9 @@ docs/granola-investigation/
 
 # IDE config
 .idea/
+
+# scripts/granola-api.py bytecode
+__pycache__/
+
+# MSYS/Git Bash crash dumps, e.g. grep.exe.stackdump
+*.stackdump
