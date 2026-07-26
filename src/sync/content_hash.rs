@@ -7,12 +7,33 @@
 //! into 4 MiB blocks, SHA-256 each block, concatenate those digests in order,
 //! and SHA-256 the result.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
 /// Dropbox hashes the file in 4 MiB blocks.
 const BLOCK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Compute the Dropbox content hash of a file on disk.
+///
+/// Reads the file in its own pass rather than hashing during the upload, which
+/// would mean threading a shared hasher through a request body that reqwest
+/// owns. The extra read costs a second or so against a transfer measured in
+/// minutes.
+pub fn hash_file(path: &Path) -> io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = ContentHasher::new();
+    let mut buffer = vec![0u8; BLOCK_SIZE];
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            return Ok(hasher.finish());
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+}
 
 /// Computes a Dropbox content hash incrementally.
 ///
@@ -180,6 +201,33 @@ mod tests {
                 piece
             );
         }
+    }
+
+    /// Hashing a file must agree with hashing the same bytes in memory, so an
+    /// upload check compares like with like.
+    #[test]
+    fn hash_file_matches_the_in_memory_hash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("payload.bin");
+        let data = vec![b'b'; BLOCK_SIZE + 1];
+        std::fs::write(&path, &data).unwrap();
+
+        assert_eq!(hash_file(&path).unwrap(), ONE_BLOCK_PLUS_ONE);
+        assert_eq!(hash_file(&path).unwrap(), hash_all(&data));
+    }
+
+    #[test]
+    fn hash_file_handles_an_empty_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+
+        assert_eq!(hash_file(&path).unwrap(), EMPTY);
+    }
+
+    #[test]
+    fn hash_file_reports_a_missing_file() {
+        assert!(hash_file(Path::new("no/such/file.bin")).is_err());
     }
 
     #[test]

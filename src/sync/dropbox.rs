@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use super::content_hash;
 use super::transfer::{self, ProgressFn, ProgressReader, UPLOAD_TIMEOUT};
 use super::{SyncError, SyncResult};
 
@@ -100,24 +101,36 @@ impl DropboxClient {
         on_progress: ProgressFn,
     ) -> SyncResult<FileMetadata> {
         let file_size = std::fs::metadata(local_path)?.len();
+        let local_hash = content_hash::hash_file(local_path)?;
         let start = Instant::now();
 
-        let result = if file_size <= UPLOAD_SINGLE_LIMIT {
+        let uploaded = if file_size <= UPLOAD_SINGLE_LIMIT {
             debug!("upload {} ({} bytes, single request)", dropbox_path, file_size);
             self.upload_single(local_path, dropbox_path, file_size, on_progress)
         } else {
             debug!("upload {} ({} bytes, chunked session)", dropbox_path, file_size);
             self.upload_chunked(local_path, dropbox_path, file_size, on_progress)
-        };
+        }?;
 
-        if result.is_ok() {
-            debug!(
-                "  upload complete: {}",
-                transfer::describe_throughput(file_size, start.elapsed())
-            );
-        }
+        debug!(
+            "  upload complete: {}",
+            transfer::describe_throughput(file_size, start.elapsed())
+        );
 
-        result
+        // Dropbox reports what it stored, so an upload can prove it arrived
+        // intact instead of leaving a corrupt backup to be discovered on the
+        // next pull.
+        let stored_hash =
+            uploaded
+                .content_hash
+                .as_deref()
+                .ok_or_else(|| SyncError::MissingContentHash {
+                    path: dropbox_path.to_string(),
+                })?;
+        transfer::verify_content_hash(stored_hash, &local_hash, "uploaded file")?;
+        debug!("  content hash verified: {}", local_hash);
+
+        Ok(uploaded)
     }
 
     /// Upload a file in a single request (for files <= 150 MB).
