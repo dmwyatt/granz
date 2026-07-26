@@ -57,9 +57,9 @@ pub fn resolve_token(override_token: Option<&str>) -> Result<String> {
 /// Use grans's own credentials if it has any, otherwise whatever this platform
 /// can fall back to.
 fn stored_or_local_token() -> Result<String> {
-    let store = CredentialStore::open()?;
+    let (store, stored) = CredentialStore::open()?;
 
-    match store.load()? {
+    match stored {
         Some(credentials) => {
             debug!("Using grans's own stored credentials");
             token_from_credentials(credentials, &store)

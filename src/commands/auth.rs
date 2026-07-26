@@ -33,9 +33,9 @@ pub fn run(action: &AuthAction, tz: &FixedOffset) -> Result<()> {
 }
 
 fn login(provider: AuthProvider, refresh_token_stdin: bool) -> Result<()> {
-    let store = CredentialStore::open()?;
+    let (store, existing) = CredentialStore::open()?;
 
-    if existing_session_kept(&store)? {
+    if existing.is_some() && !replacing_existing_session()? {
         return Ok(());
     }
 
@@ -70,12 +70,8 @@ fn print_no_keychain_warning() {
 
 /// Ask before replacing a session that already works.
 ///
-/// Returns true when the caller should stop, leaving the session alone.
-fn existing_session_kept(store: &CredentialStore) -> Result<bool> {
-    if store.load()?.is_none() {
-        return Ok(false);
-    }
-
+/// Returns true when the caller should go ahead and sign in again.
+fn replacing_existing_session() -> Result<bool> {
     println!("grans already has a Granola session.");
     print!("Sign in again? [y/N] ");
     io::stdout().flush()?;
@@ -84,11 +80,11 @@ fn existing_session_kept(store: &CredentialStore) -> Result<bool> {
     io::stdin().read_line(&mut input)?;
 
     if input.trim().eq_ignore_ascii_case("y") {
-        return Ok(false);
+        return Ok(true);
     }
 
     println!("Keeping the existing session.");
-    Ok(true)
+    Ok(false)
 }
 
 /// Bootstrap from a refresh token supplied on stdin.
@@ -159,9 +155,9 @@ fn print_callback_instructions() {
 }
 
 fn status(tz: &FixedOffset) -> Result<()> {
-    let store = CredentialStore::open()?;
+    let (store, stored) = CredentialStore::open()?;
 
-    let Some(credentials) = store.load()? else {
+    let Some(credentials) = stored else {
         println!("Not signed in.");
         println!("grans falls back to the token Granola's desktop app stored locally,");
         println!("which no longer works on current macOS builds. Run `grans auth login`.");
@@ -210,9 +206,9 @@ fn describe_expiry(credentials: &GranolaCredentials, tz: &FixedOffset) -> String
 }
 
 fn logout() -> Result<()> {
-    let store = CredentialStore::open()?;
+    let (store, stored) = CredentialStore::open()?;
 
-    if store.load()?.is_none() {
+    if stored.is_none() {
         println!("Not signed in; nothing to remove.");
         return Ok(());
     }

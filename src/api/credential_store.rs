@@ -40,16 +40,33 @@ pub enum CredentialStore {
 }
 
 impl CredentialStore {
-    /// Open the best available store, moving file-stored credentials into the
-    /// keychain the first time one is available.
-    pub fn open() -> Result<Self> {
-        let store = match reachable_keychain() {
-            Some(entry) => Self::Keychain(Box::new(entry)),
-            None => Self::File(credentials_path()?),
+    /// Open the best available store, and hand back the credentials it already
+    /// had to read to do so.
+    ///
+    /// Deciding whether a keychain is usable means reading from it, and on
+    /// macOS every read is its own authorization. Returning that read rather
+    /// than leaving the caller to repeat it is the difference between one
+    /// password prompt per command and two.
+    ///
+    /// A caller that needs to see a write another process made since must ask
+    /// for it with [`Self::load`], which always reads.
+    pub fn open() -> Result<(Self, Option<GranolaCredentials>)> {
+        let Some((entry, stored)) = reachable_keychain() else {
+            let path = credentials_path()?;
+            let stored = read_file(&path)?;
+            return Ok((Self::File(path), stored));
         };
 
-        store.absorb_credentials_file()?;
-        Ok(store)
+        let store = Self::Keychain(Box::new(entry));
+        let in_keychain = stored.as_deref().map(parse_credentials).transpose()?;
+
+        // The fallback file is only ever written by a run that found no
+        // keychain at all, so where both exist the file is the later of the
+        // two and wins.
+        Ok(match store.absorb_credentials_file()? {
+            Some(absorbed) => (store, Some(absorbed)),
+            None => (store, in_keychain),
+        })
     }
 
     /// A store backed by a specific file. Used for the fallback and by tests.
@@ -57,16 +74,18 @@ impl CredentialStore {
         Self::File(path)
     }
 
+    /// Read the credentials, going to the store every time.
+    ///
+    /// [`Self::open`] already returns what it read, so a command that wants
+    /// the credentials once should take them from there; this is for a caller
+    /// that specifically needs to see what is stored *now*.
     pub fn load(&self) -> Result<Option<GranolaCredentials>> {
         match self {
             Self::File(path) => read_file(path),
-            Self::Keychain(entry) => match entry.get_password() {
-                Ok(json) => serde_json::from_str(&json)
-                    .map(Some)
-                    .context("Failed to parse credentials from the keychain"),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(e).context("Failed to read credentials from the keychain"),
-            },
+            Self::Keychain(entry) => read_keychain(entry)?
+                .as_deref()
+                .map(parse_credentials)
+                .transpose(),
         }
     }
 
@@ -104,44 +123,64 @@ impl CredentialStore {
         }
     }
 
-    /// Move credentials out of the fallback file once a keychain is available.
+    /// Move credentials out of the fallback file once a keychain is available,
+    /// returning whatever was moved.
     ///
     /// The file is removed only after the keychain write succeeds, so a
     /// failure here leaves the existing credentials usable.
-    fn absorb_credentials_file(&self) -> Result<()> {
+    fn absorb_credentials_file(&self) -> Result<Option<GranolaCredentials>> {
         let Self::Keychain(_) = self else {
-            return Ok(());
+            return Ok(None);
         };
 
         let path = credentials_path()?;
         let Some(credentials) = read_file(&path)? else {
-            return Ok(());
+            return Ok(None);
         };
 
         debug!("Moving credentials from {} into the keychain", path.display());
         self.save(&credentials)?;
-        delete_file(&path)
+        delete_file(&path)?;
+
+        Ok(Some(credentials))
     }
 }
 
-/// The keychain, if one can actually be read from.
+/// The keychain, if one can actually be read from, and what that read found.
 ///
 /// Constructing an entry is not proof: a Linux box with no Secret Service, or
 /// a locked keychain, fails only when read. So this reads, and treats "no such
-/// entry" as a working keychain that is simply empty.
-fn reachable_keychain() -> Option<keyring::Entry> {
+/// entry" as a working keychain that is simply empty. What it read is handed
+/// back rather than discarded; see [`CredentialStore::open`].
+fn reachable_keychain() -> Option<(keyring::Entry, Option<String>)> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
         .inspect_err(|e| debug!("No keychain available: {}", e))
         .ok()?;
 
-    match entry.get_password() {
-        Ok(_) | Err(keyring::Error::NoEntry) => Some(entry),
+    match read_keychain(&entry) {
+        Ok(stored) => Some((entry, stored)),
         Err(e) => {
-            debug!("Keychain present but unreadable: {}", e);
+            debug!("Keychain present but unreadable: {:#}", e);
             None
         }
     }
 }
+
+/// Read the stored secret verbatim, or `None` if the keychain holds none.
+fn read_keychain(entry: &keyring::Entry) -> Result<Option<String>> {
+    match entry.get_password() {
+        Ok(json) => Ok(Some(json)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e).context("Failed to read credentials from the keychain"),
+    }
+}
+
+/// Parse what the keychain hands back, which is JSON rather than the TOML the
+/// file backend writes.
+fn parse_credentials(json: &str) -> Result<GranolaCredentials> {
+    serde_json::from_str(json).context("Failed to parse credentials from the keychain")
+}
+
 
 /// Write the secret so the next build of grans can still read it.
 ///
