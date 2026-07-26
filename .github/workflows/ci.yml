@@ -56,27 +56,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The integration suites spawn `grans.exe` once per test, and on this
-      # runner each spawn costs ~1.84s against ubuntu's 0.037s. Path exclusions
-      # got that down from 2.57s and no further, so this turns real-time
-      # scanning off outright: path exclusions do not reliably suppress the scan
-      # Defender runs when a process launches, which is the cost here.
-      #
-      # An ephemeral runner building our own code has little to protect, and the
-      # alternative is paying minutes per iteration.
-      #
-      # Asserted rather than assumed. If the runner image ever stops honouring
-      # this, Windows quietly returns to six minutes, and a silent regression is
-      # worse than a red step naming the reason.
-      - name: Turn off Defender real-time scanning
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Set-MpPreference -DisableRealtimeMonitoring $true
-          if (-not (Get-MpPreference).DisableRealtimeMonitoring) {
-            throw "Defender real-time monitoring is still enabled"
-          }
-
       # Pinned by SHA, so the toolchain no longer comes from the `stable` ref name.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
