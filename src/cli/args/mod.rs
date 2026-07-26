@@ -26,7 +26,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub db: Option<std::path::PathBuf>,
 
-    /// Use a specific API token instead of reading from Granola's config
+    /// Use a specific API token [env: GRANS_TOKEN]
+    ///
+    /// Without this, grans uses its own stored credentials (see
+    /// `grans auth login`), falling back to the token Granola's desktop app
+    /// stored locally.
     #[arg(long, global = true)]
     pub token: Option<String>,
 
@@ -248,6 +252,12 @@ pub enum Commands {
     Dropbox {
         #[command(subcommand)]
         action: DropboxAction,
+    },
+
+    /// Manage grans's Granola sign-in (login, status, logout)
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
     },
 
     // === Grouped Commands ===
@@ -624,6 +634,39 @@ pub enum DbAction {
     Info,
     /// List all database files
     List,
+}
+
+// === Auth Subcommands ===
+
+#[derive(Subcommand, Debug)]
+pub enum AuthAction {
+    /// Sign in to Granola and store credentials for grans
+    ///
+    /// Opens a browser to Granola's login. The callback is a granola:// URL
+    /// that your operating system routes to the Granola app rather than to
+    /// grans, so cancel the dialog offering to open Granola and paste the URL
+    /// back here instead.
+    Login {
+        /// Identity provider to sign in with
+        #[arg(long, value_enum, default_value_t = AuthProvider::Google)]
+        provider: AuthProvider,
+
+        /// Read an existing refresh token from stdin instead of signing in
+        ///
+        /// Keeps the token out of shell history and the process list.
+        #[arg(long)]
+        refresh_token_stdin: bool,
+    },
+    /// Show whether grans has its own Granola session
+    Status,
+    /// Remove grans's stored credentials
+    Logout,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum AuthProvider {
+    Google,
+    Microsoft,
 }
 
 #[derive(Subcommand, Debug)]

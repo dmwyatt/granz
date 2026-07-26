@@ -64,6 +64,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Auth commands (login, status, logout) don't need a database
+    if let Commands::Auth { action } = &cli.command {
+        commands::auth::run(action, &ctx.tz)?;
+        return Ok(());
+    }
+
     // Sync command (from Granola API)
     if let Commands::Sync { action, dry_run } = &cli.command {
         let conn = get_connection(cli.db.as_deref())?;
@@ -254,6 +260,7 @@ fn main() -> Result<()> {
 
         Commands::Benchmark { .. } => unreachable!(), // Handled above
         Commands::Dropbox { .. } => unreachable!(), // Handled above
+        Commands::Auth { .. } => unreachable!(), // Handled above
         Commands::Update { .. } => unreachable!(), // Handled above
         Commands::Sync { .. } => unreachable!(), // Handled above
         Commands::Embed { .. } => unreachable!(), // Handled above
