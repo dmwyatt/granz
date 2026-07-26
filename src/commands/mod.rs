@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod benchmark;
 pub mod browse;
 pub mod calendars;

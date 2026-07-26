@@ -14,7 +14,10 @@ use crate::output::format::OutputMode;
 use crate::sync::config::{config_path, SyncConfig};
 use crate::sync::dropbox::{format_timestamp, parse_dropbox_time, DropboxClient, FileMetadata};
 use crate::sync::metadata::SyncMetadata;
-use crate::sync::oauth::{build_auth_url, exchange_code, refresh_access_token, PkceChallenge};
+use crate::pkce::PkceChallenge;
+use crate::sync::oauth::{
+    build_auth_url, exchange_code, refresh_access_token, PKCE_ENTROPY_BYTES,
+};
 use crate::sync::SyncError;
 
 /// Remote paths on Dropbox (within app folder)
@@ -51,7 +54,7 @@ fn init() -> Result<()> {
     }
 
     // Generate PKCE challenge
-    let pkce = PkceChallenge::generate();
+    let pkce = PkceChallenge::generate(PKCE_ENTROPY_BYTES);
     let auth_url = build_auth_url(&pkce.challenge);
 
     println!("\nOpening browser for Dropbox authorization...");
