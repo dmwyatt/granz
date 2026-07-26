@@ -10,7 +10,10 @@
 //! On macOS the stored item is given a permissive ACL, which lets any process
 //! running as the user read it without a keychain prompt. That is a real
 //! concession, and [`super::keychain_acl`] explains why the alternative is
-//! being challenged for a password on every single read.
+//! being challenged for a password on every single read. Opening the store
+//! also repairs an item an older grans left without one, since a signed-in
+//! user can otherwise go indefinitely without writing anything for the fix to
+//! attach to.
 
 use std::fs;
 use std::io::Write;
@@ -18,6 +21,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use log::debug;
+#[cfg(target_os = "macos")]
+use log::warn;
 
 use super::credentials::GranolaCredentials;
 #[cfg(target_os = "macos")]
@@ -56,6 +61,12 @@ impl CredentialStore {
             let stored = read_file(&path)?;
             return Ok((Self::File(path), stored));
         };
+
+        // Before parsing, because the repair writes back the bytes that are
+        // there rather than a re-serialization of them.
+        if let Some(json) = &stored {
+            open_up_pinned_item(json);
+        }
 
         let store = Self::Keychain(Box::new(entry));
         let in_keychain = stored.as_deref().map(parse_credentials).transpose()?;
@@ -180,6 +191,27 @@ fn read_keychain(entry: &keyring::Entry) -> Result<Option<String>> {
 fn parse_credentials(json: &str) -> Result<GranolaCredentials> {
     serde_json::from_str(json).context("Failed to parse credentials from the keychain")
 }
+
+/// Give an entry written by an older grans the permissive ACL, so that reads
+/// from this build stop being challenged.
+///
+/// Failure is reported and stepped over rather than propagated. The credential
+/// has already been read by the time this runs, so the command can do its job
+/// either way, and the cost of not repairing is the prompt the user was
+/// getting anyway. Breaking `grans sync` over a keychain entry that is merely
+/// inconvenient would be the worse trade.
+#[cfg(target_os = "macos")]
+fn open_up_pinned_item(json: &str) {
+    match keychain_acl::open_up_existing(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, json.as_bytes()) {
+        Ok(true) => debug!("Reset the keychain entry's ACL; later reads will not be challenged"),
+        Ok(false) => {}
+        Err(e) => warn!("Could not stop the keychain challenging every read: {:#}", e),
+    }
+}
+
+/// Nothing to do: no other platform ties reads to the caller's code signature.
+#[cfg(not(target_os = "macos"))]
+fn open_up_pinned_item(_json: &str) {}
 
 
 /// Write the secret so the next build of grans can still read it.
