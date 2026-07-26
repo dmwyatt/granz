@@ -1,10 +1,11 @@
 //! Sync command implementations.
 
-use std::io::{self, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 
 use chrono::FixedOffset;
@@ -18,6 +19,7 @@ use crate::pkce::PkceChallenge;
 use crate::sync::oauth::{
     build_auth_url, exchange_code, refresh_access_token, PKCE_ENTROPY_BYTES,
 };
+use crate::sync::transfer::verify_transfer_size;
 use crate::sync::SyncError;
 
 /// Remote paths on Dropbox (within app folder)
@@ -102,7 +104,7 @@ fn push(force: bool) -> Result<()> {
 
     // Get access token
     let access_token = get_access_token(&config)?;
-    let client = DropboxClient::new(access_token);
+    let client = DropboxClient::new(access_token)?;
 
     // Get local database path
     let db_path = crate::db::connection::default_db_path()?;
@@ -195,7 +197,7 @@ fn pull(force: bool) -> Result<()> {
 
     // Get access token
     let access_token = get_access_token(&config)?;
-    let client = DropboxClient::new(access_token);
+    let client = DropboxClient::new(access_token)?;
 
     // Get local database path
     let db_path = crate::db::connection::default_db_path()?;
@@ -238,39 +240,101 @@ fn pull_file(
     // Check local file
     if !force && local_path.exists() {
         let local_mtime = get_file_mtime(local_path)?;
-        if let Some(remote_ts) = remote_mtime {
-            if local_mtime > remote_ts {
-                return Err(SyncError::ConflictLocalNewer {
-                    what: name.to_string(),
-                    local_time: format_timestamp(local_mtime),
-                    remote_time: format_timestamp(remote_ts),
-                }
-                .into());
+        if let Some(remote_ts) = remote_mtime
+            && local_mtime > remote_ts
+        {
+            return Err(SyncError::ConflictLocalNewer {
+                what: name.to_string(),
+                local_time: format_timestamp(local_mtime),
+                remote_time: format_timestamp(remote_ts),
             }
+            .into());
         }
     }
 
-    println!(
-        "Downloading {} ({:.2} MB)...",
-        name,
-        remote.size as f64 / 1_048_576.0
-    );
-
-    let content = client.download(remote_path)?;
+    println!("Downloading {} ({})...", name, format_size(remote.size));
 
     // Ensure parent directory exists
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Write to temp file first for atomic operation
+    // Download into a temp file so a failed transfer never replaces a good database.
     let temp_path = local_path.with_extension("db.tmp");
-    std::fs::write(&temp_path, &content)?;
-    std::fs::rename(&temp_path, local_path)?;
+    let downloaded = download_to_temp(client, remote_path, &temp_path, remote.size, name);
 
-    println!("  Downloaded to {}", local_path.display());
+    match downloaded {
+        Ok(()) => {
+            std::fs::rename(&temp_path, local_path)?;
+            println!("  Downloaded to {}", local_path.display());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(e)
+        }
+    }
+}
+
+/// Stream a remote file to `temp_path`, showing a progress bar, and verify its size.
+fn download_to_temp(
+    client: &DropboxClient,
+    remote_path: &str,
+    temp_path: &Path,
+    expected_size: u64,
+    name: &str,
+) -> Result<()> {
+    let progress = DownloadProgress::new(expected_size);
+
+    let mut file = BufWriter::new(std::fs::File::create(temp_path)?);
+    let written =
+        client.download_to_writer(remote_path, &mut file, &mut |bytes| progress.set(bytes))?;
+    file.flush()?;
+    drop(file);
+
+    verify_transfer_size(written, expected_size, name)?;
 
     Ok(())
+}
+
+/// Byte-count progress bar, shown only when stderr is a terminal.
+struct DownloadProgress {
+    bar: Option<ProgressBar>,
+}
+
+impl DownloadProgress {
+    fn new(total: u64) -> Self {
+        if !io::stderr().is_terminal() {
+            return Self { bar: None };
+        }
+
+        let pb = ProgressBar::new(total);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "[grans] {bytes}/{total_bytes} [{bar:30}] {percent}% {bytes_per_sec}, ETA {eta}",
+                )
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("=> "),
+        );
+        Self { bar: Some(pb) }
+    }
+
+    fn set(&self, bytes: u64) {
+        if let Some(ref pb) = self.bar {
+            pb.set_position(bytes);
+        }
+    }
+}
+
+/// Clear the bar however the download ends, so a failure message is not printed
+/// underneath a stale progress line.
+impl Drop for DownloadProgress {
+    fn drop(&mut self) {
+        if let Some(ref pb) = self.bar {
+            pb.finish_and_clear();
+        }
+    }
 }
 
 /// File information for status display
@@ -347,7 +411,7 @@ fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
         if config.is_authenticated() {
             match get_access_token(&config) {
                 Ok(access_token) => {
-                    let client = DropboxClient::new(access_token);
+                    let client = DropboxClient::new(access_token)?;
                     let remote_meta = fetch_remote_metadata(&client);
                     let db_meta = client.get_metadata(REMOTE_DB_PATH).ok().flatten();
 

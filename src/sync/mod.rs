@@ -4,6 +4,7 @@ pub mod config;
 pub mod dropbox;
 pub mod metadata;
 pub mod oauth;
+pub mod transfer;
 
 use thiserror::Error;
 
@@ -17,6 +18,24 @@ pub enum SyncError {
 
     #[error("Dropbox API error: {0}")]
     DropboxApi(String),
+
+    #[error("Dropbox {operation} failed: {hint}")]
+    Transport {
+        operation: String,
+        hint: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error(
+        "Incomplete transfer: {what} delivered {actual} bytes but Dropbox reported {expected}. \
+         The local file was left untouched; retry the transfer."
+    )]
+    IncompleteTransfer {
+        what: String,
+        actual: u64,
+        expected: u64,
+    },
 
     #[error("Config error: {0}")]
     Config(String),
