@@ -41,7 +41,27 @@ jobs:
       # must not cancel the others.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # `scope` is what each platform is here to prove.
+        #
+        # Every platform-gated line in this repo sits in src/ -- the macOS
+        # keychain path and local-store cutoff in api/auth.rs, the Windows
+        # os_crypt/DPAPI path in api/token_store.rs, the cfg(unix) branches in
+        # api/credential_store.rs -- so its tests are all unit tests in the bin
+        # target, and `--bins` compiles and runs every one of them. Nothing in
+        # tests/*.rs is platform-gated at all.
+        #
+        # Those integration suites cost 225s on the Windows leg against 16s on
+        # ubuntu, because each of their 75 tests spawns `grans.exe` and a spawn
+        # costs ~2s on that runner. Paying it three times over on every push
+        # bought no platform coverage, so ubuntu carries them for the PR and
+        # platform-tests.yml runs them everywhere once the branch is merged.
+        include:
+          - os: ubuntu-latest
+            scope: ""
+          - os: macos-latest
+            scope: "--bins"
+          - os: windows-latest
+            scope: "--bins"
     env:
       # Full debuginfo writes a 194 MB PDB beside the binary and leaves a 2.4 GB
       # target/. Line tables cut those to 103 MB and 1.7 GB: less to link, and
@@ -64,12 +84,12 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       # Without --no-fail-fast, cargo stops after the first test binary that
-      # fails, so one broken unit test in src/ means the 75 integration tests
-      # across tests/*.rs never launch and the red leg reports nothing about
-      # them. A failing run costs more wall clock this way; it buys a complete
-      # failure list instead of another round trip to find the rest.
+      # fails. On the ubuntu leg that means one broken unit test in src/ hides
+      # all 75 integration tests in tests/*.rs, and the red leg reports nothing
+      # about them. A failing run costs more wall clock this way; it buys a
+      # complete failure list instead of another round trip to find the rest.
       - name: Run tests
-        run: cargo test --no-fail-fast
+        run: cargo test --no-fail-fast ${{ matrix.scope }}
 
   code-review:
     name: Code Review
