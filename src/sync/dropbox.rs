@@ -3,10 +3,13 @@
 //! Implements upload, download, and metadata operations using the Dropbox HTTP API.
 //! Files under 150 MB use single-request uploads; larger files use chunked upload sessions.
 
+use log::debug;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::time::Instant;
 
+use super::transfer::{self, UPLOAD_TIMEOUT};
 use super::{SyncError, SyncResult};
 
 const UPLOAD_URL: &str = "https://content.dropboxapi.com/2/files/upload";
@@ -35,6 +38,11 @@ pub struct FileMetadata {
     pub server_modified: String,
     #[serde(rename = ".tag")]
     pub tag: Option<String>,
+    /// Dropbox's hash of the stored file, for verifying a download.
+    ///
+    /// Optional so that a response without it still deserializes; callers that
+    /// require verification reject its absence themselves.
+    pub content_hash: Option<String>,
 }
 
 /// Error response from Dropbox API.
@@ -67,13 +75,18 @@ pub struct DropboxClient {
     http: reqwest::blocking::Client,
 }
 
+/// Serialize a `Dropbox-API-Arg` header value.
+fn serialize_arg<T: Serialize>(arg: &T) -> SyncResult<String> {
+    serde_json::to_string(arg).map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))
+}
+
 impl DropboxClient {
     /// Create a new client with an access token.
-    pub fn new(access_token: String) -> Self {
-        Self {
+    pub fn new(access_token: String) -> SyncResult<Self> {
+        Ok(Self {
             access_token,
-            http: reqwest::blocking::Client::new(),
-        }
+            http: transfer::build_client()?,
+        })
     }
 
     /// Upload a file to Dropbox.
@@ -82,12 +95,24 @@ impl DropboxClient {
     /// Files over 150 MB are automatically uploaded using chunked upload sessions.
     pub fn upload(&self, local_path: &Path, dropbox_path: &str) -> SyncResult<FileMetadata> {
         let file_size = std::fs::metadata(local_path)?.len();
+        let start = Instant::now();
 
-        if file_size <= UPLOAD_SINGLE_LIMIT {
+        let result = if file_size <= UPLOAD_SINGLE_LIMIT {
+            debug!("upload {} ({} bytes, single request)", dropbox_path, file_size);
             self.upload_single(local_path, dropbox_path)
         } else {
+            debug!("upload {} ({} bytes, chunked session)", dropbox_path, file_size);
             self.upload_chunked(local_path, dropbox_path, file_size)
+        };
+
+        if result.is_ok() {
+            debug!(
+                "  upload complete: {}",
+                transfer::describe_throughput(file_size, start.elapsed())
+            );
         }
+
+        result
     }
 
     /// Upload a file in a single request (for files <= 150 MB).
@@ -101,8 +126,7 @@ impl DropboxClient {
             mute: true,
         };
 
-        let arg_json = serde_json::to_string(&arg)
-            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+        let arg_json = serialize_arg(&arg)?;
 
         let response = self
             .http
@@ -110,8 +134,10 @@ impl DropboxClient {
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Dropbox-API-Arg", arg_json)
             .header("Content-Type", "application/octet-stream")
+            .timeout(UPLOAD_TIMEOUT)
             .body(content)
-            .send()?;
+            .send()
+            .map_err(|e| transfer::transport_error(format!("upload of {}", dropbox_path), e))?;
 
         self.handle_response(response)
     }
@@ -181,8 +207,7 @@ impl DropboxClient {
             close: bool,
         }
 
-        let arg_json = serde_json::to_string(&StartArg { close: false })
-            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+        let arg_json = serialize_arg(&StartArg { close: false })?;
 
         let response = self
             .http
@@ -190,8 +215,10 @@ impl DropboxClient {
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Dropbox-API-Arg", &arg_json)
             .header("Content-Type", "application/octet-stream")
+            .timeout(UPLOAD_TIMEOUT)
             .body(data.to_vec())
-            .send()?;
+            .send()
+            .map_err(|e| transfer::transport_error("upload session start", e))?;
 
         #[derive(Deserialize)]
         struct StartResult {
@@ -223,8 +250,7 @@ impl DropboxClient {
             close: false,
         };
 
-        let arg_json = serde_json::to_string(&arg)
-            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+        let arg_json = serialize_arg(&arg)?;
 
         let response = self
             .http
@@ -232,8 +258,12 @@ impl DropboxClient {
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Dropbox-API-Arg", &arg_json)
             .header("Content-Type", "application/octet-stream")
+            .timeout(UPLOAD_TIMEOUT)
             .body(data.to_vec())
-            .send()?;
+            .send()
+            .map_err(|e| {
+                transfer::transport_error(format!("upload of chunk at offset {}", offset), e)
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -271,8 +301,7 @@ impl DropboxClient {
             },
         };
 
-        let arg_json = serde_json::to_string(&arg)
-            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+        let arg_json = serialize_arg(&arg)?;
 
         let response = self
             .http
@@ -280,46 +309,103 @@ impl DropboxClient {
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Dropbox-API-Arg", &arg_json)
             .header("Content-Type", "application/octet-stream")
+            .timeout(UPLOAD_TIMEOUT)
             .body(data.to_vec())
-            .send()?;
+            .send()
+            .map_err(|e| {
+                transfer::transport_error(format!("upload commit for {}", dropbox_path), e)
+            })?;
 
         self.handle_response(response)
     }
 
-    /// Download a file from Dropbox.
+    /// Download a small file from Dropbox into memory.
     ///
-    /// Returns the file content as bytes.
+    /// Only for files whose size is known to be modest, such as sync metadata.
+    /// Use [`DropboxClient::download_to_writer`] for databases.
     pub fn download(&self, dropbox_path: &str) -> SyncResult<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.download_to_writer(dropbox_path, &mut buffer, &mut |_| {})?;
+        Ok(buffer)
+    }
+
+    /// Stream a file from Dropbox into `writer`, reporting the running byte count.
+    ///
+    /// Returns the number of bytes written.
+    ///
+    /// Streaming keeps the file out of memory and, because reqwest bounds each
+    /// read rather than the request as a whole, lets a transfer run as long as
+    /// the connection keeps delivering data.
+    pub fn download_to_writer<W: Write>(
+        &self,
+        dropbox_path: &str,
+        writer: &mut W,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> SyncResult<u64> {
         #[derive(Serialize)]
         struct DownloadArg {
             path: String,
         }
 
-        let arg = DownloadArg {
+        let arg_json = serialize_arg(&DownloadArg {
             path: dropbox_path.to_string(),
-        };
+        })?;
 
-        let arg_json = serde_json::to_string(&arg)
-            .map_err(|e| SyncError::DropboxApi(format!("serialize arg: {}", e)))?;
+        debug!("POST {} (download {})", DOWNLOAD_URL, dropbox_path);
+        let start = Instant::now();
 
-        let response = self
+        let mut response = self
             .http
             .post(DOWNLOAD_URL)
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Dropbox-API-Arg", arg_json)
-            .send()?;
+            .send()
+            .map_err(|e| {
+                debug!("  network error after {:?}: {}", start.elapsed(), e);
+                transfer::transport_error(format!("download of {}", dropbox_path), e)
+            })?;
 
         let status = response.status();
+        debug!("  response: {} in {:?}", status, start.elapsed());
+
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
             return Err(self.parse_error(status, &body));
         }
 
-        let bytes = response
-            .bytes()
-            .map_err(|e| SyncError::DropboxApi(format!("read body: {}", e)))?;
+        // Mirror the running count so a failed transfer can still report how far
+        // it got, which is what distinguishes a mid-transfer drop from a stall
+        // that never delivered anything.
+        let body_start = Instant::now();
+        let mut transferred = 0u64;
+        let result = {
+            let mut track = |bytes: u64| {
+                transferred = bytes;
+                on_progress(bytes);
+            };
+            transfer::stream_with_progress(&mut response, writer, &mut track)
+        };
 
-        Ok(bytes.to_vec())
+        let elapsed = body_start.elapsed();
+        match result {
+            Ok(written) => {
+                debug!(
+                    "  body complete: {}",
+                    transfer::describe_throughput(written, elapsed)
+                );
+                Ok(written)
+            }
+            Err(e) => {
+                debug!(
+                    "  body failed after {}",
+                    transfer::describe_throughput(transferred, elapsed)
+                );
+                Err(transfer::stream_error(
+                    format!("download of {}", dropbox_path),
+                    e,
+                ))
+            }
+        }
     }
 
     /// Get metadata for a file on Dropbox.
@@ -335,20 +421,29 @@ impl DropboxClient {
             path: dropbox_path.to_string(),
         };
 
+        debug!("POST {} (metadata for {})", METADATA_URL, dropbox_path);
+        let start = Instant::now();
+
         let response = self
             .http
             .post(METADATA_URL)
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Content-Type", "application/json")
             .json(&arg)
-            .send()?;
+            .send()
+            .map_err(|e| {
+                debug!("  network error after {:?}: {}", start.elapsed(), e);
+                transfer::transport_error(format!("metadata lookup for {}", dropbox_path), e)
+            })?;
 
         let status = response.status();
+        debug!("  response: {} in {:?}", status, start.elapsed());
         let body = response.text().unwrap_or_default();
 
         if status.as_u16() == 409 {
             // Check if it's a "not found" error
             if body.contains("not_found") {
+                debug!("  {} does not exist on Dropbox", dropbox_path);
                 return Ok(None);
             }
         }

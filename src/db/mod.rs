@@ -2,6 +2,7 @@ pub mod calendars;
 mod common;
 pub mod connection;
 pub mod info;
+pub mod integrity;
 pub mod meetings;
 pub mod migrations;
 pub mod panels;
