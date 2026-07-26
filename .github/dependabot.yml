@@ -1,0 +1,24 @@
+version: 2
+
+updates:
+  # Actions are pinned by SHA, which costs us Dependabot security alerts:
+  # advisory matching needs a semver version to compare against, and a SHA
+  # gives it nothing. Nothing will tell us a pin has turned out to be
+  # vulnerable, so these scheduled bumps are what keeps the pins from going
+  # stale until an advisory lands on one.
+  #
+  # The cooldown is the part doing real work. A compromised upstream that
+  # ships a malicious *new* release defeats SHA pinning entirely, since we
+  # adopt it on the next bump either way. Waiting before adopting is the
+  # defense: these compromises are usually public within a day or two.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    groups:
+      actions:
+        patterns:
+          - "*"
