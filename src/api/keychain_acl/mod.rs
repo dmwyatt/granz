@@ -28,8 +28,22 @@
 //!
 //! Creating the item with its access already attached needs no such
 //! authorization, so [`store_with_open_access`] deletes whatever is there and
-//! writes a new item rather than amending one. That also upgrades an entry left
-//! by an older grans, without the prompt an amend would have cost.
+//! writes a new item rather than amending one.
+//!
+//! # Why the read path has to check too
+//!
+//! Writing covers an item this build wrote, but grans mostly reads: a user
+//! whose stored access token is still valid goes a whole command without
+//! writing anything. An entry left by a grans from before any of this existed
+//! is still pinned to whatever build wrote it, is still challenged on every
+//! read, and no amount of writing that never happens will fix it.
+//!
+//! [`open_up_existing`] is the check that closes that gap. Locating an item and
+//! reading its ACLs decrypts nothing and needs no authorization, so it costs
+//! the user nothing on the common path where the item is already open, and it
+//! rewrites only what would otherwise have gone on prompting forever.
+
+mod sys;
 
 use std::ffi::c_void;
 use std::ptr;
@@ -38,7 +52,7 @@ use anyhow::{bail, Result};
 use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
-use core_foundation_sys::base::{CFRelease, CFTypeRef, OSStatus};
+use core_foundation_sys::base::{CFRelease, OSStatus};
 use core_foundation_sys::string::CFStringRef;
 use security_framework::os::macos::access::SecAccess;
 use security_framework::os::macos::keychain::SecKeychain;
@@ -47,65 +61,12 @@ use security_framework_sys::base::{
     SecAccessRef, SecKeychainAttribute, SecKeychainAttributeList, SecKeychainItemRef,
 };
 
-/// An entry in a `SecAccess`'s ACL list. Opaque; only handed back to Security.
-type SecACLRef = *const c_void;
-
-/// `SecKeychainPromptSelector`, a bitfield of the conditions that force a
-/// prompt even for a trusted caller. Zero forces none of them.
-type SecKeychainPromptSelector = u16;
-
-/// `errSecItemNotFound`. A miss, rather than something going wrong.
-const ITEM_NOT_FOUND: OSStatus = -25300;
-
-// Four-character codes, spelled out because the `-sys` crate binds none of
-// them: 'genp' (a generic password), 'svce' (its service), 'acct' (its
-// account).
-const GENERIC_PASSWORD_CLASS: u32 = 0x6765_6E70;
-const SERVICE_ATTR: u32 = 0x7376_6365;
-const ACCOUNT_ATTR: u32 = 0x6163_6374;
-
-// Neither `security-framework` nor its `-sys` crate binds these: the former
-// declares the `SecAccess` type and nothing that builds one, and the latter
-// covers only `SecAccessGetTypeID`.
-unsafe extern "C" {
-    fn SecAccessCreate(
-        descriptor: CFStringRef,
-        trustedlist: CFArrayRef,
-        accessRef: *mut SecAccessRef,
-    ) -> OSStatus;
-
-    fn SecAccessCopyACLList(accessRef: SecAccessRef, aclList: *mut CFArrayRef) -> OSStatus;
-
-    fn SecACLSetContents(
-        acl: SecACLRef,
-        applicationList: CFArrayRef,
-        description: CFStringRef,
-        promptSelector: SecKeychainPromptSelector,
-    ) -> OSStatus;
-
-    fn SecKeychainFindGenericPassword(
-        keychainOrArray: CFTypeRef,
-        serviceNameLength: u32,
-        serviceName: *const c_void,
-        accountNameLength: u32,
-        accountName: *const c_void,
-        passwordLength: *mut u32,
-        passwordData: *mut *mut c_void,
-        itemRef: *mut SecKeychainItemRef,
-    ) -> OSStatus;
-
-    fn SecKeychainItemCreateFromContent(
-        itemClass: u32,
-        attrList: *const SecKeychainAttributeList,
-        length: u32,
-        data: *const c_void,
-        keychainRef: CFTypeRef,
-        initialAccess: SecAccessRef,
-        itemRef: *mut SecKeychainItemRef,
-    ) -> OSStatus;
-
-    fn SecKeychainItemDelete(itemRef: SecKeychainItemRef) -> OSStatus;
-}
+use sys::{
+    SecACLCopyContents, SecACLRef, SecACLSetContents, SecAccessCopyACLList, SecAccessCreate,
+    SecKeychainFindGenericPassword, SecKeychainItemCopyAccess, SecKeychainItemCreateFromContent,
+    SecKeychainItemDelete, SecKeychainPromptSelector, ACCOUNT_ATTR, GENERIC_PASSWORD_CLASS,
+    ITEM_NOT_FOUND, SERVICE_ATTR,
+};
 
 /// Store `secret` under `service`/`account` so any application can read it back
 /// without a password prompt.
@@ -114,6 +75,37 @@ unsafe extern "C" {
 /// replaces rather than amends.
 pub fn store_with_open_access(service: &str, account: &str, secret: &[u8]) -> Result<()> {
     store(None, service, account, secret)
+}
+
+/// Give a stored item the open ACL if it does not already have one, and report
+/// whether that was necessary.
+///
+/// `secret` is what the item currently holds. Opening it up means replacing it
+/// (see the module docs), so the value has to be written back.
+pub fn open_up_existing(service: &str, account: &str, secret: &[u8]) -> Result<bool> {
+    open_up(None, service, account, secret)
+}
+
+/// The same, against a specific keychain.
+fn open_up(
+    keychain: Option<&SecKeychain>,
+    service: &str,
+    account: &str,
+    secret: &[u8],
+) -> Result<bool> {
+    // Scoped, so the item reference is gone before `store` deletes what it
+    // points at.
+    let pinned = match find_item(keychain, service, account)? {
+        Some(item) => names_applications(&item)?,
+        None => return Ok(false),
+    };
+
+    if !pinned {
+        return Ok(false);
+    }
+
+    store(keychain, service, account, secret)?;
+    Ok(true)
 }
 
 /// The same, against a specific keychain. Tests pass a throwaway one rather
@@ -224,16 +216,54 @@ fn permissive_access(descriptor: &CFString) -> Result<SecAccess> {
     Ok(access)
 }
 
+/// Whether the item still trusts a fixed list of applications, which is what
+/// makes macOS challenge every build of grans but the one that wrote it.
+fn names_applications(item: &SecKeychainItem) -> Result<bool> {
+    let mut access: SecAccessRef = ptr::null_mut();
+    check(
+        unsafe { SecKeychainItemCopyAccess(item.as_concrete_TypeRef(), &mut access) },
+        "read the access settings of the keychain entry",
+    )?;
+    let access = unsafe { SecAccess::wrap_under_create_rule(access) };
+
+    // Bound rather than iterated inline: the entries are borrowed from the
+    // array, so it has to outlive the loop.
+    let acls = acl_list(&access)?;
+    for acl in acls.entries() {
+        if acl_names_applications(acl)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Whether one ACL names applications. Any list at all is a fixed set; only a
+/// NULL one means "every application".
+fn acl_names_applications(acl: SecACLRef) -> Result<bool> {
+    let mut applications: CFArrayRef = ptr::null();
+    let mut description: CFStringRef = ptr::null();
+    let mut prompt: SecKeychainPromptSelector = 0;
+
+    check(
+        unsafe { SecACLCopyContents(acl, &mut applications, &mut description, &mut prompt) },
+        "read the contents of an ACL",
+    )?;
+
+    // Both out-params come back under the create rule, so both are ours to
+    // release even though only one is being read.
+    let applications = OwnedArray(applications);
+    if !description.is_null() {
+        unsafe { CFRelease(description.cast()) };
+    }
+
+    Ok(!applications.is_null())
+}
+
 /// Drop every ACL's trusted-application list.
 fn clear_trusted_applications(access: &SecAccess, descriptor: &CFString) -> Result<()> {
-    let mut list: CFArrayRef = ptr::null();
-    check(
-        unsafe { SecAccessCopyACLList(access.as_concrete_TypeRef(), &mut list) },
-        "read the ACLs of a keychain access object",
-    )?;
-    let list = OwnedArray(list);
-
-    for acl in list.entries() {
+    let acls = acl_list(access)?;
+    for acl in acls.entries() {
         check(
             // NULL is what macOS reads as "any application, no prompt". An
             // empty array is the opposite: nobody is trusted, always ask.
@@ -245,6 +275,17 @@ fn clear_trusted_applications(access: &SecAccess, descriptor: &CFString) -> Resu
     Ok(())
 }
 
+/// The ACLs of `access`, as an array that releases itself.
+fn acl_list(access: &SecAccess) -> Result<OwnedArray> {
+    let mut list: CFArrayRef = ptr::null();
+    check(
+        unsafe { SecAccessCopyACLList(access.as_concrete_TypeRef(), &mut list) },
+        "read the ACLs of a keychain access object",
+    )?;
+
+    Ok(OwnedArray(list))
+}
+
 /// A `CFArrayRef` handed over under the create rule, released when dropped.
 struct OwnedArray(CFArrayRef);
 
@@ -254,6 +295,12 @@ impl OwnedArray {
         (0..count)
             .map(|index| unsafe { CFArrayGetValueAtIndex(self.0, index) })
             .collect()
+    }
+
+    /// Whether Security handed back no array at all, which for a
+    /// trusted-application list is what "every application" looks like.
+    fn is_null(&self) -> bool {
+        self.0.is_null()
     }
 }
 
@@ -281,22 +328,6 @@ mod tests {
     use security_framework::os::macos::passwords::find_generic_password;
     use tempfile::TempDir;
 
-    // Read-side counterparts of the calls above, needed only to assert on what
-    // was written.
-    unsafe extern "C" {
-        fn SecKeychainItemCopyAccess(
-            itemRef: SecKeychainItemRef,
-            accessRef: *mut SecAccessRef,
-        ) -> OSStatus;
-
-        fn SecACLCopyContents(
-            acl: SecACLRef,
-            applicationList: *mut CFArrayRef,
-            description: *mut CFStringRef,
-            promptSelector: *mut SecKeychainPromptSelector,
-        ) -> OSStatus;
-    }
-
     const SERVICE: &str = "grans-acl-test";
     const ACCOUNT: &str = "granola-session";
 
@@ -318,34 +349,18 @@ mod tests {
         keychain
     }
 
-    /// For each ACL on the stored item, whether it trusts a fixed list of
-    /// applications rather than all of them.
-    fn acls_naming_applications(keychain: &SecKeychain) -> Vec<bool> {
+    /// Whether the stored item would challenge a build of grans other than the
+    /// one that wrote it.
+    fn is_pinned(keychain: &SecKeychain) -> bool {
         let item = find_item(Some(keychain), SERVICE, ACCOUNT).unwrap().unwrap();
 
-        let mut access: SecAccessRef = ptr::null_mut();
-        let status = unsafe { SecKeychainItemCopyAccess(item.as_concrete_TypeRef(), &mut access) };
-        assert_eq!(status, 0, "SecKeychainItemCopyAccess");
-        let access = unsafe { SecAccess::wrap_under_create_rule(access) };
+        names_applications(&item).unwrap()
+    }
 
-        let mut list: CFArrayRef = ptr::null();
-        let status = unsafe { SecAccessCopyACLList(access.as_concrete_TypeRef(), &mut list) };
-        assert_eq!(status, 0, "SecAccessCopyACLList");
-        let list = OwnedArray(list);
+    fn stored_secret(keychain: SecKeychain) -> Vec<u8> {
+        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
 
-        list.entries()
-            .into_iter()
-            .map(|acl| {
-                let mut applications: CFArrayRef = ptr::null();
-                let mut description: CFStringRef = ptr::null();
-                let mut prompt: SecKeychainPromptSelector = 0;
-                let status = unsafe {
-                    SecACLCopyContents(acl, &mut applications, &mut description, &mut prompt)
-                };
-                assert_eq!(status, 0, "SecACLCopyContents");
-                !applications.is_null()
-            })
-            .collect()
+        password.to_vec()
     }
 
     #[test]
@@ -356,7 +371,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keychain = keychain_pinned_to_creator(&dir);
 
-        assert!(acls_naming_applications(&keychain).contains(&true));
+        assert!(is_pinned(&keychain));
     }
 
     #[test]
@@ -366,7 +381,7 @@ mod tests {
 
         store(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
 
-        assert!(!acls_naming_applications(&keychain).contains(&true));
+        assert!(!is_pinned(&keychain));
     }
 
     #[test]
@@ -376,8 +391,7 @@ mod tests {
 
         store(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
 
-        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
-        assert_eq!(&*password, b"secret");
+        assert_eq!(stored_secret(keychain), b"secret");
     }
 
     #[test]
@@ -388,8 +402,7 @@ mod tests {
         store(Some(&keychain), SERVICE, ACCOUNT, b"first").unwrap();
         store(Some(&keychain), SERVICE, ACCOUNT, b"second").unwrap();
 
-        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
-        assert_eq!(&*password, b"second");
+        assert_eq!(stored_secret(keychain), b"second");
     }
 
     #[test]
@@ -398,13 +411,12 @@ mod tests {
         // against a signature that has since changed; replacing it does not.
         let dir = TempDir::new().unwrap();
         let keychain = keychain_pinned_to_creator(&dir);
-        assert!(acls_naming_applications(&keychain).contains(&true));
+        assert!(is_pinned(&keychain));
 
         store(Some(&keychain), SERVICE, ACCOUNT, b"rotated").unwrap();
 
-        assert!(!acls_naming_applications(&keychain).contains(&true));
-        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
-        assert_eq!(&*password, b"rotated");
+        assert!(!is_pinned(&keychain));
+        assert_eq!(stored_secret(keychain), b"rotated");
     }
 
     #[test]
@@ -415,5 +427,47 @@ mod tests {
         assert!(find_item(Some(&keychain), SERVICE, "nobody")
             .unwrap()
             .is_none());
+    }
+
+    // --- opening up what an older grans left behind ---
+
+    #[test]
+    fn test_open_up_rewrites_a_pinned_entry_and_keeps_its_secret() {
+        // The bug this exists for: grans updates, the item it stored months
+        // ago is still pinned to a build that no longer exists, and every read
+        // is challenged. Nothing writes on a read-only command, so without
+        // this the prompting never stops.
+        let dir = TempDir::new().unwrap();
+        let keychain = keychain_pinned_to_creator(&dir);
+
+        let rewritten = open_up(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
+
+        assert!(rewritten);
+        assert!(!is_pinned(&keychain));
+        assert_eq!(stored_secret(keychain), b"secret");
+    }
+
+    #[test]
+    fn test_open_up_leaves_an_already_open_entry_alone() {
+        // Every command opens the credential store, so an item that is already
+        // open must not be deleted and rewritten each time.
+        let dir = TempDir::new().unwrap();
+        let keychain = keychain(&dir);
+        store(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
+
+        let rewritten = open_up(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap();
+
+        assert!(!rewritten);
+        assert!(!is_pinned(&keychain));
+    }
+
+    #[test]
+    fn test_open_up_reports_nothing_to_do_when_the_entry_is_gone() {
+        // The item is looked up again here after having been read, so it can
+        // have been removed in between.
+        let dir = TempDir::new().unwrap();
+        let keychain = keychain(&dir);
+
+        assert!(!open_up(Some(&keychain), SERVICE, ACCOUNT, b"secret").unwrap());
     }
 }
