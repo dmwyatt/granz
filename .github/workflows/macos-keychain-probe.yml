@@ -11,8 +11,18 @@ name: macOS keychain probe
 # The tests are therefore #[ignore]d out of the normal suite, and run here one
 # at a time under individual timeouts, so a block is a data point rather than an
 # hour of billed macOS runner time.
+#
+# The path filter keeps this off the critical path: it runs only when the ACL
+# code or this workflow changes, which is exactly when its answer is worth a
+# macOS runner. `workflow_dispatch` alone would not do, since GitHub only offers
+# that button for workflows already on the default branch.
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/api/keychain_acl.rs'
+      - '.github/workflows/macos-keychain-probe.yml'
 
 env:
   CARGO_TERM_COLOR: always
