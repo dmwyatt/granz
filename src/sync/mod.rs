@@ -5,6 +5,7 @@ pub mod content_hash;
 pub mod dropbox;
 pub mod metadata;
 pub mod oauth;
+pub mod reconcile;
 pub mod transfer;
 
 use thiserror::Error;
@@ -58,19 +59,24 @@ pub enum SyncError {
     #[error("Config error: {0}")]
     Config(String),
 
-    #[error("File conflict: {what} on Dropbox is newer ({remote_time}) than local ({local_time}). Use --force to overwrite.")]
-    ConflictRemoteNewer {
-        what: String,
-        remote_time: String,
-        local_time: String,
-    },
+    #[error(
+        "The {what} on Dropbox has changed since this machine last synced, so pushing would \
+         discard those changes. Run 'grans dropbox pull' first, or push --force to overwrite."
+    )]
+    ConflictRemoteChanged { what: String },
 
-    #[error("File conflict: {what} locally is newer ({local_time}) than on Dropbox ({remote_time}). Use --force to overwrite.")]
-    ConflictLocalNewer {
-        what: String,
-        local_time: String,
-        remote_time: String,
-    },
+    #[error(
+        "The local {what} has changed since this machine last synced, so pulling would discard \
+         those changes. Run 'grans dropbox push' first, or pull --force to overwrite."
+    )]
+    ConflictLocalChanged { what: String },
+
+    #[error(
+        "The {what} on Dropbox differs from the local copy, and grans has no record of syncing \
+         with it, so neither can be shown to supersede the other. Compare them with \
+         'grans dropbox status', then push --force or pull --force to choose."
+    )]
+    ConflictNoSyncRecord { what: String },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

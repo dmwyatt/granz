@@ -12,7 +12,7 @@ use chrono::FixedOffset;
 use crate::cli::args::DropboxAction;
 use crate::output::format::{format_size, OutputMode};
 use crate::sync::config::{config_path, SyncConfig};
-use crate::sync::dropbox::{format_timestamp, parse_dropbox_time, DropboxClient};
+use crate::sync::dropbox::DropboxClient;
 use crate::sync::metadata::SyncMetadata;
 use crate::pkce::PkceChallenge;
 use crate::sync::oauth::{
@@ -20,7 +20,8 @@ use crate::sync::oauth::{
 };
 use crate::db::integrity::check_pulled_database;
 use crate::output::progress::create_spinner;
-use crate::sync::content_hash::HashingWriter;
+use crate::sync::content_hash::{hash_file, HashingWriter};
+use crate::sync::reconcile::{decide, TransferDecision};
 use crate::sync::transfer::{no_progress, verify_content_hash, verify_transfer_size, ProgressFn};
 use crate::sync::SyncError;
 
@@ -116,19 +117,21 @@ fn push(force: bool) -> Result<()> {
         return Ok(());
     }
 
-    push_file(
+    let synced_hash = push_file(
         &client,
         &db_path,
         REMOTE_DB_PATH,
         "database",
         force,
+        config.last_synced_hash.as_deref(),
     )?;
 
     // Generate and upload metadata
     let metadata = SyncMetadata::from_local_db(Some(&db_path))?;
     upload_metadata(&client, &metadata)?;
 
-    // Update last push time
+    // Record what both sides now hold, so the next sync can tell which one moved.
+    config.last_synced_hash = Some(synced_hash);
     config.last_push_time = Some(current_timestamp());
     config.save()?;
     println!("\nPush complete!");
@@ -152,27 +155,40 @@ fn upload_metadata(client: &DropboxClient, metadata: &SyncMetadata) -> Result<()
     Ok(())
 }
 
+/// Push a file, unless the remote copy holds changes this machine has not seen.
+///
+/// Returns the content hash both sides hold afterwards, to record as the
+/// reference point for the next sync.
 fn push_file(
     client: &DropboxClient,
     local_path: &Path,
     remote_path: &str,
     name: &str,
     force: bool,
-) -> Result<()> {
-    let local_mtime = get_file_mtime(local_path)?;
+    last_synced: Option<&str>,
+) -> Result<String> {
+    let local_hash = hash_file(local_path)?;
+    let remote = client.get_metadata(remote_path)?;
+    let remote_hash = remote.as_ref().and_then(|m| m.content_hash.as_deref());
 
-    // Check remote file
-    if !force
-        && let Some(remote) = client.get_metadata(remote_path)?
-        && let Some(remote_mtime) = parse_dropbox_time(&remote.server_modified)
-        && remote_mtime > local_mtime
-    {
-        return Err(SyncError::ConflictRemoteNewer {
-            what: name.to_string(),
-            remote_time: format_timestamp(remote_mtime),
-            local_time: format_timestamp(local_mtime),
+    match decide(&local_hash, remote_hash, last_synced) {
+        TransferDecision::UpToDate => {
+            println!("Dropbox already has this {}; nothing to upload.", name);
+            return Ok(local_hash);
         }
-        .into());
+        TransferDecision::Diverged if !force => {
+            return Err(SyncError::ConflictRemoteChanged {
+                what: name.to_string(),
+            }
+            .into());
+        }
+        TransferDecision::Unknown if !force => {
+            return Err(SyncError::ConflictNoSyncRecord {
+                what: name.to_string(),
+            }
+            .into());
+        }
+        _ => {}
     }
 
     let size = std::fs::metadata(local_path)?.len();
@@ -184,7 +200,7 @@ fn push_file(
 
     println!("  Uploaded to {}", remote_path);
 
-    Ok(())
+    Ok(local_hash)
 }
 
 /// Pull database from Dropbox
@@ -204,15 +220,17 @@ fn pull(force: bool) -> Result<()> {
 
     // Pull database
     if client.get_metadata(REMOTE_DB_PATH)?.is_some() {
-        pull_file(
+        let synced_hash = pull_file(
             &client,
             &db_path,
             REMOTE_DB_PATH,
             "database",
             force,
+            config.last_synced_hash.as_deref(),
         )?;
 
-        // Update last pull time
+        // Record what both sides now hold, so the next sync can tell which one moved.
+        config.last_synced_hash = Some(synced_hash);
         config.last_pull_time = Some(current_timestamp());
         config.save()?;
         println!("\nPull complete!");
@@ -223,41 +241,22 @@ fn pull(force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Pull a file, unless the local copy holds changes that are not on Dropbox.
+///
+/// Returns the content hash both sides hold afterwards, to record as the
+/// reference point for the next sync.
 fn pull_file(
     client: &DropboxClient,
     local_path: &Path,
     remote_path: &str,
     name: &str,
     force: bool,
-) -> Result<()> {
+    last_synced: Option<&str>,
+) -> Result<String> {
     // Get remote metadata
     let remote = client
         .get_metadata(remote_path)?
         .ok_or_else(|| SyncError::DropboxApi(format!("{} not found on Dropbox", remote_path)))?;
-
-    let remote_mtime = parse_dropbox_time(&remote.server_modified);
-
-    // Check local file
-    if !force && local_path.exists() {
-        let local_mtime = get_file_mtime(local_path)?;
-        if let Some(remote_ts) = remote_mtime
-            && local_mtime > remote_ts
-        {
-            return Err(SyncError::ConflictLocalNewer {
-                what: name.to_string(),
-                local_time: format_timestamp(local_mtime),
-                remote_time: format_timestamp(remote_ts),
-            }
-            .into());
-        }
-    }
-
-    println!("Downloading {} ({})...", name, format_size(remote.size));
-
-    // Ensure parent directory exists
-    if let Some(parent) = local_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     // Verification needs the hash before the transfer starts; refusing early
     // beats discovering it after moving hundreds of megabytes.
@@ -267,6 +266,38 @@ fn pull_file(
         .ok_or_else(|| SyncError::MissingContentHash {
             path: remote_path.to_string(),
         })?;
+
+    let local_hash = local_path
+        .exists()
+        .then(|| hash_file(local_path))
+        .transpose()?;
+
+    match decide(expected_hash, local_hash.as_deref(), last_synced) {
+        TransferDecision::UpToDate => {
+            println!("The local {} already matches Dropbox; nothing to download.", name);
+            return Ok(expected_hash.to_string());
+        }
+        TransferDecision::Diverged if !force => {
+            return Err(SyncError::ConflictLocalChanged {
+                what: name.to_string(),
+            }
+            .into());
+        }
+        TransferDecision::Unknown if !force => {
+            return Err(SyncError::ConflictNoSyncRecord {
+                what: name.to_string(),
+            }
+            .into());
+        }
+        _ => {}
+    }
+
+    println!("Downloading {} ({})...", name, format_size(remote.size));
+
+    // Ensure parent directory exists
+    if let Some(parent) = local_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     // Download into a temp file so nothing replaces a good database until every
     // check has passed.
@@ -286,7 +317,7 @@ fn pull_file(
         Ok(()) => {
             std::fs::rename(&temp_path, local_path)?;
             println!("  Downloaded to {}", local_path.display());
-            Ok(())
+            Ok(expected_hash.to_string())
         }
         Err(e) => {
             let _ = std::fs::remove_file(&temp_path);
