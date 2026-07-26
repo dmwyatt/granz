@@ -19,15 +19,15 @@
 use std::ffi::c_void;
 use std::ptr;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
-use core_foundation_sys::base::{CFRelease, OSStatus};
+use core_foundation_sys::base::{CFRelease, CFTypeRef, OSStatus};
 use core_foundation_sys::string::CFStringRef;
 use security_framework::os::macos::access::SecAccess;
 use security_framework::os::macos::keychain::SecKeychain;
-use security_framework::os::macos::passwords::find_generic_password;
+use security_framework::os::macos::keychain_item::SecKeychainItem;
 use security_framework_sys::base::{SecAccessRef, SecKeychainItemRef};
 
 /// An entry in a `SecAccess`'s ACL list. Opaque; only handed back to Security.
@@ -57,6 +57,17 @@ unsafe extern "C" {
     ) -> OSStatus;
 
     fn SecKeychainItemSetAccess(itemRef: SecKeychainItemRef, accessRef: SecAccessRef) -> OSStatus;
+
+    fn SecKeychainFindGenericPassword(
+        keychainOrArray: CFTypeRef,
+        serviceNameLength: u32,
+        serviceName: *const c_void,
+        accountNameLength: u32,
+        accountName: *const c_void,
+        passwordLength: *mut u32,
+        passwordData: *mut *mut c_void,
+        itemRef: *mut SecKeychainItemRef,
+    ) -> OSStatus;
 }
 
 /// Let every application read the item under `service`/`account` in the
@@ -65,14 +76,14 @@ pub fn allow_any_application(service: &str, account: &str) -> Result<()> {
     set_permissive_access(None, service, account)
 }
 
-/// The same, against a specific set of keychains. Tests pass a throwaway one
-/// rather than touching the login keychain.
+/// The same, against a specific keychain. Tests pass a throwaway one rather
+/// than touching the login keychain.
 fn set_permissive_access(
-    keychains: Option<&[SecKeychain]>,
+    keychain: Option<&SecKeychain>,
     service: &str,
     account: &str,
 ) -> Result<()> {
-    let (_password, item) = find_generic_password(keychains, service, account)?;
+    let item = find_item(keychain, service, account)?;
     let descriptor = CFString::new(service);
     let access = permissive_access(&descriptor)?;
 
@@ -84,6 +95,39 @@ fn set_permissive_access(
     )
 }
 
+/// Locate the stored item without decrypting it.
+///
+/// `security-framework` only exposes a lookup that returns the secret too, and
+/// reading it is its own authorization: on an entry still carrying the old ACL
+/// that is a second password prompt for a value this has no use for.
+fn find_item(
+    keychain: Option<&SecKeychain>,
+    service: &str,
+    account: &str,
+) -> Result<SecKeychainItem> {
+    let mut item: SecKeychainItemRef = ptr::null_mut();
+
+    check(
+        unsafe {
+            SecKeychainFindGenericPassword(
+                // A null search list means the user's default keychains.
+                keychain.map_or(ptr::null(), |keychain| keychain.as_CFTypeRef()),
+                service.len() as u32,
+                service.as_ptr().cast(),
+                account.len() as u32,
+                account.as_ptr().cast(),
+                // Null out-params for the secret skip returning it at all.
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut item,
+            )
+        },
+        "find grans's entry in the keychain",
+    )?;
+
+    Ok(unsafe { SecKeychainItem::wrap_under_create_rule(item) })
+}
+
 /// Build an access object that challenges nobody.
 fn permissive_access(descriptor: &CFString) -> Result<SecAccess> {
     let mut access: SecAccessRef = ptr::null_mut();
@@ -92,13 +136,7 @@ fn permissive_access(descriptor: &CFString) -> Result<SecAccess> {
     // default and the very thing being replaced; the ACLs it seeds are then
     // rewritten below.
     check(
-        unsafe {
-            SecAccessCreate(
-                descriptor.as_concrete_TypeRef(),
-                ptr::null(),
-                &mut access,
-            )
-        },
+        unsafe { SecAccessCreate(descriptor.as_concrete_TypeRef(), ptr::null(), &mut access) },
         "create a keychain access object",
     )?;
 
@@ -120,9 +158,7 @@ fn clear_trusted_applications(access: &SecAccess, descriptor: &CFString) -> Resu
         check(
             // NULL is what macOS reads as "any application, no prompt". An
             // empty array is the opposite: nobody is trusted, always ask.
-            unsafe {
-                SecACLSetContents(acl, ptr::null(), descriptor.as_concrete_TypeRef(), 0)
-            },
+            unsafe { SecACLSetContents(acl, ptr::null(), descriptor.as_concrete_TypeRef(), 0) },
             "clear the trusted-application list on an ACL",
         )?;
     }
@@ -163,6 +199,7 @@ fn check(status: OSStatus, doing: &str) -> Result<()> {
 mod tests {
     use super::*;
     use security_framework::os::macos::keychain::CreateOptions;
+    use security_framework::os::macos::passwords::find_generic_password;
     use tempfile::TempDir;
 
     // Read-side counterparts of the calls above, needed only to assert on what
@@ -200,8 +237,7 @@ mod tests {
     /// For each ACL on the stored item, whether it trusts a fixed list of
     /// applications rather than all of them.
     fn acls_naming_applications(keychain: &SecKeychain) -> Vec<bool> {
-        let (_password, item) =
-            find_generic_password(Some(&[keychain.clone()]), SERVICE, ACCOUNT).unwrap();
+        let item = find_item(Some(keychain), SERVICE, ACCOUNT).unwrap();
 
         let mut access: SecAccessRef = ptr::null_mut();
         let status = unsafe { SecKeychainItemCopyAccess(item.as_concrete_TypeRef(), &mut access) };
@@ -244,7 +280,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keychain = keychain_with_secret(&dir);
 
-        set_permissive_access(Some(&[keychain.clone()]), SERVICE, ACCOUNT).unwrap();
+        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).unwrap();
 
         assert!(!acls_naming_applications(&keychain).contains(&true));
     }
@@ -254,10 +290,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keychain = keychain_with_secret(&dir);
 
-        set_permissive_access(Some(&[keychain.clone()]), SERVICE, ACCOUNT).unwrap();
+        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).unwrap();
 
-        let (password, _item) =
-            find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
+        let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
         assert_eq!(&*password, b"secret");
     }
 
@@ -266,6 +301,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keychain = keychain_with_secret(&dir);
 
-        assert!(set_permissive_access(Some(&[keychain]), SERVICE, "nobody").is_err());
+        assert!(set_permissive_access(Some(&keychain), SERVICE, "nobody").is_err());
     }
 }
