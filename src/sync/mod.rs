@@ -1,9 +1,11 @@
 //! Dropbox sync module for synchronizing SQLite index and embeddings databases.
 
 pub mod config;
+pub mod content_hash;
 pub mod dropbox;
 pub mod metadata;
 pub mod oauth;
+pub mod transfer;
 
 use thiserror::Error;
 
@@ -17,6 +19,41 @@ pub enum SyncError {
 
     #[error("Dropbox API error: {0}")]
     DropboxApi(String),
+
+    #[error("Dropbox {operation} failed: {hint}")]
+    Transport {
+        operation: String,
+        hint: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error(
+        "Incomplete transfer: {what} delivered {actual} bytes but Dropbox reported {expected}. \
+         The local file was left untouched; retry the transfer."
+    )]
+    IncompleteTransfer {
+        what: String,
+        actual: u64,
+        expected: u64,
+    },
+
+    #[error(
+        "Corrupt transfer: the {what} received does not match the content hash Dropbox reported \
+         (expected {expected}, computed {actual}). The local file was left untouched; \
+         retry the transfer."
+    )]
+    ContentMismatch {
+        what: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error(
+        "Dropbox reported no content hash for {path}, so the download could not be verified \
+         against the stored file."
+    )]
+    MissingContentHash { path: String },
 
     #[error("Config error: {0}")]
     Config(String),

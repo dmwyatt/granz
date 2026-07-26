@@ -540,12 +540,51 @@ Embeddings:                 52.8K               51.2K
 
 This helps you see at a glance whether your local database is ahead of or behind the remote copy, without downloading the full database.
 
+**Transfer progress:** `pull` streams the database to disk and shows a progress bar with throughput and an ETA. Databases with embeddings run to hundreds of megabytes, so a pull can take a while on a slow connection:
+
+```
+Downloading database (424.3 MB)...
+[grans] 114.55 MiB/424.25 MiB [========>                     ] 27% 4.21 MiB/s, ETA 1m
+```
+
+The bar is written to stderr and is skipped when output is redirected.
+
 **Conflict handling:** Sync refuses to overwrite newer files by default. Use `--force` to override:
 
 ```bash
 grans dropbox push --force   # Overwrite remote even if it's newer
 grans dropbox pull --force   # Overwrite local even if it's newer
 ```
+
+**Verification:** a pull downloads to a temporary file and has to clear three checks before anything replaces your database:
+
+| Check | Catches |
+|-------|---------|
+| Byte count against the size Dropbox reported | An interrupted or truncated transfer |
+| Dropbox `content_hash`, computed while streaming | Content that differs from the stored file |
+| `PRAGMA quick_check` plus a schema probe | A corrupt file, or one that is not a grans database |
+
+If any check fails the temp file is discarded and your existing database is left untouched. The download is also flushed to the device before the rename, so a crash cannot leave a database whose contents were never written.
+
+On a 424 MB database this costs about 1.3s; hashing runs alongside the transfer and adds no measurable time.
+
+**Troubleshooting a failed sync:** run the command again with `--verbose` to log each request, its HTTP status, and the throughput achieved:
+
+```bash
+grans --verbose dropbox pull
+```
+
+```
+[DEBUG grans::sync::dropbox] POST https://api.dropboxapi.com/2/files/get_metadata (metadata for /grans.db)
+[DEBUG grans::sync::dropbox]   response: 200 OK in 270.7261ms
+[DEBUG grans::sync::dropbox] POST https://content.dropboxapi.com/2/files/download (download /grans.db)
+[DEBUG grans::sync::dropbox]   response: 200 OK in 712.5304ms
+[DEBUG grans::sync::dropbox]   body complete: 424.28 MB in 6.7065285s (63.26 MB/s)
+```
+
+A download that fails reports how far it got, which separates a connection that dropped mid-transfer from one that never delivered anything.
+
+Use `GRANS_LOG` for finer control, e.g. `GRANS_LOG=grans::sync=debug`.
 
 **What gets synced:**
 - Database (meeting data, transcripts, FTS indices, vector embeddings for semantic search)

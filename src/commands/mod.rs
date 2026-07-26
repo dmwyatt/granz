@@ -14,6 +14,7 @@ pub mod search_common;
 pub mod sync;
 pub mod sync_granola;
 mod sync_panels;
+mod sync_status;
 mod sync_transcripts;
 pub mod templates;
 pub mod update;
