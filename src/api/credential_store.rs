@@ -6,6 +6,11 @@
 //! `data_dir()/auth.toml`, which keeps other local users out but leaves the
 //! token readable in a backup or a copy of the disk. Callers tell the user
 //! when that fallback is in use.
+//!
+//! On macOS the stored item is given a permissive ACL, which lets any process
+//! running as the user read it without a keychain prompt. That is a real
+//! concession, and [`super::keychain_acl`] explains why the alternative is
+//! being challenged for a password on every single read.
 
 use std::fs;
 use std::io::Write;
@@ -15,6 +20,8 @@ use anyhow::{Context, Result};
 use log::debug;
 
 use super::credentials::GranolaCredentials;
+#[cfg(target_os = "macos")]
+use super::keychain_acl;
 use crate::platform::data_dir;
 
 /// Keychain service name grans stores its session under.
@@ -69,9 +76,7 @@ impl CredentialStore {
             Self::Keychain(entry) => {
                 let json = serde_json::to_string(credentials)
                     .context("Failed to serialize credentials")?;
-                entry
-                    .set_password(&json)
-                    .context("Failed to store credentials in the keychain")
+                store_secret(entry, &json)
             }
         }
     }
@@ -136,6 +141,27 @@ fn reachable_keychain() -> Option<keyring::Entry> {
             None
         }
     }
+}
+
+/// Write the secret so the next build of grans can still read it.
+///
+/// macOS goes around `keyring` here. Only it ties reads to the caller's code
+/// signature, and the item has to carry a permissive ACL from the moment it
+/// exists for that not to matter; `keyring` offers no way to say so at
+/// creation, and attaching one afterwards is the thing
+/// [`super::keychain_acl`] exists to avoid. Reads and deletes still go through
+/// `keyring` on every platform.
+#[cfg(target_os = "macos")]
+fn store_secret(_entry: &keyring::Entry, json: &str) -> Result<()> {
+    keychain_acl::store_with_open_access(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, json.as_bytes())
+        .context("Failed to store credentials in the keychain")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn store_secret(entry: &keyring::Entry, json: &str) -> Result<()> {
+    entry
+        .set_password(json)
+        .context("Failed to store credentials in the keychain")
 }
 
 /// What the platform calls its keychain.

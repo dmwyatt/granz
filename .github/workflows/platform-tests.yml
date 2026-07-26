@@ -40,6 +40,9 @@ jobs:
   full-suite:
     name: Full suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Nothing blocks on this workflow, so a hung leg here would burn the 360
+    # minute default unnoticed. See the same guard in ci.yml.
+    timeout-minutes: 20
     strategy:
       # Each leg reports on its own platform, so one failure must not cancel
       # the others.
