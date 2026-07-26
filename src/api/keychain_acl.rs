@@ -275,25 +275,52 @@ mod tests {
         assert!(acls_naming_applications(&keychain).contains(&true));
     }
 
+    /// Rewriting an ACL blocks where no one can answer a prompt.
+    ///
+    /// Reading works headless, but `SecKeychainItemSetAccess` needs ChangeACL
+    /// on an item pinned to a binary whose code signature a CI runner cannot
+    /// match. Security escalates that to `SecurityAgent`, which has no window
+    /// server to draw on and never returns, so the test hangs rather than
+    /// failing. `cargo test` has no per-test timeout, so one of these holds the
+    /// whole binary open until the job is killed.
+    ///
+    /// Run them with `--ignored` on a Mac with a desktop session, or through
+    /// the macos-keychain-probe workflow, which times each one out.
+    const HEADLESS: &str = "writes an ACL: hangs on a headless runner, see the module docs";
+
     #[test]
+    #[ignore = "writes an ACL: hangs on a headless runner"]
     fn test_permissive_access_trusts_every_application() {
         let dir = TempDir::new().unwrap();
         let keychain = keychain_with_secret(&dir);
 
-        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).unwrap();
+        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).expect(HEADLESS);
 
         assert!(!acls_naming_applications(&keychain).contains(&true));
     }
 
     #[test]
+    #[ignore = "writes an ACL: hangs on a headless runner"]
     fn test_permissive_access_leaves_the_secret_readable() {
         let dir = TempDir::new().unwrap();
         let keychain = keychain_with_secret(&dir);
 
-        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).unwrap();
+        set_permissive_access(Some(&keychain), SERVICE, ACCOUNT).expect(HEADLESS);
 
         let (password, _item) = find_generic_password(Some(&[keychain]), SERVICE, ACCOUNT).unwrap();
         assert_eq!(&*password, b"secret");
+    }
+
+    /// Which of the two writing calls blocks.
+    ///
+    /// This one stops before `SecKeychainItemSetAccess`: it builds the access
+    /// object and rewrites its ACLs in memory, touching no stored item. If it
+    /// passes where the two above hang, the block is attaching the access, not
+    /// composing it.
+    #[test]
+    #[ignore = "probe: splits SecACLSetContents from SecKeychainItemSetAccess"]
+    fn probe_building_permissive_access_does_not_block() {
+        permissive_access(&CFString::new(SERVICE)).unwrap();
     }
 
     #[test]
