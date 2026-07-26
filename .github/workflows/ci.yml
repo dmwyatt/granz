@@ -56,13 +56,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The integration suites spawn a 50 MB `grans.exe` once per test, and on
-      # Windows that cost about 2.5s per spawn against 0.037s on ubuntu. A slow
-      # runner does not explain it: the 824 in-process unit tests ran at parity
-      # (16.2s vs 13.2s) while every suite that spawns the binary ran 38-85x
-      # slower. Defender scanning each CreateProcess is the suspected mechanism,
-      # so this tests that theory. RUNNER_TEMP is included because the suites
-      # build a SQLite database per test under TempDir.
+      # The integration suites spawn `grans.exe` once per test, and on this
+      # runner that costs far more than it should. Excluding the workspace and
+      # cargo home buys back about 28% of it (2.57s to 1.84s per spawn, against
+      # 0.037s on ubuntu), so Defender is part of the story but not most of it.
+      # RUNNER_TEMP is included because the suites build a SQLite database per
+      # test under TempDir.
+      #
+      # The rest is unexplained and specific to the runner: the same binary
+      # spawns in 19ms on a local Windows machine, so it is not the image size,
+      # onnxruntime init, or Windows process creation as such.
       #
       # Left to fail loudly. If this stops working on the runner image, Windows
       # quietly returns to seven minutes, and a silent regression is worse than
@@ -72,7 +75,9 @@ jobs:
         shell: pwsh
         run: |
           Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", $env:RUNNER_TEMP
-          Add-MpPreference -ExclusionProcess cargo.exe, rustc.exe, grans.exe
+          # Excludes files these processes touch. It does not exclude scanning
+          # of the processes themselves at launch -- the paths above cover that.
+          Add-MpPreference -ExclusionProcess cargo.exe, rustc.exe
 
       # Pinned by SHA, so the toolchain no longer comes from the `stable` ref name.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
