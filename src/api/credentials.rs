@@ -25,7 +25,7 @@ const EXPIRY_SKEW_SECS: i64 = 60;
 /// access token is a cache that may be absent or stale.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GranolaCredentials {
-    /// Long-lived refresh token. Granola rotates this on every refresh.
+    /// Long-lived refresh token, rewritten from every refresh response.
     pub refresh_token: String,
 
     /// Most recently issued access token, if one has been fetched.

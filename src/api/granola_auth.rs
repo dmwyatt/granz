@@ -229,9 +229,12 @@ pub fn exchange_code(
 
 /// Exchange a refresh token for a new token set.
 ///
-/// Granola rotates the refresh token on every call, so the response must be
-/// persisted or the chain breaks. The access token identifies the caller and
-/// may be expired; the refresh token in the body is the grant being validated.
+/// The response carries a refresh token, which Granola has been observed
+/// returning unchanged rather than rotating. Callers persist whatever comes
+/// back regardless, so a future rotation cannot strand the chain.
+///
+/// The access token identifies the caller and may be expired; the refresh
+/// token in the body is the grant being validated.
 pub fn refresh_tokens(access_token: Option<&str>, refresh_token: &str) -> Result<TokenSet> {
     let body = serde_json::json!({ "refresh_token": refresh_token });
 

@@ -100,10 +100,11 @@ fn refresh_and_persist(
         Err(error) => error,
     };
 
-    // Granola rotates the refresh token on every call, so another grans
-    // invocation refreshing at the same moment consumes the one we just sent.
-    // If what is on disk has moved on, that invocation succeeded and its
-    // result is usable; only a chain that has genuinely stalled is an error.
+    // Granola currently returns the refresh token unchanged, but if it ever
+    // rotates, a concurrent grans invocation refreshing at the same moment
+    // would consume the token we just sent. If what is on disk has moved on,
+    // that invocation succeeded and its result is usable; only a chain that
+    // has genuinely stalled is an error.
     if let Some(current) = GranolaCredentials::load_from(path)? {
         if current.refresh_token != credentials.refresh_token {
             debug!("Refresh token was rotated concurrently; using the newer credentials");
@@ -129,9 +130,9 @@ fn refresh_once(
     let tokens = refresh(credentials)?;
     let access_token = tokens.access_token.clone();
 
-    // Persist before returning: Granola has already retired the old refresh
-    // token, so handing back an access token without saving the rotation
-    // would strand the chain if the process died here.
+    // Persist before returning. The refresh token comes back unchanged today,
+    // but if Granola starts rotating it, handing back an access token without
+    // saving what replaced it would strand the chain if the process died here.
     tokens
         .into_credentials(now, credentials.session_id.clone())
         .save_to(path)?;
