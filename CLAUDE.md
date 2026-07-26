@@ -8,6 +8,27 @@ The `main` branch is protected. All changes must go through a pull request with 
 
 Before starting work, ensure you have the latest code: `git fetch origin` and check if your branch is behind. When starting new work from main, pull first.
 
+### What CI runs
+
+`ci.yml` gates the PR. It runs on three platforms, but not the same tests on
+each: ubuntu runs the full suite, while macOS and Windows run `--bins` only.
+That is deliberate. Every platform-gated line in this repo is in `src/`, so all
+of its tests are unit tests in the bin target, and nothing in `tests/*.rs` is
+platform-gated. Each of those 75 integration tests spawns `grans.exe`, which
+costs ~2s per spawn on the Windows runner against 0.037s on ubuntu.
+
+The consequence for writing tests: **a platform-specific test belongs in `src/`,
+under `#[cfg(...)]`.** Put one in `tests/*.rs` and no PR will ever run it on the
+platform it is about.
+
+`platform-tests.yml` runs the full suite on all three platforms after merge to
+main, plus weekly, and files an issue labelled `ci: platform-tests` when it
+fails. So a macOS- or Windows-only break in `tests/*.rs` surfaces shortly after
+merge rather than on the PR.
+
+The required status check is `CI Status`, not the individual test legs. It
+aggregates them and its name survives changes to the matrix.
+
 ## Coding Standards
 
 - Write clean, maintainable code
@@ -21,11 +42,22 @@ Before starting work, ensure you have the latest code: `git fetch origin` and ch
 cargo check                    # Type-check without building (fast iteration)
 cargo build                    # Debug build
 cargo build --release          # Release build
-cargo test                     # Run all tests (inline in modules)
+cargo test --no-fail-fast      # Run all tests -- see below, plain `cargo test` does not
 cargo test <module>::tests     # Run tests for a specific module, e.g. cargo test db::meetings::tests
 cargo test <test_name>         # Run a single test by name
 cargo install --path .         # Install locally
 ```
+
+`cargo test` runs six binaries here: the unit tests in the bin target, then the
+five integration binaries in `tests/`, which hold 75 tests between them. It
+stops after the first binary that fails, and the bin target goes first, so one
+broken unit test means those 75 never launch and the run reports nothing about
+them. Use `--no-fail-fast` and do not read a run that died in the bin target as
+full coverage.
+
+On Windows, run tests from PowerShell rather than Git Bash. Git Bash prepends
+its coreutils to PATH, so PATH-sensitive tests pass there and fail on a GitHub
+Actions windows runner.
 
 ## Sanity Check
 
