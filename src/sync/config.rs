@@ -20,6 +20,12 @@ pub struct SyncConfig {
 
     /// Unix timestamp of last successful pull
     pub last_pull_time: Option<u64>,
+
+    /// Dropbox content hash both copies held at the last successful sync.
+    ///
+    /// The reference point for deciding which side has changed. Absent until
+    /// the first push or pull completes under a version that records it.
+    pub last_synced_hash: Option<String>,
 }
 
 impl SyncConfig {
@@ -112,6 +118,7 @@ mod tests {
             refresh_token: Some("test-token".to_string()),
             last_push_time: Some(1234567890),
             last_pull_time: Some(1234567891),
+            last_synced_hash: Some("abc123".to_string()),
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -120,6 +127,7 @@ mod tests {
         assert_eq!(deserialized.refresh_token, config.refresh_token);
         assert_eq!(deserialized.last_push_time, config.last_push_time);
         assert_eq!(deserialized.last_pull_time, config.last_pull_time);
+        assert_eq!(deserialized.last_synced_hash, config.last_synced_hash);
     }
 
     #[test]
@@ -143,6 +151,7 @@ mod tests {
                 refresh_token: Some("my-token".to_string()),
                 last_push_time: Some(100),
                 last_pull_time: None,
+                last_synced_hash: None,
             };
 
             let content = toml::to_string_pretty(&config).unwrap();

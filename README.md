@@ -554,12 +554,23 @@ Uploading database (428.9 MB)...
 
 The bar is written to stderr and is skipped when output is redirected. Uploads above 150 MB are sent as chunked sessions, so the bar advances 8 MB at a time; smaller ones stream in a single request and advance smoothly.
 
-**Conflict handling:** Sync refuses to overwrite newer files by default. Use `--force` to override:
+**Conflict handling:** Sync compares content, not timestamps. It records the content hash both copies held at the last successful sync, and uses that to tell which side has moved since:
+
+| Situation | What happens |
+|-----------|--------------|
+| Both copies identical | Nothing transfers, either direction |
+| Only your side changed | Transfers normally |
+| The other side changed too | Refuses, naming which copy would be lost |
+| Copies differ and grans has never synced them | Refuses, since neither can be shown to supersede the other |
+
+Use `--force` to overwrite regardless:
 
 ```bash
-grans dropbox push --force   # Overwrite remote even if it's newer
-grans dropbox pull --force   # Overwrite local even if it's newer
+grans dropbox push --force   # Replace the Dropbox copy with yours
+grans dropbox pull --force   # Replace your copy with Dropbox's
 ```
+
+Because identical copies transfer nothing, pushing or pulling twice in a row is cheap and safe: the second run compares hashes and stops.
 
 **Verification:** a pull downloads to a temporary file and has to clear three checks before anything replaces your database:
 
