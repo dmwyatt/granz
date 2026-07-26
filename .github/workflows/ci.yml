@@ -32,10 +32,16 @@ jobs:
               - '.github/workflows/ci.yml'
 
   test:
-    name: Tests
+    name: Tests (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Each leg is here to report on its own platform, so one failing leg
+      # must not cancel the others.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -201,13 +207,22 @@ jobs:
             Use `gh pr comment` only if you need a top-level summary.
             Only post GitHub comments — don't submit review text as messages.
 
+  # The one check name branch protection can require: it is stable across
+  # changes to the matrix, and `needs.test.result` aggregates every leg.
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
     needs: [test]
     if: always()
     steps:
-      - run: |
-          if [ "${{ needs.test.result }}" = "failure" ]; then
-            exit 1
-          fi
+      - name: Report aggregate test result
+        run: |
+          result="${{ needs.test.result }}"
+          # `skipped` is a non-Rust PR the paths filter excluded. Anything
+          # other than that or a clean pass has to hold the merge, cancelled
+          # runs included -- this job is the gate, so it cannot wave through
+          # a result it never saw.
+          case "$result" in
+            success | skipped) ;;
+            *) echo "Tests: $result"; exit 1 ;;
+          esac
