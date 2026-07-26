@@ -1,10 +1,10 @@
 //! Reading the auth token Granola's desktop app stored on this machine.
 //!
-//! This is grans's fallback when it has no session of its own. It no longer
-//! works on current macOS builds, where Granola's data-encryption key sits in
-//! the data-protection keychain behind Granola's code signature, but it is
-//! still the only source on Windows for anyone who has not run
-//! `grans auth login`.
+//! This is grans's fallback when it has no session of its own, and the only
+//! source on Windows for anyone who has not run `grans auth login`. It is not
+//! compiled on macOS: Granola's data-encryption key sits in the
+//! data-protection keychain behind Granola's own code signature, so there is
+//! nothing there for grans to read.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -190,9 +190,6 @@ fn granola_dir_candidates() -> Vec<PathBuf> {
     }
 
     if let Some(home) = dirs_home() {
-        // macOS
-        candidates.push(home.join("Library/Application Support/Granola"));
-
         // Linux / WSL fallback
         candidates.push(home.join(".config/Granola"));
 
