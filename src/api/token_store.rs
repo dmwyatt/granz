@@ -12,22 +12,18 @@
 //!
 //! Only the innermost unseal of `storage.dek` is platform-specific; everything
 //! after it (base64-decoding the data key, then AES-256-GCM decrypting
-//! `supabase.json.enc`) is shared:
+//! `supabase.json.enc`) is shared. Windows (`os_crypt`) is the one platform
+//! that implements it: `Local State` holds a DPAPI-wrapped AES-256 master key,
+//! keyed to the current user, and `storage.dek` is a `"v10"`-prefixed
+//! AES-256-GCM blob whose auth tag makes a wrong framing fail loudly.
 //!
-//! - **Windows** (`os_crypt`): `Local State` holds a DPAPI-wrapped AES-256
-//!   master key, keyed to the current user. `storage.dek` is a `"v10"`-prefixed
-//!   AES-256-GCM blob whose auth tag makes a wrong framing fail loudly.
-//! - **macOS** (safeStorage): a password lives in the login Keychain (service
-//!   `"Granola Safe Storage"`, account `"Granola"`). An AES-128 key is derived
-//!   from it via PBKDF2-HMAC-SHA1, and `storage.dek` is a `"v10"`-prefixed
-//!   AES-128-CBC blob with an all-spaces IV and PKCS#7 padding (no auth tag).
+//! This module is not compiled on macOS; see [`super::auth`] for why.
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use log::debug;
-use sha1::Sha1;
 use std::path::Path;
 
 const NONCE_LEN: usize = 12;
@@ -75,37 +71,15 @@ fn unseal_dek(granola_dir: &Path) -> Result<Vec<u8>> {
     gcm_open(&master, &dek_blob, 3).context("Failed to decrypt storage.dek")
 }
 
-/// Read `storage.dek` and unseal it to the base64 data-key plaintext using the
-/// macOS safeStorage key (Keychain password + PBKDF2 + AES-128-CBC).
-#[cfg(target_os = "macos")]
-fn unseal_dek(granola_dir: &Path) -> Result<Vec<u8>> {
-    let key = derive_cbc_key(&keychain_password()?);
-    let dek_blob = std::fs::read(granola_dir.join("storage.dek"))
-        .context("Failed to read storage.dek")?;
-    // storage.dek is a "v10"-prefixed safeStorage CBC blob.
-    cbc_open(&key, &dek_blob, 3).context("Failed to decrypt storage.dek")
-}
-
 /// Reading Granola's encrypted token store is not implemented on this platform.
 /// This bail runs before any credential-store or `storage.dek` access so users
 /// see the `--token` guidance instead of a confusing parse error.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(windows))]
 fn unseal_dek(_granola_dir: &Path) -> Result<Vec<u8>> {
     bail!(
         "Reading Granola's encrypted token store is currently implemented only on \
-         Windows and macOS. On this platform, pass a token explicitly with --token."
-    )
-}
-
-/// Read Electron's safeStorage password from the macOS login Keychain.
-///
-/// The first read triggers a Keychain access prompt; approving "Always Allow"
-/// suppresses it on later runs.
-#[cfg(target_os = "macos")]
-fn keychain_password() -> Result<Vec<u8>> {
-    security_framework::passwords::get_generic_password("Granola Safe Storage", "Granola").context(
-        "Failed to read the 'Granola Safe Storage' password from the macOS Keychain. \
-         Ensure Granola is installed and allow access when prompted, or pass --token.",
+         Windows. On this platform, sign in with `grans auth login` or pass a token \
+         explicitly with --token."
     )
 }
 
@@ -147,48 +121,6 @@ fn gcm_open(key: &[u8], blob: &[u8], prefix_len: usize) -> Result<Vec<u8>> {
     Aes256Gcm::new(key)
         .decrypt(Nonce::from_slice(nonce), ciphertext)
         .map_err(|_| anyhow::anyhow!("AES-GCM authentication failed (wrong key or corrupt data)"))
-}
-
-/// Derive the AES-128 safeStorage key from a Keychain password using Electron's
-/// fixed PBKDF2 parameters (HMAC-SHA1, salt "saltysalt", 1003 iterations).
-///
-/// Compiled on every platform so the derivation stays unit-testable; only the
-/// macOS unseal path calls it in a real build.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn derive_cbc_key(password: &[u8]) -> [u8; 16] {
-    let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<Sha1>(password, b"saltysalt", 1003, &mut key);
-    key
-}
-
-/// Decrypt a safeStorage AES-128-CBC blob laid out as `[prefix][ciphertext]`
-/// with a fixed all-spaces IV and PKCS#7 padding. Unlike the GCM layout there
-/// is no nonce or auth tag, so a wrong key surfaces as a padding error rather
-/// than an authentication failure (and can occasionally decode to garbage).
-///
-/// Compiled on every platform so the CBC layer stays unit-testable; only the
-/// macOS unseal path calls it in a real build.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn cbc_open(key: &[u8], blob: &[u8], prefix_len: usize) -> Result<Vec<u8>> {
-    use aes::Aes128;
-    use cbc::cipher::block_padding::Pkcs7;
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-
-    type Aes128CbcDec = cbc::Decryptor<Aes128>;
-
-    let ciphertext = blob
-        .get(prefix_len..)
-        .context("Encrypted blob shorter than its version prefix")?;
-
-    let iv = [b' '; 16];
-    let cipher = Aes128CbcDec::new_from_slices(key, &iv)
-        .map_err(|_| anyhow::anyhow!("AES-128 key must be 16 bytes, got {}", key.len()))?;
-
-    let mut buf = ciphertext.to_vec();
-    let plaintext = cipher
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
-        .map_err(|_| anyhow::anyhow!("AES-CBC decryption failed (wrong key or corrupt data)"))?;
-    Ok(plaintext.to_vec())
 }
 
 /// Unwrap a key blob using the OS credential store.
@@ -287,77 +219,4 @@ mod tests {
         assert!(gcm_open(&[0u8; 16], &blob, 0).is_err());
     }
 
-    /// Encrypt with the same AES-128-CBC framing macOS safeStorage uses (fixed
-    /// all-spaces IV, PKCS#7 padding), so we can exercise cbc_open without a
-    /// live Keychain.
-    fn cbc_seal(key: &[u8; 16], plaintext: &[u8], prefix: &[u8]) -> Vec<u8> {
-        use aes::Aes128;
-        use cbc::cipher::block_padding::Pkcs7;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
-
-        type Aes128CbcEnc = cbc::Encryptor<Aes128>;
-
-        let iv = [b' '; 16];
-        let mut buf = vec![0u8; plaintext.len() + 16];
-        let ciphertext = Aes128CbcEnc::new_from_slices(key, &iv)
-            .unwrap()
-            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut buf)
-            .unwrap();
-        [prefix, ciphertext].concat()
-    }
-
-    #[test]
-    fn cbc_open_round_trips_with_v10_prefix() {
-        let key = [0x11u8; 16];
-        let blob = cbc_seal(&key, b"the data key", b"v10");
-
-        let out = cbc_open(&key, &blob, 3).unwrap();
-        assert_eq!(out, b"the data key");
-    }
-
-    #[test]
-    fn cbc_open_round_trips_without_prefix() {
-        let key = [0x22u8; 16];
-        let blob = cbc_seal(&key, b"{\"workos_tokens\":{}}", b"");
-
-        let out = cbc_open(&key, &blob, 0).unwrap();
-        assert_eq!(out, b"{\"workos_tokens\":{}}");
-    }
-
-    #[test]
-    fn cbc_open_rejects_bad_key_length() {
-        let blob = cbc_seal(&[0x22u8; 16], b"x", b"");
-        assert!(cbc_open(&[0u8; 15], &blob, 0).is_err());
-    }
-
-    #[test]
-    fn cbc_open_rejects_short_prefix() {
-        assert!(cbc_open(&[0u8; 16], b"v1", 3).is_err());
-    }
-
-    #[test]
-    fn cbc_open_rejects_non_block_aligned_ciphertext() {
-        // 6 bytes after the prefix is not a whole AES block, so unpadding fails.
-        assert!(cbc_open(&[0u8; 16], b"v10short!", 3).is_err());
-    }
-
-    #[test]
-    fn derive_cbc_key_matches_known_vector() {
-        // PBKDF2-HMAC-SHA1("peanuts", "saltysalt", 1003, 16 bytes) is Chromium's
-        // documented safeStorage vector; pins salt, iteration count, and digest.
-        let key = derive_cbc_key(b"peanuts");
-        assert_eq!(
-            key,
-            [217, 160, 157, 73, 155, 78, 27, 116, 97, 242, 142, 103, 151, 44, 109, 189]
-        );
-    }
-
-    #[test]
-    fn derive_cbc_key_round_trips_through_cbc_open() {
-        let key = derive_cbc_key(b"Granola Safe Storage password");
-        let blob = cbc_seal(&key, b"YmFzZTY0IGRhdGEga2V5", b"v10");
-
-        let out = cbc_open(&key, &blob, 3).unwrap();
-        assert_eq!(out, b"YmFzZTY0IGRhdGEga2V5");
-    }
 }

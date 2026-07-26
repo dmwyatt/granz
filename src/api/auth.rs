@@ -1,8 +1,8 @@
 //! Deciding which token grans authenticates with.
 //!
 //! The sources themselves live elsewhere: [`super::credential_store`] holds
-//! grans's own session and [`super::local_store`] reads the one Granola's desktop
-//! app stored. This module is the order they are tried in.
+//! grans's own session and, off macOS, `super::local_store` reads the one
+//! Granola's desktop app stored. This module is the order they are tried in.
 
 use anyhow::{bail, Result};
 use chrono::Utc;
@@ -10,7 +10,9 @@ use log::debug;
 
 use super::credential_store::CredentialStore;
 use super::credentials::GranolaCredentials;
-use super::{granola_auth, local_store};
+use super::granola_auth;
+#[cfg(not(target_os = "macos"))]
+use super::local_store;
 
 /// Environment variable supplying a token when `--token` is absent.
 pub const TOKEN_ENV_VAR: &str = "GRANS_TOKEN";
@@ -35,9 +37,10 @@ pub fn token_override(flag: Option<&str>, env_value: Option<String>) -> Option<S
 /// own stored credentials, refreshing them when the access token has expired,
 /// then the token Granola's desktop app stored locally.
 ///
-/// That last step no longer works on current macOS builds, where Granola's
-/// data-encryption key sits behind its own code signature, but it is still the
-/// only source on Windows for anyone who has not run `grans auth login`.
+/// That last step exists everywhere except macOS, where Granola's
+/// data-encryption key sits in the data-protection keychain behind its own
+/// code signature. Nothing grans can do reaches it, so the chain there ends by
+/// asking the user to sign in instead.
 pub fn resolve_token(override_token: Option<&str>) -> Result<String> {
     match override_token {
         Some(token) if token.is_empty() => {
@@ -51,7 +54,8 @@ pub fn resolve_token(override_token: Option<&str>) -> Result<String> {
     }
 }
 
-/// Use grans's own credentials if it has any, otherwise Granola's local store.
+/// Use grans's own credentials if it has any, otherwise whatever this platform
+/// can fall back to.
 fn stored_or_local_token() -> Result<String> {
     let store = CredentialStore::open()?;
 
@@ -60,11 +64,30 @@ fn stored_or_local_token() -> Result<String> {
             debug!("Using grans's own stored credentials");
             token_from_credentials(credentials, &store)
         }
-        None => {
-            debug!("No stored credentials; reading Granola's local token store");
-            local_store::get_auth_token()
-        }
+        None => local_store_token(),
     }
+}
+
+/// Fall back to the token Granola's desktop app stored on this machine.
+#[cfg(not(target_os = "macos"))]
+fn local_store_token() -> Result<String> {
+    debug!("No stored credentials; reading Granola's local token store");
+    local_store::get_auth_token()
+}
+
+/// macOS has no such fallback to try.
+///
+/// Granola's data-encryption key lives in the data-protection keychain, which
+/// hands it only to Granola's own code signature. Attempting the read anyway
+/// would fail with a keychain error naming Granola rather than the one thing
+/// that fixes it.
+#[cfg(target_os = "macos")]
+fn local_store_token() -> Result<String> {
+    bail!(
+        "Not signed in. Run `grans auth login`.\n\n\
+         grans cannot borrow the token Granola's desktop app stored: on macOS \
+         that key is reachable only by Granola itself."
+    )
 }
 
 /// Return the stored access token, refreshing it first if it has expired.
@@ -191,6 +214,17 @@ mod tests {
     #[test]
     fn test_token_override_absent_without_flag_or_env() {
         assert_eq!(token_override(None, None), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_names_the_remedy_instead_of_reading_granolas_store() {
+        // Granola's key is unreachable here, so the chain has to end with the
+        // one thing that fixes it rather than a keychain error about Granola.
+        let error = local_store_token().unwrap_err().to_string();
+
+        assert!(error.contains("grans auth login"));
+        assert!(!error.contains("Keychain"));
     }
 
     // --- refresh chain ---
