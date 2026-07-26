@@ -81,7 +81,17 @@ jobs:
         with:
           toolchain: stable
 
+      # A run can only restore caches from its own ref or from the default
+      # branch, and this workflow is pull_request-only, so it never ran on main
+      # and left no cache for a new PR to find. Every first push to a branch
+      # paid a cold compile: 2m54s on Windows against the 36s it takes warm.
+      #
+      # `shared-key` replaces the per-job component of the key, so the
+      # post-merge platform-tests.yml run on main seeds the cache these legs
+      # restore. Its full-suite build is a superset of what `--bins` needs here.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: grans-tests
 
       # Without --no-fail-fast, cargo stops after the first test binary that
       # fails. On the ubuntu leg that means one broken unit test in src/ hides
