@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use super::transfer::{self, UPLOAD_TIMEOUT};
+use super::transfer::{self, ProgressFn, ProgressReader, UPLOAD_TIMEOUT};
 use super::{SyncError, SyncResult};
 
 const UPLOAD_URL: &str = "https://content.dropboxapi.com/2/files/upload";
@@ -93,16 +93,21 @@ impl DropboxClient {
     ///
     /// The `dropbox_path` should be like `/index.db` (within the app folder).
     /// Files over 150 MB are automatically uploaded using chunked upload sessions.
-    pub fn upload(&self, local_path: &Path, dropbox_path: &str) -> SyncResult<FileMetadata> {
+    pub fn upload(
+        &self,
+        local_path: &Path,
+        dropbox_path: &str,
+        on_progress: ProgressFn,
+    ) -> SyncResult<FileMetadata> {
         let file_size = std::fs::metadata(local_path)?.len();
         let start = Instant::now();
 
         let result = if file_size <= UPLOAD_SINGLE_LIMIT {
             debug!("upload {} ({} bytes, single request)", dropbox_path, file_size);
-            self.upload_single(local_path, dropbox_path)
+            self.upload_single(local_path, dropbox_path, file_size, on_progress)
         } else {
             debug!("upload {} ({} bytes, chunked session)", dropbox_path, file_size);
-            self.upload_chunked(local_path, dropbox_path, file_size)
+            self.upload_chunked(local_path, dropbox_path, file_size, on_progress)
         };
 
         if result.is_ok() {
@@ -116,9 +121,13 @@ impl DropboxClient {
     }
 
     /// Upload a file in a single request (for files <= 150 MB).
-    fn upload_single(&self, local_path: &Path, dropbox_path: &str) -> SyncResult<FileMetadata> {
-        let content = std::fs::read(local_path)?;
-
+    fn upload_single(
+        &self,
+        local_path: &Path,
+        dropbox_path: &str,
+        file_size: u64,
+        on_progress: ProgressFn,
+    ) -> SyncResult<FileMetadata> {
         let arg = UploadArg {
             path: dropbox_path.to_string(),
             mode: "overwrite".to_string(),
@@ -128,6 +137,12 @@ impl DropboxClient {
 
         let arg_json = serialize_arg(&arg)?;
 
+        // Stream from the file rather than reading it in: this keeps up to
+        // 150 MB out of memory and lets reqwest's pull of the body drive the
+        // progress report.
+        let file = std::fs::File::open(local_path)?;
+        let body = reqwest::blocking::Body::sized(ProgressReader::new(file, on_progress), file_size);
+
         let response = self
             .http
             .post(UPLOAD_URL)
@@ -135,7 +150,7 @@ impl DropboxClient {
             .header("Dropbox-API-Arg", arg_json)
             .header("Content-Type", "application/octet-stream")
             .timeout(UPLOAD_TIMEOUT)
-            .body(content)
+            .body(body)
             .send()
             .map_err(|e| transfer::transport_error(format!("upload of {}", dropbox_path), e))?;
 
@@ -148,6 +163,7 @@ impl DropboxClient {
         local_path: &Path,
         dropbox_path: &str,
         file_size: u64,
+        mut on_progress: ProgressFn,
     ) -> SyncResult<FileMetadata> {
         let mut file = std::fs::File::open(local_path)?;
         let mut buf = vec![0u8; UPLOAD_CHUNK_SIZE];
@@ -157,6 +173,7 @@ impl DropboxClient {
         let bytes_read = file.read(&mut buf).map_err(SyncError::Io)?;
         let session_id = self.upload_session_start(&buf[..bytes_read])?;
         offset += bytes_read as u64;
+        on_progress(offset);
 
         // Append: send middle chunks
         while offset < file_size {
@@ -166,22 +183,9 @@ impl DropboxClient {
             }
 
             let remaining = file_size - offset - bytes_read as u64;
-            if remaining > 0 {
-                // More data to come — append
-                self.upload_session_append(&session_id, offset, &buf[..bytes_read])?;
-                offset += bytes_read as u64;
-                eprint!(
-                    "\r  Uploaded {:.0} / {:.0} MB",
-                    offset as f64 / 1_048_576.0,
-                    file_size as f64 / 1_048_576.0,
-                );
-            } else {
-                // Last chunk — finish
-                eprint!(
-                    "\r  Uploaded {:.0} / {:.0} MB\n",
-                    file_size as f64 / 1_048_576.0,
-                    file_size as f64 / 1_048_576.0,
-                );
+            if remaining == 0 {
+                // Last chunk — commit the session
+                on_progress(file_size);
                 return self.upload_session_finish(
                     &session_id,
                     offset,
@@ -189,14 +193,14 @@ impl DropboxClient {
                     dropbox_path,
                 );
             }
+
+            self.upload_session_append(&session_id, offset, &buf[..bytes_read])?;
+            offset += bytes_read as u64;
+            on_progress(offset);
         }
 
         // Edge case: file size was an exact multiple of chunk size, finish with empty body
-        eprint!(
-            "\r  Uploaded {:.0} / {:.0} MB\n",
-            file_size as f64 / 1_048_576.0,
-            file_size as f64 / 1_048_576.0,
-        );
+        on_progress(file_size);
         self.upload_session_finish(&session_id, offset, &[], dropbox_path)
     }
 

@@ -540,14 +540,19 @@ Embeddings:                 52.8K               51.2K
 
 This helps you see at a glance whether your local database is ahead of or behind the remote copy, without downloading the full database.
 
-**Transfer progress:** `pull` streams the database to disk and shows a progress bar with throughput and an ETA. Databases with embeddings run to hundreds of megabytes, so a pull can take a while on a slow connection:
+**Transfer progress:** `push` and `pull` both stream the database and show a progress bar with throughput and an ETA. Databases with embeddings run to hundreds of megabytes, so either can take a while on a slow connection:
 
 ```
 Downloading database (424.3 MB)...
 [grans] 114.55 MiB/424.25 MiB [========>                     ] 27% 4.21 MiB/s, ETA 1m
 ```
 
-The bar is written to stderr and is skipped when output is redirected.
+```
+Uploading database (428.9 MB)...
+[grans] 96.00 MiB/428.90 MiB [======>                       ] 22% 3.80 MiB/s, ETA 1m
+```
+
+The bar is written to stderr and is skipped when output is redirected. Uploads above 150 MB are sent as chunked sessions, so the bar advances 8 MB at a time; smaller ones stream in a single request and advance smoothly.
 
 **Conflict handling:** Sync refuses to overwrite newer files by default. Use `--force` to override:
 

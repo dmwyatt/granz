@@ -21,7 +21,7 @@ use crate::sync::oauth::{
 use crate::db::integrity::check_pulled_database;
 use crate::output::progress::create_spinner;
 use crate::sync::content_hash::HashingWriter;
-use crate::sync::transfer::{verify_content_hash, verify_transfer_size};
+use crate::sync::transfer::{no_progress, verify_content_hash, verify_transfer_size, ProgressFn};
 use crate::sync::SyncError;
 
 /// Remote paths on Dropbox (within app folder)
@@ -143,7 +143,8 @@ fn upload_metadata(client: &DropboxClient, metadata: &SyncMetadata) -> Result<()
     std::fs::write(&temp_path, &json)?;
 
     println!("Uploading sync metadata...");
-    client.upload(&temp_path, REMOTE_METADATA_PATH)?;
+    // A few hundred bytes: a progress bar would flash and vanish.
+    client.upload(&temp_path, REMOTE_METADATA_PATH, no_progress())?;
 
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_path);
@@ -161,29 +162,26 @@ fn push_file(
     let local_mtime = get_file_mtime(local_path)?;
 
     // Check remote file
-    if !force {
-        if let Some(remote) = client.get_metadata(remote_path)? {
-            if let Some(remote_mtime) = parse_dropbox_time(&remote.server_modified) {
-                if remote_mtime > local_mtime {
-                    return Err(SyncError::ConflictRemoteNewer {
-                        what: name.to_string(),
-                        remote_time: format_timestamp(remote_mtime),
-                        local_time: format_timestamp(local_mtime),
-                    }
-                    .into());
-                }
-            }
+    if !force
+        && let Some(remote) = client.get_metadata(remote_path)?
+        && let Some(remote_mtime) = parse_dropbox_time(&remote.server_modified)
+        && remote_mtime > local_mtime
+    {
+        return Err(SyncError::ConflictRemoteNewer {
+            what: name.to_string(),
+            remote_time: format_timestamp(remote_mtime),
+            local_time: format_timestamp(local_mtime),
         }
+        .into());
     }
 
     let size = std::fs::metadata(local_path)?.len();
-    println!(
-        "Uploading {} ({:.2} MB)...",
-        name,
-        size as f64 / 1_048_576.0
-    );
+    println!("Uploading {} ({})...", name, format_size(size));
 
-    client.upload(local_path, remote_path)?;
+    let progress = TransferProgress::new(size);
+    client.upload(local_path, remote_path, progress.reporter())?;
+    drop(progress);
+
     println!("  Uploaded to {}", remote_path);
 
     Ok(())
@@ -342,7 +340,7 @@ fn stream_to_file(
     temp_path: &Path,
     expected_size: u64,
 ) -> Result<(u64, String)> {
-    let progress = DownloadProgress::new(expected_size);
+    let progress = TransferProgress::new(expected_size);
 
     let file = std::fs::File::create(temp_path)?;
     let mut writer = HashingWriter::new(BufWriter::new(file));
@@ -362,12 +360,13 @@ fn stream_to_file(
     Ok((written, actual_hash))
 }
 
-/// Byte-count progress bar, shown only when stderr is a terminal.
-struct DownloadProgress {
+/// Byte-count progress bar for a transfer in either direction, shown only when
+/// stderr is a terminal.
+struct TransferProgress {
     bar: Option<ProgressBar>,
 }
 
-impl DownloadProgress {
+impl TransferProgress {
     fn new(total: u64) -> Self {
         if !io::stderr().is_terminal() {
             return Self { bar: None };
@@ -390,11 +389,25 @@ impl DownloadProgress {
             pb.set_position(bytes);
         }
     }
+
+    /// An owned reporter for callers that hand progress off to the transport.
+    ///
+    /// The handle is a cheap clone of the same bar, so updates through it land
+    /// on the bar this value still controls and clears.
+    fn reporter(&self) -> ProgressFn {
+        match self.bar {
+            Some(ref pb) => {
+                let handle = pb.clone();
+                Box::new(move |bytes| handle.set_position(bytes))
+            }
+            None => no_progress(),
+        }
+    }
 }
 
-/// Clear the bar however the download ends, so a failure message is not printed
+/// Clear the bar however the transfer ends, so a failure message is not printed
 /// underneath a stale progress line.
-impl Drop for DownloadProgress {
+impl Drop for TransferProgress {
     fn drop(&mut self) {
         if let Some(ref pb) = self.bar {
             pb.finish_and_clear();
