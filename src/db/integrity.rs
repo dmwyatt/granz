@@ -128,6 +128,43 @@ mod tests {
         assert!(check_pulled_database(&path).is_err());
     }
 
+    /// Pins a known limit rather than a capability.
+    ///
+    /// grans builds its FTS5 tables with `content=`, and SQLite compares an
+    /// external-content index against its source table only under FTS5's own
+    /// `integrity-check` with `rank=1`. Neither `quick_check` nor
+    /// `integrity_check` runs that, so an index that has drifted from its
+    /// source passes both. Search then silently returns too few rows while the
+    /// database looks healthy.
+    ///
+    /// Closing this needs a writable connection, which this deliberately
+    /// read-only check does not take. If that changes, this test should start
+    /// failing and be inverted.
+    #[test]
+    fn does_not_notice_an_fts_index_that_drifted_from_its_source() {
+        let dir = TempDir::new().unwrap();
+        let path = valid_database(&dir);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO transcript_utterances (id, document_id, text)
+                 VALUES ('u1', 'd1', 'deployment rollback discussion'),
+                        ('u2', 'd1', 'quarterly planning notes');
+             INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild');",
+        )
+        .unwrap();
+
+        // Drop source rows without the index maintenance that db::transcripts
+        // normally performs, leaving the index describing rows that are gone.
+        conn.execute("DELETE FROM transcript_utterances", []).unwrap();
+        drop(conn);
+
+        assert!(
+            check_pulled_database(&path).is_ok(),
+            "if this now fails, the FTS drift gap has been closed; invert the test"
+        );
+    }
+
     #[test]
     fn rejects_a_truncated_database() {
         let dir = TempDir::new().unwrap();
