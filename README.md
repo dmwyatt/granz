@@ -129,7 +129,7 @@ grans sync panels --retry             # Retry previously failed panel fetches
 
 1. `--token <TOKEN>`, or the `GRANS_TOKEN` environment variable
 2. grans's own stored credentials, from `grans auth login`
-3. The token Granola's desktop app stored locally
+3. The token Granola's desktop app stored locally (not on macOS, see below)
 
 ### Signing in
 
@@ -181,14 +181,16 @@ or self-updated grans may ask for keychain access again.
 
 ### Reading Granola's local token
 
-Without `grans auth login`, grans falls back to the token Granola's desktop app
-stored, decrypting the `supabase.json.enc` store that recent versions use
-(falling back to the legacy plaintext `supabase.json`).
+On Windows and Linux, and without `grans auth login`, grans falls back to the
+token Granola's desktop app stored, decrypting the `supabase.json.enc` store
+that recent versions use (falling back to the legacy plaintext
+`supabase.json`).
 
-**This no longer works on current macOS builds.** Granola moved its
-data-encryption key into the macOS data-protection keychain, gated on Granola's
-own code signature, so no other program can read it. Use `grans auth login`
-instead. The fallback still works on Windows.
+**There is no such fallback on macOS.** Granola keeps its data-encryption key
+in the macOS data-protection keychain, gated on Granola's own code signature,
+so no other program can read it. grans does not try: with no session of its
+own it tells you to run `grans auth login`, which is the only thing that
+works there.
 
 To print whichever token grans resolves:
 
