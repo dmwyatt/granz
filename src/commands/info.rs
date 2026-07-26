@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
 use crate::db::info::{get_info_db_only, DbInfo};
-use crate::output::format::OutputMode;
+use crate::output::format::{format_size, OutputMode};
 
 /// Run info command
 pub fn run(conn: &Connection, db_path: &Path, ctx: &RunContext) -> Result<()> {
@@ -107,22 +107,6 @@ fn format_number(n: i64) -> String {
         result.insert(0, c);
     }
     result
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
 }
 
 fn format_date(iso_date: &str, tz: &FixedOffset) -> String {
