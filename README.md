@@ -176,8 +176,22 @@ holds a working session until you revoke it. If a keychain later becomes
 available, the next grans command moves the credentials into it and deletes
 the file.
 
-On macOS the keychain item is tied to the binary that created it, so a rebuilt
-or self-updated grans may ask for keychain access again.
+On macOS, grans marks its keychain item as readable by any application, the
+same thing `security add-generic-password -A` does. Without that, macOS ties
+the item to the code signature of the binary that created it. grans is not
+signed with a Developer ID, so on Apple Silicon it carries only the ad-hoc
+signature the linker applies, which is a hash of the binary itself: every
+rebuild or self-update is a different application as far as the keychain is
+concerned, and you would be asked for your login password on every read, with
+"Always Allow" lasting only until the next build.
+
+The cost is that any program running as you can read the refresh token without
+being challenged, the same posture `gh` and `aws` take. What the keychain still
+gives you over the `auth.toml` fallback is encryption at rest and a token that
+stays unreadable in backups and disk images.
+
+An item written by a grans older than this change keeps its original ACL until
+the next save rewrites it, so expect one last password prompt.
 
 ### Reading Granola's local token
 
