@@ -42,8 +42,37 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # Full debuginfo writes a 194 MB PDB beside the binary and leaves a 2.4 GB
+      # target/. Line tables cut those to 103 MB and 1.7 GB: less to link, and
+      # far less for the cache step to pack and upload. Measured on Windows,
+      # where the .exe itself barely moves (52 -> 50 MB) because MSVC keeps
+      # debuginfo in the PDB rather than the image.
+      #
+      # The `file:line` a CI failure report is read for survives, because the
+      # location in a panic message comes from the panic site, not debuginfo.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The integration suites spawn a 50 MB `grans.exe` once per test, and on
+      # Windows that cost about 2.5s per spawn against 0.037s on ubuntu. A slow
+      # runner does not explain it: the 824 in-process unit tests ran at parity
+      # (16.2s vs 13.2s) while every suite that spawns the binary ran 38-85x
+      # slower. Defender scanning each CreateProcess is the suspected mechanism,
+      # so this tests that theory. RUNNER_TEMP is included because the suites
+      # build a SQLite database per test under TempDir.
+      #
+      # Left to fail loudly. If this stops working on the runner image, Windows
+      # quietly returns to seven minutes, and a silent regression is worse than
+      # a red step naming the reason.
+      - name: Exclude the build and test paths from Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess cargo.exe, rustc.exe, grans.exe
 
       # Pinned by SHA, so the toolchain no longer comes from the `stable` ref name.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
