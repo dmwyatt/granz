@@ -41,9 +41,39 @@ jobs:
           filters: |
             rust:
               - 'src/**'
+              - 'tests/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+
+  # Fast and independent of the project's own build, so it does not sit behind
+  # the matrix. Runs under the same filter as `test`, which is why 'tests/**'
+  # joined that filter: a PR touching only tests/*.rs previously matched nothing
+  # and skipped CI altogether, and it is exactly the kind of PR a formatting
+  # gate needs to see. platform-tests.yml has always listed 'tests/**'.
+  #
+  # This is the only formatting gate; there is deliberately no git hook. Rust
+  # convention is editor format-on-save (rust-analyzer's `editor.formatOnSave`)
+  # plus a CI check, and every hook option costs something a one-job gate does
+  # not: cargo-husky and rusty-hook write to .git/hooks as a build side effect,
+  # the pre-commit framework pulls Python into a Rust repo, and a committed
+  # .githooks/ needs `git config core.hooksPath` run in every clone.
+  fmt:
+    name: Formatting
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
 
   test:
     name: Tests (${{ matrix.os }})
@@ -277,17 +307,23 @@ jobs:
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, fmt]
     if: always()
     steps:
-      - name: Report aggregate test result
+      - name: Report aggregate result
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          FMT_RESULT: ${{ needs.fmt.result }}
         run: |
-          result="${{ needs.test.result }}"
           # `skipped` is a non-Rust PR the paths filter excluded. Anything
           # other than that or a clean pass has to hold the merge, cancelled
           # runs included -- this job is the gate, so it cannot wave through
           # a result it never saw.
-          case "$result" in
-            success | skipped) ;;
-            *) echo "Tests: $result"; exit 1 ;;
-          esac
+          failed=0
+          for job in "Tests:$TEST_RESULT" "Formatting:$FMT_RESULT"; do
+            case "${job#*:}" in
+              success | skipped) ;;
+              *) echo "${job%%:*} ${job#*:}"; failed=1 ;;
+            esac
+          done
+          exit "$failed"
