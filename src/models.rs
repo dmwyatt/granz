@@ -141,31 +141,6 @@ pub struct PersonName {
 // Transcript Types
 // ============================================================================
 
-/// Filter transcript utterances by speaker
-#[derive(Debug, Clone, PartialEq)]
-pub enum SpeakerFilter {
-    Me,
-    Other,
-}
-
-impl SpeakerFilter {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "me" => Some(SpeakerFilter::Me),
-            "other" => Some(SpeakerFilter::Other),
-            _ => None,
-        }
-    }
-
-    pub fn matches(&self, source: Option<&str>) -> bool {
-        match (self, source) {
-            (SpeakerFilter::Me, Some("microphone")) => true,
-            (SpeakerFilter::Other, Some("system")) => true,
-            _ => false,
-        }
-    }
-}
-
 /// A transcript utterance
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TranscriptUtterance {
@@ -183,6 +158,14 @@ pub struct TranscriptUtterance {
     pub source: Option<String>,
     #[serde(default)]
     pub is_final: Option<bool>,
+    /// The speaker Granola detected, on the system channel only and only for
+    /// meetings recorded after 2026-07-21. A display name, not an identifier.
+    ///
+    /// The field name matches the API's JSON key, so it round-trips through
+    /// `api_snapshot` in the same position it occupied when it was landing in
+    /// `extra`.
+    #[serde(default)]
+    pub detected_speaker_name: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -508,42 +491,3 @@ pub struct RecipeConfig {
     pub extra: HashMap<String, Value>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn speaker_filter_parse_me() {
-        assert_eq!(SpeakerFilter::parse("me"), Some(SpeakerFilter::Me));
-        assert_eq!(SpeakerFilter::parse("ME"), Some(SpeakerFilter::Me));
-        assert_eq!(SpeakerFilter::parse("Me"), Some(SpeakerFilter::Me));
-    }
-
-    #[test]
-    fn speaker_filter_parse_other() {
-        assert_eq!(SpeakerFilter::parse("other"), Some(SpeakerFilter::Other));
-        assert_eq!(SpeakerFilter::parse("OTHER"), Some(SpeakerFilter::Other));
-    }
-
-    #[test]
-    fn speaker_filter_parse_invalid() {
-        assert_eq!(SpeakerFilter::parse("unknown"), None);
-        assert_eq!(SpeakerFilter::parse(""), None);
-    }
-
-    #[test]
-    fn speaker_filter_matches_me() {
-        let filter = SpeakerFilter::Me;
-        assert!(filter.matches(Some("microphone")));
-        assert!(!filter.matches(Some("system")));
-        assert!(!filter.matches(None));
-    }
-
-    #[test]
-    fn speaker_filter_matches_other() {
-        let filter = SpeakerFilter::Other;
-        assert!(filter.matches(Some("system")));
-        assert!(!filter.matches(Some("microphone")));
-        assert!(!filter.matches(None));
-    }
-}

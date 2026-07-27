@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use super::common::{DocumentRow, row_to_document};
-use super::transcripts::{TranscriptUtteranceRow, row_to_utterance};
+
 use crate::models::{Document, TranscriptUtterance};
 use crate::query::dates::DateRange;
 use crate::query::fts::sanitize_fts_query;
@@ -204,23 +204,7 @@ pub fn resolve_document_id(
 }
 
 pub fn get_transcript(conn: &Connection, document_id: &str) -> Result<Vec<TranscriptUtterance>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, document_id, start_timestamp, end_timestamp, text, source, is_final FROM transcript_utterances WHERE document_id = ?1 ORDER BY start_timestamp",
-    )?;
-
-    let rows = stmt.query_map([document_id], |row| {
-        Ok(TranscriptUtteranceRow {
-            id: row.get(0)?,
-            document_id: row.get(1)?,
-            start_timestamp: row.get(2)?,
-            end_timestamp: row.get(3)?,
-            text: row.get(4)?,
-            source: row.get(5)?,
-            is_final: row.get(6)?,
-        })
-    })?;
-
-    Ok(rows.filter_map(|r| r.ok()).map(row_to_utterance).collect())
+    super::transcripts::load_transcript(conn, document_id)
 }
 
 pub fn search_meetings(
