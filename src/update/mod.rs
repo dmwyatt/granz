@@ -7,13 +7,22 @@ pub mod wait;
 
 use thiserror::Error;
 
+/// Prefer `GH_TOKEN` (what the gh CLI sets) over `GITHUB_TOKEN`.
+///
+/// Split out from the environment read so the preference can be tested without
+/// mutating process-global state, which three tests used to race on.
+fn pick_github_token(gh: Option<String>, github: Option<String>) -> Option<String> {
+    gh.or(github)
+}
+
 /// Get GitHub token from environment if available.
 ///
 /// Checks `GH_TOKEN` first (used by gh CLI), then `GITHUB_TOKEN`.
 pub(crate) fn get_github_token_from_env() -> Option<String> {
-    std::env::var("GH_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
-        .ok()
+    pick_github_token(
+        std::env::var("GH_TOKEN").ok(),
+        std::env::var("GITHUB_TOKEN").ok(),
+    )
 }
 
 /// Check if the gh CLI is available and authenticated.
@@ -73,88 +82,29 @@ pub type UpdateResult<T> = Result<T, UpdateError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
-    // Helper to safely set/remove env vars in tests
-    // SAFETY: These tests run single-threaded (cargo test runs each test in isolation)
-    unsafe fn set_env(key: &str, value: &str) {
-        unsafe { env::set_var(key, value) };
-    }
-
-    unsafe fn remove_env(key: &str) {
-        unsafe { env::remove_var(key) };
-    }
-
-    unsafe fn restore_env(key: &str, orig: Option<String>) {
-        match orig {
-            Some(v) => unsafe { env::set_var(key, v) },
-            None => unsafe { env::remove_var(key) },
-        }
+    fn token(value: &str) -> Option<String> {
+        Some(value.to_string())
     }
 
     #[test]
-    fn test_get_github_token_from_env_prefers_gh_token() {
-        // Save original values
-        let orig_gh = env::var("GH_TOKEN").ok();
-        let orig_github = env::var("GITHUB_TOKEN").ok();
-
-        // SAFETY: Test runs single-threaded
-        unsafe {
-            set_env("GH_TOKEN", "gh_token_value");
-            set_env("GITHUB_TOKEN", "github_token_value");
-        }
-
-        let result = get_github_token_from_env();
-        assert_eq!(result, Some("gh_token_value".to_string()));
-
-        // Restore
-        unsafe {
-            restore_env("GH_TOKEN", orig_gh);
-            restore_env("GITHUB_TOKEN", orig_github);
-        }
+    fn test_pick_github_token_prefers_gh_token() {
+        assert_eq!(
+            pick_github_token(token("gh_token_value"), token("github_token_value")),
+            token("gh_token_value")
+        );
     }
 
     #[test]
-    fn test_get_github_token_from_env_falls_back_to_github_token() {
-        // Save original values
-        let orig_gh = env::var("GH_TOKEN").ok();
-        let orig_github = env::var("GITHUB_TOKEN").ok();
-
-        // SAFETY: Test runs single-threaded
-        unsafe {
-            remove_env("GH_TOKEN");
-            set_env("GITHUB_TOKEN", "github_token_value");
-        }
-
-        let result = get_github_token_from_env();
-        assert_eq!(result, Some("github_token_value".to_string()));
-
-        // Restore
-        unsafe {
-            restore_env("GH_TOKEN", orig_gh);
-            restore_env("GITHUB_TOKEN", orig_github);
-        }
+    fn test_pick_github_token_falls_back_to_github_token() {
+        assert_eq!(
+            pick_github_token(None, token("github_token_value")),
+            token("github_token_value")
+        );
     }
 
     #[test]
-    fn test_get_github_token_from_env_returns_none_when_unset() {
-        // Save original values
-        let orig_gh = env::var("GH_TOKEN").ok();
-        let orig_github = env::var("GITHUB_TOKEN").ok();
-
-        // SAFETY: Test runs single-threaded
-        unsafe {
-            remove_env("GH_TOKEN");
-            remove_env("GITHUB_TOKEN");
-        }
-
-        let result = get_github_token_from_env();
-        assert_eq!(result, None);
-
-        // Restore
-        unsafe {
-            restore_env("GH_TOKEN", orig_gh);
-            restore_env("GITHUB_TOKEN", orig_github);
-        }
+    fn test_pick_github_token_returns_none_when_neither_is_set() {
+        assert_eq!(pick_github_token(None, None), None);
     }
 }
