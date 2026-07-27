@@ -10,7 +10,7 @@ use thiserror::Error;
 /// Prefer `GH_TOKEN` (what the gh CLI sets) over `GITHUB_TOKEN`.
 ///
 /// Split out from the environment read so the preference can be tested without
-/// mutating process-global state, which three tests used to race on.
+/// mutating process-global state.
 fn pick_github_token(gh: Option<String>, github: Option<String>) -> Option<String> {
     gh.or(github)
 }
