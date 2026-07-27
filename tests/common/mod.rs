@@ -686,7 +686,8 @@ pub fn fixture_state() -> String {
                     "end_timestamp": "2025-07-20T14:01:30.000Z",
                     "text": "Let us review the performance benchmarks.",
                     "source": "system",
-                    "is_final": true
+                    "is_final": true,
+                    "speaker_name": "Priya Raman"
                 },
                 {
                     "id": "utt-b2",
@@ -695,7 +696,8 @@ pub fn fixture_state() -> String {
                     "end_timestamp": "2025-07-20T14:02:00.000Z",
                     "text": "The latency improved by forty percent after optimization.",
                     "source": "system",
-                    "is_final": true
+                    "is_final": true,
+                    "speaker_name": "Priya Nair"
                 },
                 {
                     "id": "utt-b3",
@@ -704,7 +706,8 @@ pub fn fixture_state() -> String {
                     "end_timestamp": "2025-07-20T14:02:30.000Z",
                     "text": "We should deploy the prototype to staging next sprint.",
                     "source": "system",
-                    "is_final": true
+                    "is_final": true,
+                    "speaker_name": "Marcus Webb"
                 }
             ]
         },

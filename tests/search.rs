@@ -332,6 +332,110 @@ fn speaker_filter_me_matches_nothing_in_all_system_fixture() {
     assert_eq!(result["total_meetings"], 0, "got: {result}");
 }
 
+// --- Named speakers: Granola's own attribution, post-2026-07-21 ---
+
+#[test]
+fn speaker_name_filter_keeps_only_that_speakers_meetings() {
+    let env = TestEnv::with_fixture();
+    // "prototype" appears in doc-alpha (unattributed) and doc-beta (Marcus
+    // Webb). Naming Marcus drops doc-alpha.
+    let output = env
+        .cmd_json()
+        .args(["grep", "prototype", "--speaker", "Marcus Webb"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let meetings = result["meetings"].as_array().unwrap();
+    assert_eq!(meetings.len(), 1, "got: {result}");
+    assert_eq!(meetings[0]["id"], "doc-beta");
+    assert_eq!(meetings[0]["matches"][0]["speaker_name"], "Marcus Webb");
+    // The channel label survives alongside the name.
+    assert_eq!(meetings[0]["matches"][0]["speaker"], "other");
+}
+
+#[test]
+fn speaker_name_filter_matches_a_partial_name() {
+    let env = TestEnv::with_fixture();
+    let output = env
+        .cmd_json()
+        .args(["grep", "prototype", "--speaker", "marcus"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["meetings"].as_array().unwrap().len(), 1, "got: {result}");
+}
+
+#[test]
+fn speaker_name_matching_several_speakers_notes_them_and_takes_the_union() {
+    let env = TestEnv::with_fixture();
+    // Two Priyas in the fixture: the run proceeds over both and says so.
+    let output = env
+        .cmd_json()
+        .args(["grep", "the", "--speaker", "priya"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("matched 2 speakers"), "got stderr: {stderr}");
+    assert!(stderr.contains("Priya Nair"), "got stderr: {stderr}");
+    assert!(stderr.contains("Priya Raman"), "got stderr: {stderr}");
+
+    // The note goes to stderr so JSON on stdout stays parseable.
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["meetings"].as_array().unwrap().len() >= 1, "got: {result}");
+}
+
+#[test]
+fn unknown_speaker_name_errors_and_lists_known_speakers() {
+    let env = TestEnv::with_fixture();
+    // A typo must not read as "nobody said that".
+    env.cmd()
+        .args(["grep", "prototype", "--speaker", "Marcys Webb"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no speaker matches \"Marcys Webb\""))
+        .stderr(predicate::str::contains("Marcus Webb"));
+}
+
+#[test]
+fn show_transcript_names_the_detected_speaker() {
+    let env = TestEnv::with_fixture();
+    env.cmd()
+        .args(["show", "doc-beta", "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Marcus Webb:"))
+        .stdout(predicate::str::contains("Priya Raman:"));
+}
+
+#[test]
+fn show_transcript_filtered_to_a_speaker_keeps_only_their_utterances() {
+    let env = TestEnv::with_fixture();
+    env.cmd()
+        .args(["show", "doc-beta", "--transcript", "--speaker", "Marcus Webb"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Marcus Webb:"))
+        .stdout(predicate::str::contains("Priya Raman:").not());
+}
+
+#[test]
+fn show_transcript_says_so_when_the_speaker_filter_empties_it() {
+    let env = TestEnv::with_fixture();
+    // doc-beta has a transcript; it just has nothing by this speaker. Saying
+    // "no transcript available" would send the reader to check their sync.
+    env.cmd()
+        .args(["show", "doc-beta", "--transcript", "--speaker", "me"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No utterances by that speaker"));
+}
+
 #[test]
 fn grep_speaker_with_in_excluding_transcripts_errors() {
     let env = TestEnv::with_fixture();

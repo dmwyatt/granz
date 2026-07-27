@@ -4,6 +4,7 @@ use colored::Colorize;
 use crate::models::{
     Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe, TranscriptUtterance,
 };
+use crate::query::speaker::{label as speaker_label, SpeakerLabel};
 
 /// Format a meeting list entry for TTY display.
 pub fn format_meeting_row(doc: &Document, tz: &FixedOffset) -> String {
@@ -92,11 +93,12 @@ pub fn format_utterance(utt: &TranscriptUtterance, highlight: bool, tz: &FixedOf
         .unwrap_or_default();
     let text = utt.text.as_deref().unwrap_or("");
 
-    let speaker_prefix = match utt.source.as_deref() {
-        Some("microphone") => format!("{} ", "You:".cyan()),
-        Some("system") => format!("{} ", "Other:".dimmed()),
-        _ => String::new(),
-    };
+    let speaker_prefix =
+        match speaker_label(utt.source.as_deref(), utt.detected_speaker_name.as_deref()) {
+            Some(SpeakerLabel::You) => format!("{} ", "You:".cyan()),
+            Some(label) => format!("{} ", format!("{}:", label.as_str()).dimmed()),
+            None => String::new(),
+        };
 
     if highlight {
         format!("  {} {} {}{}", "▶".green(), timestamp.dimmed(), speaker_prefix, text.bold())
@@ -294,6 +296,19 @@ mod tests {
         };
         let output = strip(&format_utterance(&utt, false, &utc()));
         assert!(output.contains("Other:"), "Expected 'Other:' label, got: {}", output);
+    }
+
+    #[test]
+    fn format_utterance_prefers_the_detected_speaker_name() {
+        let utt = TranscriptUtterance {
+            source: Some("system".to_string()),
+            text: Some("Hello from Jane".to_string()),
+            detected_speaker_name: Some("Jane Doe".to_string()),
+            ..Default::default()
+        };
+        let output = strip(&format_utterance(&utt, false, &utc()));
+        assert!(output.contains("Jane Doe:"), "Expected the name, got: {}", output);
+        assert!(!output.contains("Other:"), "Name should replace 'Other:', got: {}", output);
     }
 
     #[test]
