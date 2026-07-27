@@ -5,6 +5,20 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
 
+# A run that a newer push has superseded is not merely wasted compute here: the
+# two review jobs post inline comments anchored to diff positions, so a
+# superseded run delivers feedback about a diff that no longer exists, and
+# track_progress adds a second tracking comment beside the current run's. The
+# window is wide enough to hit in practice -- Code Review alone takes a bit over
+# two minutes, and it starts immediately rather than after the tests whenever
+# the paths filter skips them.
+#
+# This workflow is pull_request-only, so cancelling is always the right call.
+# github.ref is refs/pull/<n>/merge here, which keys the group per PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
