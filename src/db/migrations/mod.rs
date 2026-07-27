@@ -28,6 +28,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("v011_raw_json_templates_recipes_events.sql")),
         M::up(include_str!("v012_rename_is_primary_to_primary.sql")),
         M::up(include_str!("v013_api_snapshot.sql")),
+        M::up(include_str!("v014_utterance_speaker_name.sql")),
     ])
 }
 
@@ -51,7 +52,7 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         rusqlite_migration::SchemaVersion::Inside(v) => {
             // Check if current version is less than the number of migrations
             let current = v.get();
-            let total = 13; // We have 13 migrations (v001-v013)
+            let total = 14; // We have 14 migrations (v001-v014)
             current < total
         }
         rusqlite_migration::SchemaVersion::Outside(_) => false,
@@ -163,8 +164,8 @@ mod tests {
         let conn = open_and_migrate(&db_path).unwrap();
         let version = get_schema_version(&conn).unwrap();
 
-        // Should be version 13 after all migrations
-        assert_eq!(version, 13);
+        // Should be version 14 after all migrations
+        assert_eq!(version, 14);
     }
 
     #[test]
@@ -676,6 +677,116 @@ mod tests {
             )
             .unwrap();
         assert!(snapshot.is_none());
+    }
+
+    #[test]
+    fn test_speaker_name_column_backfills_from_api_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_and_migrate(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc1', 'Test Doc')",
+            [],
+        )
+        .unwrap();
+
+        // A row inserted after the migration still writes the column directly.
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text, source, speaker_name)
+             VALUES ('utt1', 'doc1', 'Hello', 'system', 'Jane Doe')",
+            [],
+        )
+        .unwrap();
+
+        let name: Option<String> = conn
+            .query_row(
+                "SELECT speaker_name FROM transcript_utterances WHERE id = 'utt1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, Some("Jane Doe".to_string()));
+
+        // NULL is allowed: the microphone channel is never attributed.
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text, source)
+             VALUES ('utt2', 'doc1', 'Mine', 'microphone')",
+            [],
+        )
+        .unwrap();
+
+        let name: Option<String> = conn
+            .query_row(
+                "SELECT speaker_name FROM transcript_utterances WHERE id = 'utt2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(name.is_none());
+
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_transcript_utterances_speaker_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
+    }
+
+    #[test]
+    fn test_speaker_name_backfill_lifts_names_out_of_existing_snapshots() {
+        // Attribution arrived in the API on 2026-07-21 and has been riding
+        // into api_snapshot ever since. Rows already on disk when v014 runs
+        // must come out attributed without a re-sync.
+        let mut conn = Connection::open_in_memory().unwrap();
+        let m = migrations();
+
+        // Stop at v013: the snapshot column exists, speaker_name does not.
+        m.to_version(&mut conn, 13).unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc1', 'Test Doc')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO transcript_utterances (id, document_id, text, source, api_snapshot)
+               VALUES ('attributed', 'doc1', 'Hello', 'system',
+                       '{"id":"attributed","text":"[stored]","detected_speaker_name":"Jane Doe"}')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO transcript_utterances (id, document_id, text, source, api_snapshot)
+               VALUES ('pre-cutover', 'doc1', 'Older', 'system',
+                       '{"id":"pre-cutover","text":"[stored]"}')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text, source)
+             VALUES ('no-snapshot', 'doc1', 'Oldest', 'system')",
+            [],
+        )
+        .unwrap();
+
+        m.to_latest(&mut conn).unwrap();
+
+        let name_of = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT speaker_name FROM transcript_utterances WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(name_of("attributed"), Some("Jane Doe".to_string()));
+        assert!(name_of("pre-cutover").is_none());
+        assert!(name_of("no-snapshot").is_none());
     }
 
     #[test]
