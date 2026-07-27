@@ -7,4 +7,5 @@ pub mod fusion;
 pub mod hybrid;
 pub mod rerank;
 pub mod shape;
+pub mod speaker;
 pub mod text;

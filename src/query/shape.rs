@@ -34,6 +34,9 @@ pub struct MatchEvidence {
     pub excerpt: Excerpt,
     /// Raw utterance source for transcripts (`"microphone"`/`"system"`).
     pub speaker: Option<String>,
+    /// Granola's detected speaker name, when the utterance carries one.
+    /// Independent of `speaker`, which stays the audio channel.
+    pub speaker_name: Option<String>,
     /// ISO start timestamp for transcript evidence.
     pub timestamp: Option<String>,
     /// Section heading for panel evidence.
@@ -52,6 +55,8 @@ pub struct ContextUnit {
     pub text: String,
     /// Raw utterance source for transcript neighbors.
     pub speaker: Option<String>,
+    /// Granola's detected speaker name for transcript neighbors, if any.
+    pub speaker_name: Option<String>,
     /// ISO start timestamp for transcript neighbors.
     pub timestamp: Option<String>,
     /// Section heading for panel neighbors.

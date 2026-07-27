@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::models::SpeakerFilter;
+use crate::query::speaker::SpeakerFilter;
 use crate::output::format::OutputMode;
 use crate::query::dates::build_date_range;
 
@@ -71,12 +71,11 @@ pub fn show(
 
                 // Transcript second (if requested)
                 if transcript_only {
-                    let transcript = filter_by_speaker(
-                        crate::db::meetings::get_transcript(conn, doc_id)?,
-                        speaker,
-                    );
+                    let all = crate::db::meetings::get_transcript(conn, doc_id)?;
+                    let had_utterances = !all.is_empty();
+                    let transcript = filter_by_speaker(all, speaker);
                     if transcript.is_empty() && !notes_only {
-                        bail!("No transcript available for this meeting");
+                        bail!("{}", empty_transcript_message(had_utterances));
                     }
                     if !transcript.is_empty() {
                         let text: String = transcript
@@ -181,9 +180,20 @@ fn filter_by_speaker(
     match speaker {
         Some(filter) => utterances
             .into_iter()
-            .filter(|u| filter.matches(u.source.as_deref()))
+            .filter(|u| filter.matches(u.source.as_deref(), u.detected_speaker_name.as_deref()))
             .collect(),
         None => utterances,
+    }
+}
+
+/// Why `--transcript` produced nothing. A meeting with utterances that the
+/// speaker filter emptied is a different situation from one that was never
+/// transcribed, and saying so saves the reader from re-checking the sync.
+fn empty_transcript_message(had_utterances: bool) -> &'static str {
+    if had_utterances {
+        "No utterances by that speaker in this meeting"
+    } else {
+        "No transcript available for this meeting"
     }
 }
 

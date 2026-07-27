@@ -9,7 +9,8 @@ use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
 use crate::commands::search_common::{print_shaped_cards, shape_and_page};
-use crate::models::{Document, SpeakerFilter};
+use crate::models::Document;
+use crate::query::speaker::SpeakerFilter;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
 use crate::query::filter::{filter_by_meeting, SearchTarget};

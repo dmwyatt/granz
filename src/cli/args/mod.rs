@@ -1,10 +1,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::models::SpeakerFilter;
 use crate::query::filter::SearchTarget;
+use crate::query::speaker::SpeakerSelector;
 
-fn parse_speaker_filter(s: &str) -> Result<SpeakerFilter, String> {
-    SpeakerFilter::parse(s).ok_or_else(|| format!("invalid speaker filter '{}': expected 'me' or 'other'", s))
+fn parse_speaker_selector(s: &str) -> Result<SpeakerSelector, String> {
+    SpeakerSelector::parse(s)
+        .ok_or_else(|| "empty speaker filter: expected 'me', 'other', or a speaker's name".to_string())
 }
 
 #[derive(Parser, Debug)]
@@ -151,9 +152,9 @@ pub enum Commands {
         #[arg(long)]
         date: Option<String>,
 
-        /// Filter matches by speaker: "me" (your utterances) or "other" (others' utterances); only meetings where that speaker's utterances match survive. Requires transcripts in --in
-        #[arg(long, value_parser = parse_speaker_filter)]
-        speaker: Option<SpeakerFilter>,
+        /// Filter matches by speaker: "me" (your utterances), "other" (everyone else), or a name to match Granola's detected speaker (partial names are fine); only meetings where that speaker's utterances match survive. Requires transcripts in --in
+        #[arg(long, value_parser = parse_speaker_selector)]
+        speaker: Option<SpeakerSelector>,
 
         /// Maximum number of meetings to show (0 = no limit)
         #[arg(long, default_value = "10")]
@@ -201,9 +202,9 @@ pub enum Commands {
         #[arg(long)]
         notes: bool,
 
-        /// Filter transcript by speaker: "me" (your utterances) or "other" (others' utterances)
-        #[arg(long, value_parser = parse_speaker_filter)]
-        speaker: Option<SpeakerFilter>,
+        /// Filter transcript by speaker: "me" (your utterances), "other" (everyone else), or a name to match Granola's detected speaker (partial names are fine)
+        #[arg(long, value_parser = parse_speaker_selector)]
+        speaker: Option<SpeakerSelector>,
     },
 
     /// Show meetings with a person

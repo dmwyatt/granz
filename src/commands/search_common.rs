@@ -63,7 +63,7 @@ pub fn print_shaped_cards(shaped: &[crate::query::shape::ShapedMeeting], ctx: &R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::SpeakerFilter;
+    use crate::query::speaker::SpeakerFilter;
 
     /// Documents in a fixed order with scores, as a ranked pipeline would
     /// hand them to shaping.
