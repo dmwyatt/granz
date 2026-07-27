@@ -12,13 +12,13 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::models::Document;
-use crate::query::speaker::SpeakerFilter;
 use crate::query::fts::{matches_all_tokens, FtsToken};
 use crate::query::hybrid::BestChunk;
 use crate::query::shape::{
     excerpt_around_match, title_matches, ContextUnit, EvidenceSource, MatchEvidence,
     ShapedMeeting, Signals,
 };
+use crate::query::speaker::SpeakerFilter;
 use crate::query::text::{split_into_paragraphs, split_markdown_sections, strip_panel_footer};
 
 /// How evidence is selected and excerpted per document.
