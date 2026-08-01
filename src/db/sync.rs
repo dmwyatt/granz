@@ -168,6 +168,7 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
     stats.updated = documents.len() - stats.unchanged - stats.inserted
         - documents.iter().filter(|d| d.id.is_none()).count();
 
+
     Ok(stats)
 }
 

@@ -33,5 +33,6 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("migrations/v013_api_snapshot.sql"))?;
     conn.execute_batch(include_str!("migrations/v014_utterance_speaker_name.sql"))?;
     conn.execute_batch(include_str!("migrations/v015_fts_triggers.sql"))?;
+    conn.execute_batch(include_str!("migrations/v016_titles_fts.sql"))?;
     Ok(())
 }

@@ -284,14 +284,29 @@ CREATE VIRTUAL TABLE panels_fts USING fts5(
 
 Enables fast text search across panel markdown. This is a contentless FTS table that references `panels`.
 
+### titles_fts
+
+Full-text search index for meeting titles.
+
+```sql
+CREATE VIRTUAL TABLE titles_fts USING fts5(
+    title,
+    content='documents',
+    content_rowid='rowid'
+);
+```
+
+Makes title matching word-based (implicit-AND tokens, any order) and BM25-scored, so titles rank alongside the other sources instead of pre-empting them. This is a contentless FTS table that references `documents`, maintained by triggers (`v016_titles_fts.sql`).
+
 ### Keeping the indexes in step
 
 These are external-content tables (`content=`), so SQLite does not maintain them
 for you: the index is a separate structure that happens to describe the source
 table, and it only stays true if something keeps writing to it.
 
-`transcript_fts` and `panels_fts` are maintained by triggers on their source
-tables (`v015_fts_triggers.sql`), which is SQLite's documented pattern. The index
+`transcript_fts`, `panels_fts`, and `titles_fts` are maintained by triggers on
+their source tables (`v015_fts_triggers.sql`, `v016_titles_fts.sql`), which is
+SQLite's documented pattern. The index
 entry is written in the same statement as the row, so nothing can commit a row
 without indexing it and no code path has to remember to.
 

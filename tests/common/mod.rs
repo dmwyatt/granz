@@ -239,13 +239,20 @@ fn create_test_tables(conn: &Connection) {
             content_rowid='rowid'
         );
 
+        CREATE VIRTUAL TABLE titles_fts USING fts5(
+            title,
+            content='documents',
+            content_rowid='rowid'
+        );
+
         CREATE VIRTUAL TABLE panels_fts USING fts5(
             content_markdown,
             content='panels',
             content_rowid='rowid'
         );
 
-        -- Must mirror v015_fts_triggers.sql. Without these, rows inserted below
+        -- Must mirror v015_fts_triggers.sql and v016_titles_fts.sql. Without
+        -- these, rows inserted below
         -- land in the source tables and never reach the index, so every search
         -- assertion in tests/ would be testing an empty index.
         CREATE TRIGGER transcript_utterances_ai AFTER INSERT ON transcript_utterances BEGIN
@@ -270,6 +277,17 @@ fn create_test_tables(conn: &Connection) {
             INSERT INTO panels_fts(panels_fts, rowid, content_markdown)
                 VALUES('delete', old.rowid, old.content_markdown);
             INSERT INTO panels_fts(rowid, content_markdown) VALUES (new.rowid, new.content_markdown);
+        END;
+
+        CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
+            INSERT INTO titles_fts(rowid, title) VALUES (new.rowid, new.title);
+        END;
+        CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
+            INSERT INTO titles_fts(titles_fts, rowid, title) VALUES('delete', old.rowid, old.title);
+        END;
+        CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
+            INSERT INTO titles_fts(titles_fts, rowid, title) VALUES('delete', old.rowid, old.title);
+            INSERT INTO titles_fts(rowid, title) VALUES (new.rowid, new.title);
         END;
 
         -- Set schema version via user_version pragma (used by rusqlite_migration)

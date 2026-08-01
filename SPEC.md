@@ -203,7 +203,7 @@ Stored at `<data_dir>/index.db`. Automatically built and refreshed on every invo
 - `recipes` table: id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id
 - `document_people` junction table: document_id, email, full_name, role (creator/attendee)
 - `metadata` table: cache_path, last_modified, schema_version
-- FTS5 virtual tables: `transcript_fts` (text), `notes_fts` (notes_plain)
+- FTS5 virtual tables: `transcript_fts` (text), `notes_fts` (notes_plain), `titles_fts` (title)
 
 Freshness check on each run:
 1. If DB file doesn't exist → rebuild
