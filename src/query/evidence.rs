@@ -11,13 +11,14 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::models::{Document, SpeakerFilter};
+use crate::models::Document;
 use crate::query::fts::{matches_all_tokens, FtsToken};
 use crate::query::hybrid::BestChunk;
 use crate::query::shape::{
     excerpt_around_match, title_matches, ContextUnit, EvidenceSource, MatchEvidence,
     ShapedMeeting, Signals,
 };
+use crate::query::speaker::SpeakerFilter;
 use crate::query::text::{split_into_paragraphs, split_markdown_sections, strip_panel_footer};
 
 /// How evidence is selected and excerpted per document.
@@ -60,6 +61,7 @@ struct Site {
     source: EvidenceSource,
     text: String,
     speaker: Option<String>,
+    speaker_name: Option<String>,
     timestamp: Option<String>,
     section: Option<String>,
     context_before: Vec<ContextUnit>,
@@ -111,6 +113,7 @@ pub fn collect_document_evidence(
                 source: site.source,
                 excerpt: excerpt_around_match(&site.text, tokens, width),
                 speaker: site.speaker,
+                speaker_name: site.speaker_name,
                 timestamp: site.timestamp,
                 section: site.section,
                 context_before: site.context_before,
@@ -198,6 +201,7 @@ fn chunk_evidence(
         source,
         excerpt: excerpt_around_match(&chunk.text, tokens, opts.max_chars),
         speaker: None,
+        speaker_name: None,
         timestamp: None,
         section: chunk.section_heading.clone(),
         // A chunk has no site location, so it cannot expand with context.
@@ -244,6 +248,7 @@ fn collect_panel_sites(
                     neighbors_of(&sections, i, context_size, |(h, b)| ContextUnit {
                         text: crate::query::shape::normalize_whitespace(b),
                         speaker: None,
+                        speaker_name: None,
                         timestamp: None,
                         section: h.map(String::from),
                     });
@@ -251,6 +256,7 @@ fn collect_panel_sites(
                     source: EvidenceSource::Panel,
                     text: body.to_string(),
                     speaker: None,
+                    speaker_name: None,
                     timestamp: None,
                     section: heading.map(String::from),
                     context_before,
@@ -279,6 +285,7 @@ fn collect_notes_sites(
                 neighbors_of(&paras, i, context_size, |p| ContextUnit {
                     text: crate::query::shape::normalize_whitespace(p),
                     speaker: None,
+                    speaker_name: None,
                     timestamp: None,
                     section: None,
                 });
@@ -286,6 +293,7 @@ fn collect_notes_sites(
                 source: EvidenceSource::Notes,
                 text: para.to_string(),
                 speaker: None,
+                speaker_name: None,
                 timestamp: None,
                 section: None,
                 context_before,
@@ -314,7 +322,7 @@ fn collect_transcript_sites(
 
     for (i, utt) in utterances.iter().enumerate() {
         if let Some(filter) = &opts.speaker {
-            if !filter.matches(utt.source.as_deref()) {
+            if !filter.matches(utt.source.as_deref(), utt.detected_speaker_name.as_deref()) {
                 continue;
             }
         }
@@ -324,6 +332,7 @@ fn collect_transcript_sites(
                 neighbors_of(&utterances, i, opts.context, |u| ContextUnit {
                     text: crate::query::shape::normalize_whitespace(u.text.as_deref().unwrap_or_default()),
                     speaker: u.source.clone(),
+                    speaker_name: u.detected_speaker_name.clone(),
                     timestamp: u.start_timestamp.clone(),
                     section: None,
                 });
@@ -331,6 +340,7 @@ fn collect_transcript_sites(
                 source: EvidenceSource::Transcript,
                 text: text.to_string(),
                 speaker: utt.source.clone(),
+                speaker_name: utt.detected_speaker_name.clone(),
                 timestamp: utt.start_timestamp.clone(),
                 section: None,
                 context_before,
@@ -713,7 +723,7 @@ mod tests {
         let opts = EvidenceOptions {
             max_matches: 10,
             context: 1,
-            speaker: Some(crate::models::SpeakerFilter::Me),
+            speaker: Some(crate::query::speaker::SpeakerFilter::Me),
             ..Default::default()
         };
         let ev =
@@ -734,7 +744,7 @@ mod tests {
         // "kumquat" sites: 1 panel, 2 notes, u1 (microphone), u3 (system).
         // With a speaker filter only transcript sites by that speaker count.
         let opts = EvidenceOptions {
-            speaker: Some(crate::models::SpeakerFilter::Me),
+            speaker: Some(crate::query::speaker::SpeakerFilter::Me),
             ..Default::default()
         };
         let ev =
@@ -745,11 +755,83 @@ mod tests {
     }
 
     #[test]
+    fn named_speaker_filter_keeps_only_that_speakers_utterances() {
+        let conn = build_test_db(&attributed_state());
+        let doc = load_doc(&conn, "doc-1");
+        let opts = EvidenceOptions {
+            max_matches: 10,
+            speaker: Some(SpeakerFilter::Names(vec!["Jane Doe".to_string()])),
+            ..Default::default()
+        };
+        let ev =
+            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        assert_eq!(ev.total, 1);
+        assert_eq!(ev.matches[0].speaker_name.as_deref(), Some("Jane Doe"));
+        assert!(ev.matches[0].excerpt.text.contains("rollout"));
+    }
+
+    #[test]
+    fn named_speaker_filter_excludes_unattributed_utterances() {
+        // u4 mentions kumquat on the system channel with no detected name;
+        // a name filter must not sweep it in.
+        let conn = build_test_db(&attributed_state());
+        let doc = load_doc(&conn, "doc-1");
+        let opts = EvidenceOptions {
+            max_matches: 10,
+            speaker: Some(SpeakerFilter::Names(vec!["Marcus Webb".to_string()])),
+            ..Default::default()
+        };
+        let ev =
+            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        assert_eq!(ev.total, 1);
+        assert_eq!(ev.matches[0].speaker_name.as_deref(), Some("Marcus Webb"));
+    }
+
+    #[test]
+    fn transcript_evidence_carries_the_detected_speaker_name() {
+        let conn = build_test_db(&attributed_state());
+        let doc = load_doc(&conn, "doc-1");
+        let ev = collect(&conn, &doc, "kumquat", 10);
+        let named: Vec<Option<&str>> = ev
+            .matches
+            .iter()
+            .filter(|m| m.source == EvidenceSource::Transcript)
+            .map(|m| m.speaker_name.as_deref())
+            .collect();
+        assert_eq!(named, vec![Some("Jane Doe"), Some("Marcus Webb"), None]);
+    }
+
+    /// One meeting on the far side of the attribution cutover: two named
+    /// system speakers and one system utterance Granola left unattributed.
+    fn attributed_state() -> serde_json::Value {
+        json!({
+            "documents": {
+                "doc-1": { "id": "doc-1", "title": "Infra Sync", "created_at": "2026-07-22T10:00:00Z" }
+            },
+            "transcripts": {
+                "doc-1": [
+                    {"id": "u1", "document_id": "doc-1", "text": "Ship the kumquat rollout.",
+                     "start_timestamp": "2026-07-22T10:01:00Z", "source": "system",
+                     "speaker_name": "Jane Doe"},
+                    {"id": "u2", "document_id": "doc-1", "text": "Nothing relevant here.",
+                     "start_timestamp": "2026-07-22T10:02:00Z", "source": "system",
+                     "speaker_name": "Marcus Webb"},
+                    {"id": "u3", "document_id": "doc-1", "text": "The kumquat timeline works.",
+                     "start_timestamp": "2026-07-22T10:03:00Z", "source": "system",
+                     "speaker_name": "Marcus Webb"},
+                    {"id": "u4", "document_id": "doc-1", "text": "Kumquat, agreed.",
+                     "start_timestamp": "2026-07-22T10:04:00Z", "source": "system"}
+                ]
+            }
+        })
+    }
+
+    #[test]
     fn speaker_filter_excludes_unattributable_sources() {
         let conn = build_test_db(&evidence_state());
         let doc = load_doc(&conn, "doc-1");
         let opts = EvidenceOptions {
-            speaker: Some(crate::models::SpeakerFilter::Other),
+            speaker: Some(crate::query::speaker::SpeakerFilter::Other),
             ..Default::default()
         };
         let ev =
@@ -771,7 +853,7 @@ mod tests {
         let chunk = best_chunk("some semantic chunk", "transcript_window", None);
         let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
         let opts = EvidenceOptions {
-            speaker: Some(crate::models::SpeakerFilter::Other),
+            speaker: Some(crate::query::speaker::SpeakerFilter::Other),
             ..Default::default()
         };
 

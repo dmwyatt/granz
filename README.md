@@ -250,8 +250,10 @@ grans grep "budget"
 grans g "budget"     # short alias
 
 # Complete and speaker-attributed: only that speaker's utterances count
-grans grep "action items" --speaker me      # things you said
-grans grep "deadline" --speaker other       # things others said
+grans grep "action items" --speaker me            # things you said
+grans grep "deadline" --speaker other             # things anyone else said
+grans grep "deadline" --speaker "Jane Doe"        # things Jane said
+grans grep "deadline" --speaker jane              # partial names work
 
 # Search specific targets (both verbs)
 grans search "AI" --in titles
@@ -281,9 +283,11 @@ grans search "budget" --include-deleted
 
 Ranked search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either retriever surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do). Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference; `--fast` skips the stage and returns fusion-order results (no relevance scores) in about 75 milliseconds.
 
-Grep matches every word in the query, in any order (`grans grep "budget review"` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans grep '"budget review"'`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. Use grep when completeness is the point, e.g. auditing every mention of a term, or when you need matches attributed to a speaker: `--speaker me|other` keeps only meetings where that speaker's transcript utterances match the query, and the cards show exactly those utterances. Notes and AI notes carry no speaker, so combining `--speaker` with an `--in` list that excludes transcripts is an error. Speaker filtering is grep-only because semantic retrieval has no per-utterance attribution, so search could not honor the filter without capping the answer.
+Grep matches every word in the query, in any order (`grans grep "budget review"` finds meetings that mention both words; quote a phrase inside the query, e.g. `grans grep '"budget review"'`, to require it verbatim). Results are ranked by relevance: meetings whose title contains the query come first, then content matches ranked by BM25, with newer meetings breaking ties. Use grep when completeness is the point, e.g. auditing every mention of a term, or when you need matches attributed to a speaker: `--speaker` keeps only meetings where that speaker's transcript utterances match the query, and the cards show exactly those utterances. Notes and AI notes carry no speaker, so combining `--speaker` with an `--in` list that excludes transcripts is an error. Speaker filtering is grep-only because semantic retrieval has no per-utterance attribution, so search could not honor the filter without capping the answer.
 
-Both verbs render the same cards. Each card shows why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1), and `--context N` renders N neighboring units around each shown match inside the card (the utterances around a transcript hit, the sections around an AI-notes hit, the paragraphs around a notes hit), with the matched unit shown whole. In search results, a meeting that matched semantically but contains none of the query's literal words shows its best-matching passage without highlights, and a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` drops search results below a relevance threshold; it conflicts with `--fast`, since only the rerank stage produces that score. Both verbs support `--in`, `--meeting`, date filters, and `--limit` (which counts meetings everywhere).
+`--speaker` takes `me`, `other`, or a speaker's name. `me` and `other` split on the audio channel and work on every meeting: `me` is your microphone, `other` is everyone else. A name matches Granola's own per-utterance attribution, which it began providing on 2026-07-21 and only on the remote side of the call, so meetings recorded before then have no names to match. Names are matched case-insensitively as substrings, so `--speaker jane` finds Jane Doe; quoting the full name (`--speaker "Jane Doe"`) pins it exactly when several names share a fragment. A name that matches several speakers searches all of them and says which on stderr; one that matches nobody is an error listing the speakers you do have, so a typo never looks like a genuine absence of results. In `--json`, each match carries `speaker` (the channel, `me` or `other`) and, when attributed, `speaker_name`.
+
+Both verbs render the same cards. Each card shows why the meeting matched: the source of the best match (`AI notes` with its section heading, `your notes`, or `transcript` with time and speaker, named when Granola attributed the utterance and `You`/`Other` otherwise), a snippet with the query terms highlighted, and a `+N more matches` line when the meeting matched in more places. `--matches N` shows up to N snippets per meeting (default 1), and `--context N` renders N neighboring units around each shown match inside the card (the utterances around a transcript hit, the sections around an AI-notes hit, the paragraphs around a notes hit), with the matched unit shown whole. In search results, a meeting that matched semantically but contains none of the query's literal words shows its best-matching passage without highlights, and a meeting that matched only by its title says `title match`. The relevance score is not shown in the card view; `--json` carries it (`score`), along with which retrievers surfaced each meeting (`signals`), the full match list, and snippet highlight offsets. `--min-score` drops search results below a relevance threshold; it conflicts with `--fast`, since only the rerank stage produces that score. Both verbs support `--in`, `--meeting`, date filters, and `--limit` (which counts meetings everywhere).
 
 The JSON envelopes differ where the contracts do: grep JSON reports `total_meetings` (the complete count), while search JSON reports `keyword_total` (the uncapped count of meetings containing the query's words, backing the footer) and no total, because its meeting list is a pooled best-k.
 
@@ -368,16 +372,19 @@ grans show "Weekly Standup" --notes > notes.md
 grans show "Weekly Standup" --notes --transcript
 
 # Filter transcript by speaker
-grans show "Weekly Standup" --transcript --speaker me      # only your utterances
-grans show "Weekly Standup" --transcript --speaker other   # only others' utterances
+grans show "Weekly Standup" --transcript --speaker me           # only your utterances
+grans show "Weekly Standup" --transcript --speaker other        # everyone else
+grans show "Weekly Standup" --transcript --speaker "Jane Doe"   # only Jane's
 
 # AI-generated panels are shown automatically under "AI Notes"
 # when present for a meeting
 
-# JSON format (includes source field for speaker identification)
+# JSON format (includes source and detected_speaker_name per utterance)
 grans show "Weekly Standup" --transcript --json
 grans show "Weekly Standup" --notes --json
 ```
+
+Transcript lines are labelled with the speaker: `You` for your microphone, the speaker's name when Granola attributed the utterance, and `Other` when it did not. `--speaker` accepts the same values here as on `grep`, described above.
 
 ### Meetings with a Person
 

@@ -24,8 +24,13 @@ pub fn format_meeting_detail(doc: &Document) -> String {
 pub struct ShapedMatchJson {
     /// `transcript`, `panel`, or `notes`.
     pub source: &'static str,
+    /// The audio channel: `me` or `other`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    /// Granola's detected speaker name, present only on attributed
+    /// utterances. Separate from `speaker`, which keeps naming the channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +52,8 @@ pub struct ContextUnitJson {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,6 +123,7 @@ impl ContextUnitJson {
         ContextUnitJson {
             text: unit.text.clone(),
             speaker: shaped_speaker_label(unit.speaker.as_deref()),
+            speaker_name: unit.speaker_name.clone(),
             timestamp: unit.timestamp.clone(),
             section: unit.section.clone(),
         }
@@ -147,6 +155,7 @@ impl ShapedMeetingJson {
                 .map(|ev| ShapedMatchJson {
                     source: shaped_source_label(ev.source),
                     speaker: shaped_speaker_label(ev.speaker.as_deref()),
+                    speaker_name: ev.speaker_name.clone(),
                     timestamp: ev.timestamp.clone(),
                     section: ev.section.clone(),
                     snippet: ev.excerpt.text.clone(),
@@ -244,6 +253,7 @@ mod tests {
                     highlights: vec![(8, 17)],
                 },
                 speaker: Some("microphone".to_string()),
+                speaker_name: None,
                 timestamp: Some("2026-05-12T14:31:07Z".to_string()),
                 section: None,
                 context_before: Vec::new(),
@@ -270,6 +280,21 @@ mod tests {
         assert_eq!(mt["snippet"], "run the migration tonight");
         assert_eq!(mt["highlights"], serde_json::json!([[8, 17]]));
         assert!(mt.get("section").is_none());
+        // Unattributed evidence omits the field rather than emitting null.
+        assert!(mt.get("speaker_name").is_none());
+    }
+
+    #[test]
+    fn shaped_json_reports_the_speaker_name_beside_the_channel() {
+        let mut m = shaped();
+        m.matches[0].speaker = Some("system".to_string());
+        m.matches[0].speaker_name = Some("Jane Doe".to_string());
+        let out = format_grep_meetings(&[m], "migration", 1, 10);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let mt = &v["meetings"][0]["matches"][0];
+        // `speaker` keeps naming the channel so the existing contract holds.
+        assert_eq!(mt["speaker"], "other");
+        assert_eq!(mt["speaker_name"], "Jane Doe");
     }
 
     #[test]

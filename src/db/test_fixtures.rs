@@ -271,8 +271,8 @@ pub fn build_test_db(state: &Value) -> Connection {
             if let Some(arr) = utts.as_array() {
                 for utt in arr {
                     conn.execute(
-                        "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, source, is_final)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, source, is_final, speaker_name)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         rusqlite::params![
                             utt.get("id").and_then(|v| v.as_str()),
                             utt.get("document_id").and_then(|v| v.as_str()),
@@ -281,6 +281,7 @@ pub fn build_test_db(state: &Value) -> Connection {
                             utt.get("text").and_then(|v| v.as_str()),
                             utt.get("source").and_then(|v| v.as_str()),
                             utt.get("is_final").and_then(|v| v.as_bool()),
+                            utt.get("speaker_name").and_then(|v| v.as_str()),
                         ],
                     ).unwrap();
                 }

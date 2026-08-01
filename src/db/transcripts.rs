@@ -13,6 +13,26 @@ pub(crate) struct TranscriptUtteranceRow {
     pub text: Option<String>,
     pub source: Option<String>,
     pub is_final: Option<bool>,
+    pub speaker_name: Option<String>,
+}
+
+/// The columns every utterance read selects, in the order the row mapper
+/// expects. Kept in one place so the two read paths cannot drift apart.
+pub(crate) const UTTERANCE_COLUMNS: &str =
+    "id, document_id, start_timestamp, end_timestamp, text, source, is_final, speaker_name";
+
+/// Map a row selected with [`UTTERANCE_COLUMNS`].
+pub(crate) fn map_utterance_row(row: &rusqlite::Row) -> rusqlite::Result<TranscriptUtteranceRow> {
+    Ok(TranscriptUtteranceRow {
+        id: row.get(0)?,
+        document_id: row.get(1)?,
+        start_timestamp: row.get(2)?,
+        end_timestamp: row.get(3)?,
+        text: row.get(4)?,
+        source: row.get(5)?,
+        is_final: row.get(6)?,
+        speaker_name: row.get(7)?,
+    })
 }
 
 /// Convert a raw database row into a domain `TranscriptUtterance`.
@@ -28,6 +48,7 @@ pub(crate) fn row_to_utterance(row: TranscriptUtteranceRow) -> TranscriptUtteran
         text: row.text,
         source: row.source,
         is_final: row.is_final,
+        detected_speaker_name: row.speaker_name,
         extra: Default::default(),
     }
 }
@@ -38,23 +59,30 @@ pub(crate) fn row_to_utterance(row: TranscriptUtteranceRow) -> TranscriptUtteran
 /// migration v003. These fields are only populated for transcripts fetched after that
 /// migration was applied. See v003_utterance_metadata.sql for details.
 pub fn load_transcript(conn: &Connection, document_id: &str) -> Result<Vec<TranscriptUtterance>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, document_id, start_timestamp, end_timestamp, text, source, is_final FROM transcript_utterances WHERE document_id = ?1 ORDER BY start_timestamp",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {UTTERANCE_COLUMNS} FROM transcript_utterances WHERE document_id = ?1 ORDER BY start_timestamp"
+    ))?;
 
-    let rows = stmt.query_map([document_id], |row| {
-        Ok(TranscriptUtteranceRow {
-            id: row.get(0)?,
-            document_id: row.get(1)?,
-            start_timestamp: row.get(2)?,
-            end_timestamp: row.get(3)?,
-            text: row.get(4)?,
-            source: row.get(5)?,
-            is_final: row.get(6)?,
-        })
-    })?;
+    let rows = stmt.query_map([document_id], map_utterance_row)?;
 
     Ok(rows.filter_map(|r| r.ok()).map(row_to_utterance).collect())
+}
+
+/// Every distinct detected speaker name in the database, alphabetically.
+///
+/// Backs `--speaker <name>` resolution: the pattern is matched against this
+/// list so that a name matching nobody can be reported rather than silently
+/// returning no results.
+pub fn distinct_speaker_names(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT speaker_name FROM transcript_utterances
+         WHERE speaker_name IS NOT NULL AND speaker_name <> ''
+         ORDER BY speaker_name",
+    )?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(names)
 }
 
 /// Document info for transcript sync
@@ -244,8 +272,8 @@ pub fn insert_transcript_from_api(
 
     // Insert new utterances with 'api' source
     let mut stmt = conn.prepare(
-        "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, transcript_source, source, is_final, api_snapshot)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'api', ?6, ?7, ?8)",
+        "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, transcript_source, source, is_final, api_snapshot, speaker_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'api', ?6, ?7, ?8, ?9)",
     )?;
 
     let mut inserted = 0;
@@ -266,6 +294,7 @@ pub fn insert_transcript_from_api(
             utt.source.as_deref(),
             utt.is_final,
             &api_snapshot,
+            utt.detected_speaker_name.as_deref(),
         ])?;
         inserted += 1;
     }
@@ -357,6 +386,7 @@ mod tests {
                 text: Some("Hello from API".to_string()),
                 source: None,
                 is_final: None,
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
             crate::models::TranscriptUtterance {
@@ -367,6 +397,7 @@ mod tests {
                 text: Some("Second utterance".to_string()),
                 source: None,
                 is_final: None,
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
         ];
@@ -412,6 +443,7 @@ mod tests {
                 text: Some("Replaced transcript".to_string()),
                 source: None,
                 is_final: None,
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
         ];
@@ -454,6 +486,7 @@ mod tests {
                 text: Some("quantum computing breakthroughs".to_string()),
                 source: None,
                 is_final: None,
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
         ];
@@ -484,6 +517,7 @@ mod tests {
                 text: Some("test".to_string()),
                 source: None,
                 is_final: None,
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
         ];
@@ -511,6 +545,7 @@ mod tests {
                 text: Some("Hello from me".to_string()),
                 source: Some("microphone".to_string()),
                 is_final: Some(true),
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
             crate::models::TranscriptUtterance {
@@ -521,6 +556,7 @@ mod tests {
                 text: Some("Response from others".to_string()),
                 source: Some("system".to_string()),
                 is_final: Some(false),
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
         ];
@@ -784,6 +820,7 @@ mod tests {
             text: Some("Hello everyone, welcome to the meeting.".to_string()),
             source: Some("microphone".to_string()),
             is_final: Some(true),
+            detected_speaker_name: None,
             extra: Default::default(),
         };
 
@@ -807,6 +844,7 @@ mod tests {
             text: None,
             source: None,
             is_final: None,
+            detected_speaker_name: None,
             extra: Default::default(),
         };
 
@@ -838,6 +876,7 @@ mod tests {
                 text: Some("Hello from snapshot test".to_string()),
                 source: Some("microphone".to_string()),
                 is_final: Some(true),
+                detected_speaker_name: None,
                 extra: Default::default(),
             },
         ];
@@ -881,6 +920,128 @@ mod tests {
         assert!(docs.is_empty());
     }
 
+    // --- speaker attribution ---
+
+    #[test]
+    fn test_load_transcript_includes_detected_speaker_name() {
+        let conn = build_test_db(&transcripts_state());
+
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at) VALUES ('doc-attr', 'Attributed', '2026-07-22T10:00:00Z')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text, source, speaker_name, transcript_source)
+             VALUES ('attr-u1', 'doc-attr', '2026-07-22T10:00:00Z', 'Hers', 'system', 'Jane Doe', 'api')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text, source, transcript_source)
+             VALUES ('attr-u2', 'doc-attr', '2026-07-22T10:00:30Z', 'Mine', 'microphone', 'api')",
+            [],
+        ).unwrap();
+
+        let utterances = load_transcript(&conn, "doc-attr").unwrap();
+        assert_eq!(utterances[0].detected_speaker_name.as_deref(), Some("Jane Doe"));
+        // The microphone channel is the local user and is never attributed.
+        assert!(utterances[1].detected_speaker_name.is_none());
+    }
+
+    #[test]
+    fn test_insert_transcript_from_api_stores_detected_speaker_name() {
+        let conn = build_test_db(&transcripts_state());
+
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at) VALUES ('doc-attr', 'Attributed', '2026-07-22T10:00:00Z')",
+            [],
+        ).unwrap();
+
+        let utterances = vec![crate::models::TranscriptUtterance {
+            id: Some("attr-u1".to_string()),
+            document_id: Some("doc-attr".to_string()),
+            text: Some("Hers".to_string()),
+            source: Some("system".to_string()),
+            detected_speaker_name: Some("Jane Doe".to_string()),
+            ..Default::default()
+        }];
+
+        insert_transcript_from_api(&conn, "doc-attr", &utterances).unwrap();
+
+        let name: Option<String> = conn.query_row(
+            "SELECT speaker_name FROM transcript_utterances WHERE id = 'attr-u1'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(name, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn test_redact_utterance_snapshot_keeps_the_detected_speaker_name() {
+        // The name must stay in the snapshot at its API key, since that is
+        // what the v014 backfill reads and what a future re-derivation needs.
+        let utt = crate::models::TranscriptUtterance {
+            id: Some("u1".to_string()),
+            text: Some("Hers".to_string()),
+            source: Some("system".to_string()),
+            detected_speaker_name: Some("Jane Doe".to_string()),
+            ..Default::default()
+        };
+
+        let snapshot = redact_utterance_snapshot(&utt).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(parsed["detected_speaker_name"], "Jane Doe");
+    }
+
+    #[test]
+    fn test_transcript_utterance_deserializes_the_api_speaker_field() {
+        // Granola sends `detected_speaker_name` alongside a `detectedSpeaker`
+        // object; the modeled field must claim the former rather than letting
+        // it fall through into `extra`.
+        let utt: crate::models::TranscriptUtterance = serde_json::from_str(
+            r#"{"id":"u1","source":"system","text":"Hers",
+                "detected_speaker_name":"Jane Doe",
+                "detectedSpeaker":{"participantId":"Jane Doe","participantName":"Jane Doe"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(utt.detected_speaker_name.as_deref(), Some("Jane Doe"));
+        assert!(!utt.extra.contains_key("detected_speaker_name"));
+        // The object form is still unmodeled and rides along in `extra`.
+        assert!(utt.extra.contains_key("detectedSpeaker"));
+    }
+
+    #[test]
+    fn test_distinct_speaker_names_are_deduped_and_sorted() {
+        let conn = build_test_db(&transcripts_state());
+
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at) VALUES ('doc-attr', 'Attributed', '2026-07-22T10:00:00Z')",
+            [],
+        ).unwrap();
+        for (id, name) in [
+            ("s1", Some("Marcus Webb")),
+            ("s2", Some("Jane Doe")),
+            ("s3", Some("Jane Doe")),
+            ("s4", None),
+            ("s5", Some("")),
+        ] {
+            conn.execute(
+                "INSERT INTO transcript_utterances (id, document_id, text, source, speaker_name)
+                 VALUES (?1, 'doc-attr', 'x', 'system', ?2)",
+                rusqlite::params![id, name],
+            ).unwrap();
+        }
+
+        let names = distinct_speaker_names(&conn).unwrap();
+        assert_eq!(names, vec!["Jane Doe".to_string(), "Marcus Webb".to_string()]);
+    }
+
+    #[test]
+    fn test_distinct_speaker_names_is_empty_without_attribution() {
+        let conn = build_test_db(&transcripts_state());
+        assert!(distinct_speaker_names(&conn).unwrap().is_empty());
+    }
+
     #[test]
     fn test_row_to_utterance_all_fields() {
         let row = TranscriptUtteranceRow {
@@ -889,16 +1050,18 @@ mod tests {
             start_timestamp: Some("2026-01-20T10:00:00Z".to_string()),
             end_timestamp: Some("2026-01-20T10:01:00Z".to_string()),
             text: Some("Hello world".to_string()),
-            source: Some("microphone".to_string()),
+            source: Some("system".to_string()),
             is_final: Some(true),
+            speaker_name: Some("Jane Doe".to_string()),
         };
         let utt = row_to_utterance(row);
+        assert_eq!(utt.detected_speaker_name.as_deref(), Some("Jane Doe"));
         assert_eq!(utt.id.as_deref(), Some("u1"));
         assert_eq!(utt.document_id.as_deref(), Some("doc-1"));
         assert_eq!(utt.start_timestamp.as_deref(), Some("2026-01-20T10:00:00Z"));
         assert_eq!(utt.end_timestamp.as_deref(), Some("2026-01-20T10:01:00Z"));
         assert_eq!(utt.text.as_deref(), Some("Hello world"));
-        assert_eq!(utt.source.as_deref(), Some("microphone"));
+        assert_eq!(utt.source.as_deref(), Some("system"));
         assert_eq!(utt.is_final, Some(true));
         assert!(utt.extra.is_empty());
     }
@@ -913,6 +1076,7 @@ mod tests {
             text: None,
             source: None,
             is_final: None,
+            speaker_name: None,
         };
         let utt = row_to_utterance(row);
         assert!(utt.id.is_none());

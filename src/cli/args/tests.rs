@@ -105,7 +105,7 @@ fn grep_parses_with_lookup_flags() {
         panic!("expected grep subcommand");
     };
     assert_eq!(query, "kumquat");
-    assert_eq!(*speaker, Some(SpeakerFilter::Me));
+    assert_eq!(*speaker, Some(SpeakerSelector::Me));
     assert_eq!(r#in, &vec![SearchTarget::Titles, SearchTarget::Transcripts]);
     assert_eq!(meeting.as_deref(), Some("standup"));
     assert_eq!(*context, 2);

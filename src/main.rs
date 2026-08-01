@@ -177,7 +177,7 @@ fn main() -> Result<()> {
                 meeting_filter: meeting.clone(),
                 limit: *limit,
                 matches: *matches,
-                speaker: speaker.clone(),
+                speaker: query::speaker::resolve_opt(&conn, speaker.as_ref())?,
                 context: *context,
             };
             let date_range = query::dates::build_date_range(
@@ -214,6 +214,7 @@ fn main() -> Result<()> {
             notes,
             speaker,
         } => {
+            let speaker = query::speaker::resolve_opt(&conn, speaker.as_ref())?;
             commands::meetings::show(&conn, meeting, *transcript, *notes, speaker.as_ref(), &ctx)?;
         }
 

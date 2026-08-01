@@ -80,6 +80,7 @@ fn create_test_tables(conn: &Connection) {
             source TEXT,
             is_final INTEGER,
             api_snapshot TEXT,
+            speaker_name TEXT,
             FOREIGN KEY (document_id) REFERENCES documents(id)
         );
 
@@ -211,6 +212,8 @@ fn create_test_tables(conn: &Connection) {
 
         CREATE INDEX idx_transcript_utterances_document ON transcript_utterances(document_id);
 
+        CREATE INDEX idx_transcript_utterances_speaker_name ON transcript_utterances(speaker_name);
+
         CREATE INDEX idx_panels_document_id ON panels(document_id);
 
         CREATE TABLE panel_sync_log (
@@ -243,7 +246,7 @@ fn create_test_tables(conn: &Connection) {
         );
 
         -- Set schema version via user_version pragma (used by rusqlite_migration)
-        PRAGMA user_version = 13;
+        PRAGMA user_version = 14;
         "#,
     )
     .unwrap();
@@ -314,8 +317,8 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
             if let Some(arr) = utts.as_array() {
                 for utt in arr {
                     conn.execute(
-                        "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, source, is_final)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, source, is_final, speaker_name)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         rusqlite::params![
                             utt.get("id").and_then(|v| v.as_str()),
                             utt.get("document_id").and_then(|v| v.as_str()),
@@ -324,6 +327,7 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
                             utt.get("text").and_then(|v| v.as_str()),
                             utt.get("source").and_then(|v| v.as_str()),
                             utt.get("is_final").and_then(|v| v.as_bool()),
+                            utt.get("speaker_name").and_then(|v| v.as_str()),
                         ],
                     ).unwrap();
                 }
@@ -682,7 +686,8 @@ pub fn fixture_state() -> String {
                     "end_timestamp": "2025-07-20T14:01:30.000Z",
                     "text": "Let us review the performance benchmarks.",
                     "source": "system",
-                    "is_final": true
+                    "is_final": true,
+                    "speaker_name": "Priya Raman"
                 },
                 {
                     "id": "utt-b2",
@@ -691,7 +696,8 @@ pub fn fixture_state() -> String {
                     "end_timestamp": "2025-07-20T14:02:00.000Z",
                     "text": "The latency improved by forty percent after optimization.",
                     "source": "system",
-                    "is_final": true
+                    "is_final": true,
+                    "speaker_name": "Priya Nair"
                 },
                 {
                     "id": "utt-b3",
@@ -700,7 +706,8 @@ pub fn fixture_state() -> String {
                     "end_timestamp": "2025-07-20T14:02:30.000Z",
                     "text": "We should deploy the prototype to staging next sprint.",
                     "source": "system",
-                    "is_final": true
+                    "is_final": true,
+                    "speaker_name": "Marcus Webb"
                 }
             ]
         },

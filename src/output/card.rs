@@ -9,6 +9,7 @@ use chrono::FixedOffset;
 use colored::Colorize;
 
 use crate::query::shape::{ContextUnit, EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting};
+use crate::query::speaker::{label as speaker_label, SpeakerLabel};
 
 /// Card body indent, sized to clear the rank gutter.
 const INDENT: &str = "    ";
@@ -77,10 +78,12 @@ fn source_line(evidence: &MatchEvidence, tz: &FixedOffset) -> String {
     if let Some(ts) = evidence.timestamp.as_deref() {
         details.push(super::table::format_time_only(ts, tz).dimmed().to_string());
     }
-    match evidence.speaker.as_deref() {
-        Some("microphone") => details.push("You".cyan().to_string()),
-        Some("system") => details.push("Other".dimmed().to_string()),
-        _ => {}
+    if let Some(label) = speaker_label(evidence.speaker.as_deref(), evidence.speaker_name.as_deref())
+    {
+        details.push(match label {
+            SpeakerLabel::You => label.as_str().cyan().to_string(),
+            _ => label.as_str().dimmed().to_string(),
+        });
     }
     if let Some(section) = evidence.section.as_deref() {
         details.push(section.dimmed().to_string());
@@ -120,10 +123,9 @@ fn context_block(unit: &ContextUnit, tz: &FixedOffset) -> String {
         head.push_str(&super::table::format_time_only(ts, tz));
         head.push(' ');
     }
-    match unit.speaker.as_deref() {
-        Some("microphone") => head.push_str("You  "),
-        Some("system") => head.push_str("Other  "),
-        _ => {}
+    if let Some(label) = speaker_label(unit.speaker.as_deref(), unit.speaker_name.as_deref()) {
+        head.push_str(label.as_str());
+        head.push_str("  ");
     }
     if let Some(section) = unit.section.as_deref() {
         head.push_str(section);
@@ -237,6 +239,7 @@ mod tests {
                     highlights: vec![(8, 16), (38, 47)],
                 },
                 speaker: None,
+                speaker_name: None,
                 timestamp: None,
                 section: Some("Migration Plan".to_string()),
                 context_before: Vec::new(),
@@ -292,6 +295,7 @@ mod tests {
             source: EvidenceSource::Transcript,
             excerpt: Excerpt { text: "say the migration runs".to_string(), highlights: vec![] },
             speaker: Some("microphone".to_string()),
+            speaker_name: None,
             timestamp: Some("2026-05-12T14:31:07Z".to_string()),
             section: None,
             context_before: Vec::new(),
@@ -299,6 +303,68 @@ mod tests {
         }];
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
         assert!(out.contains("    transcript › 14:31:07 You"), "got:\n{out}");
+    }
+
+    #[test]
+    fn transcript_evidence_names_the_detected_speaker() {
+        let mut m = base_meeting();
+        m.matches = vec![MatchEvidence {
+            source: EvidenceSource::Transcript,
+            excerpt: Excerpt { text: "the migration runs tonight".to_string(), highlights: vec![] },
+            speaker: Some("system".to_string()),
+            speaker_name: Some("Jane Doe".to_string()),
+            timestamp: Some("2026-07-22T14:31:07Z".to_string()),
+            section: None,
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+        }];
+        let out = strip(&format_shaped_meeting(&m, 1, &utc()));
+        assert!(out.contains("    transcript › 14:31:07 Jane Doe"), "got:\n{out}");
+        assert!(!out.contains("Other"), "name should replace the channel label:\n{out}");
+    }
+
+    #[test]
+    fn unattributed_transcript_evidence_still_says_other() {
+        // Most of the corpus predates attribution and must keep rendering.
+        let mut m = base_meeting();
+        m.matches = vec![MatchEvidence {
+            source: EvidenceSource::Transcript,
+            excerpt: Excerpt { text: "the migration runs tonight".to_string(), highlights: vec![] },
+            speaker: Some("system".to_string()),
+            speaker_name: None,
+            timestamp: Some("2026-05-12T14:31:07Z".to_string()),
+            section: None,
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+        }];
+        let out = strip(&format_shaped_meeting(&m, 1, &utc()));
+        assert!(out.contains("    transcript › 14:31:07 Other"), "got:\n{out}");
+    }
+
+    #[test]
+    fn context_units_name_their_detected_speaker() {
+        let mut m = base_meeting();
+        m.matches = vec![MatchEvidence {
+            source: EvidenceSource::Transcript,
+            excerpt: Excerpt { text: "run it tonight".to_string(), highlights: vec![] },
+            speaker: Some("microphone".to_string()),
+            speaker_name: None,
+            timestamp: Some("2026-07-22T14:31:07Z".to_string()),
+            section: None,
+            context_before: vec![ContextUnit {
+                text: "are we ready for it".to_string(),
+                speaker: Some("system".to_string()),
+                speaker_name: Some("Jane Doe".to_string()),
+                timestamp: Some("2026-07-22T14:30:50Z".to_string()),
+                section: None,
+            }],
+            context_after: Vec::new(),
+        }];
+        let out = strip(&format_shaped_meeting(&m, 1, &utc()));
+        assert!(
+            out.contains("      14:30:50 Jane Doe  are we ready for it"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
@@ -369,17 +435,20 @@ mod tests {
                 highlights: vec![(8, 17)],
             },
             speaker: Some("microphone".to_string()),
+            speaker_name: None,
             timestamp: Some("2026-05-12T14:31:07Z".to_string()),
             section: None,
             context_before: vec![ContextUnit {
                 text: "are we ready for it".to_string(),
                 speaker: Some("system".to_string()),
+                speaker_name: None,
                 timestamp: Some("2026-05-12T14:30:50Z".to_string()),
                 section: None,
             }],
             context_after: vec![ContextUnit {
                 text: "ok, scheduling it now".to_string(),
                 speaker: Some("system".to_string()),
+                speaker_name: None,
                 timestamp: Some("2026-05-12T14:31:20Z".to_string()),
                 section: None,
             }],
@@ -398,6 +467,7 @@ mod tests {
         m.matches[0].context_after = vec![ContextUnit {
             text: "follow up next week".to_string(),
             speaker: None,
+            speaker_name: None,
             timestamp: None,
             section: Some("Action Items".to_string()),
         }];
