@@ -165,8 +165,8 @@ mod tests {
         let conn = open_and_migrate(&db_path).unwrap();
         let version = get_schema_version(&conn).unwrap();
 
-        // Should be version 14 after all migrations
-        assert_eq!(version, 14);
+        // Should be version 15 after all migrations
+        assert_eq!(version, 15);
     }
 
     #[test]

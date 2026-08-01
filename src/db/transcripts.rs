@@ -257,7 +257,7 @@ pub fn insert_transcript_from_api(
 
     // One transaction for the whole replace, so an interrupted sync leaves the
     // document with its old transcript rather than a half-written one.
-    // transcript_fts needs no handling here: the v014 triggers index each row in
+    // transcript_fts needs no handling here: the v015 triggers index each row in
     // the same statement that writes it.
     let tx = conn
         .unchecked_transaction()
@@ -514,7 +514,7 @@ mod tests {
     /// Indexing used to be a statement of its own that ran after the source rows
     /// had already been committed, with no transaction around either. Anything
     /// that stopped the process in between left rows nothing would ever index,
-    /// and search could not find them again (#97). The v014 triggers make the
+    /// and search could not find them again (#97). The v015 triggers make the
     /// index entry part of the write, so there is no such window and no code
     /// path that can skip it.
     #[test]

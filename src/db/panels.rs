@@ -244,7 +244,7 @@ pub fn insert_panels_from_api(
 
     // One transaction for the whole replace, so an interrupted sync leaves the
     // document with its old panels rather than a half-written set. panels_fts
-    // needs no handling here: the v014 triggers index each row in the same
+    // needs no handling here: the v015 triggers index each row in the same
     // statement that writes it.
     let tx = conn
         .unchecked_transaction()
@@ -532,7 +532,7 @@ mod tests {
 
     /// The panels index was maintained the same hand-rolled way transcripts
     /// were, in a statement after the source rows had already been committed
-    /// (#97). The v014 triggers make the index entry part of the write.
+    /// (#97). The v015 triggers make the index entry part of the write.
     #[test]
     fn writing_a_panel_indexes_it_without_a_separate_step() {
         let conn = build_test_db(&panels_state());

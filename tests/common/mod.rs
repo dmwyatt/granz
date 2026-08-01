@@ -245,7 +245,7 @@ fn create_test_tables(conn: &Connection) {
             content_rowid='rowid'
         );
 
-        -- Must mirror v014_fts_triggers.sql. Without these, rows inserted below
+        -- Must mirror v015_fts_triggers.sql. Without these, rows inserted below
         -- land in the source tables and never reach the index, so every search
         -- assertion in tests/ would be testing an empty index.
         CREATE TRIGGER transcript_utterances_ai AFTER INSERT ON transcript_utterances BEGIN

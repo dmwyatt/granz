@@ -291,7 +291,7 @@ for you: the index is a separate structure that happens to describe the source
 table, and it only stays true if something keeps writing to it.
 
 `transcript_fts` and `panels_fts` are maintained by triggers on their source
-tables (`v014_fts_triggers.sql`), which is SQLite's documented pattern. The index
+tables (`v015_fts_triggers.sql`), which is SQLite's documented pattern. The index
 entry is written in the same statement as the row, so nothing can commit a row
 without indexing it and no code path has to remember to.
 

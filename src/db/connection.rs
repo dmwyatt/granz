@@ -67,7 +67,7 @@ mod tests {
         let conn = migrations::open_and_migrate(&db_path).unwrap();
         let version = migrations::get_schema_version(&conn).unwrap();
 
-        // After applying all migrations, version should be 14
-        assert_eq!(version, 14);
+        // After applying all migrations, version should be 15
+        assert_eq!(version, 15);
     }
 }
