@@ -1,15 +1,95 @@
-//! Integrity checking for database files arriving from outside this machine.
+//! Integrity checking: structural soundness of a database file arriving from
+//! outside this machine, and agreement between an FTS5 index and its source.
 
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::debug;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 
 /// A grans database always has this table, so its absence means the file is a
 /// database but not one of ours.
 const SENTINEL_TABLE: &str = "documents";
+
+/// The FTS5 indexes that have a maintained write path, and so are expected to
+/// agree with their source tables.
+///
+/// `notes_fts` is absent on purpose. Nothing has ever populated it in
+/// production, so it fails this check on every database in existence and would
+/// report a known gap as if it were damage. It belongs here once #85 gives it a
+/// write path.
+const MAINTAINED_FTS_TABLES: [&str; 2] = ["transcript_fts", "panels_fts"];
+
+/// Whether an FTS5 index still agrees with the table it indexes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FtsIndexState {
+    /// Every source row is indexed and every indexed row exists.
+    Consistent,
+    /// The index and its source disagree, so search silently under-reports.
+    /// Carries SQLite's own description.
+    Drifted(String),
+}
+
+/// One index's result from [`check_fts_indexes`].
+#[derive(Debug)]
+pub struct FtsIndexReport {
+    pub table: &'static str,
+    pub state: FtsIndexState,
+}
+
+/// Compare each maintained FTS5 index against its source table.
+///
+/// Needs a writable connection: FTS5 spells its check as an `INSERT`, and
+/// SQLite refuses that on a read-only connection even though the command writes
+/// nothing.
+pub fn check_fts_indexes(conn: &Connection) -> Result<Vec<FtsIndexReport>> {
+    MAINTAINED_FTS_TABLES
+        .iter()
+        .map(|&table| {
+            check_fts_index(conn, table).map(|state| FtsIndexReport { table, state })
+        })
+        .collect()
+}
+
+/// Run FTS5's `integrity-check` at rank 1 against one index.
+///
+/// Rank 1 is the point of this. These are external-content tables (`content=`),
+/// and only rank 1 compares the index against its source; rank 0 checks the
+/// index's own internal consistency, as do `PRAGMA quick_check` and `PRAGMA
+/// integrity_check`, all three of which report `ok` on a drifted index.
+///
+/// `table` is interpolated because SQLite does not bind identifiers. It is
+/// always one of [`MAINTAINED_FTS_TABLES`]; this function is private so no
+/// caller-supplied name can reach it.
+fn check_fts_index(conn: &Connection, table: &str) -> Result<FtsIndexState> {
+    let sql = format!("INSERT INTO {table}({table}, rank) VALUES('integrity-check', 1)");
+
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(FtsIndexState::Consistent),
+        // Drift is how FTS5 reports a mismatch, and it is a finding rather than
+        // a failure to look.
+        Err(rusqlite::Error::SqliteFailure(err, msg)) if err.code == ErrorCode::DatabaseCorrupt => {
+            Ok(FtsIndexState::Drifted(
+                msg.unwrap_or_else(|| err.to_string()),
+            ))
+        }
+        Err(err) => Err(err).with_context(|| format!("running integrity-check on {table}")),
+    }
+}
+
+/// Discard each maintained FTS5 index and re-derive it from its source table.
+///
+/// The repair for a [`FtsIndexState::Drifted`] index, and a no-op in effect on a
+/// consistent one.
+pub fn rebuild_fts_indexes(conn: &Connection) -> Result<Vec<&'static str>> {
+    for table in MAINTAINED_FTS_TABLES {
+        conn.execute(&format!("INSERT INTO {table}({table}) VALUES('rebuild')"), [])
+            .with_context(|| format!("rebuilding {table}"))?;
+    }
+
+    Ok(MAINTAINED_FTS_TABLES.to_vec())
+}
 
 /// Verify that a file is a structurally sound grans database.
 ///
@@ -128,41 +208,114 @@ mod tests {
         assert!(check_pulled_database(&path).is_err());
     }
 
-    /// Pins a known limit rather than a capability.
-    ///
-    /// grans builds its FTS5 tables with `content=`, and SQLite compares an
-    /// external-content index against its source table only under FTS5's own
-    /// `integrity-check` with `rank=1`. Neither `quick_check` nor
-    /// `integrity_check` runs that, so an index that has drifted from its
-    /// source passes both. Search then silently returns too few rows while the
-    /// database looks healthy.
-    ///
-    /// Closing this needs a writable connection, which this deliberately
-    /// read-only check does not take. If that changes, this test should start
-    /// failing and be inverted.
+    /// Force an index out of step with its source, the way an interrupted sync
+    /// used to: write rows straight into the FTS table for a document the source
+    /// table does not have.
+    fn drift_the_transcript_index(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO transcript_fts(rowid, text) VALUES (9001, 'orphaned row')",
+            [],
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn does_not_notice_an_fts_index_that_drifted_from_its_source() {
+    fn reports_a_consistent_fts_index_as_consistent() {
         let dir = TempDir::new().unwrap();
         let path = valid_database(&dir);
-
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
+        conn.execute(
             "INSERT INTO transcript_utterances (id, document_id, text)
-                 VALUES ('u1', 'd1', 'deployment rollback discussion'),
-                        ('u2', 'd1', 'quarterly planning notes');
-             INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild');",
+                 VALUES ('u1', 'd1', 'deployment rollback discussion')",
+            [],
         )
         .unwrap();
 
-        // Drop source rows without the index maintenance that db::transcripts
-        // normally performs, leaving the index describing rows that are gone.
-        conn.execute("DELETE FROM transcript_utterances", []).unwrap();
-        drop(conn);
+        let reports = check_fts_indexes(&conn).unwrap();
+
+        assert_eq!(reports.len(), 2);
+        for report in &reports {
+            assert_eq!(
+                report.state,
+                FtsIndexState::Consistent,
+                "{} should be consistent",
+                report.table
+            );
+        }
+    }
+
+    #[test]
+    fn reports_a_drifted_fts_index_as_drifted() {
+        let dir = TempDir::new().unwrap();
+        let path = valid_database(&dir);
+        let conn = Connection::open(&path).unwrap();
+        drift_the_transcript_index(&conn);
+
+        let reports = check_fts_indexes(&conn).unwrap();
+
+        let transcripts = reports.iter().find(|r| r.table == "transcript_fts").unwrap();
+        assert!(
+            matches!(transcripts.state, FtsIndexState::Drifted(_)),
+            "expected drift, got {:?}",
+            transcripts.state
+        );
+        // The damage is confined to the index that was tampered with.
+        let panels = reports.iter().find(|r| r.table == "panels_fts").unwrap();
+        assert_eq!(panels.state, FtsIndexState::Consistent);
+    }
+
+    #[test]
+    fn rebuild_repairs_a_drifted_fts_index() {
+        let dir = TempDir::new().unwrap();
+        let path = valid_database(&dir);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text)
+                 VALUES ('u1', 'd1', 'deployment rollback discussion')",
+            [],
+        )
+        .unwrap();
+        drift_the_transcript_index(&conn);
+
+        rebuild_fts_indexes(&conn).unwrap();
+
+        for report in check_fts_indexes(&conn).unwrap() {
+            assert_eq!(report.state, FtsIndexState::Consistent, "{}", report.table);
+        }
+        // Repair restores the index rather than merely emptying it.
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_fts WHERE transcript_fts MATCH 'rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
+    }
+
+    /// Records why the FTS check is not part of [`check_pulled_database`],
+    /// rather than pinning a gap: SQLite refuses the `INSERT` that FTS5 spells
+    /// its check as, on the read-only connection this deliberately opens.
+    #[test]
+    fn the_fts_check_needs_a_writable_connection() {
+        let dir = TempDir::new().unwrap();
+        let path = valid_database(&dir);
+        {
+            let conn = Connection::open(&path).unwrap();
+            drift_the_transcript_index(&conn);
+        }
+
+        let read_only =
+            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let err = check_fts_indexes(&read_only).unwrap_err();
 
         assert!(
-            check_pulled_database(&path).is_ok(),
-            "if this now fails, the FTS drift gap has been closed; invert the test"
+            err.to_string().contains("integrity-check"),
+            "unhelpful message: {err}"
         );
+        // And so the pull-time check, which is read-only by design, still passes
+        // a drifted file. `grans db info` is where drift surfaces.
+        assert!(check_pulled_database(&path).is_ok());
     }
 
     #[test]

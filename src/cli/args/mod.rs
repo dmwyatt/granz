@@ -631,10 +631,15 @@ pub enum DbAction {
         #[arg(long)]
         all: bool,
     },
-    /// Show database location and size
+    /// Show database location, size and search index health
     Info,
     /// List all database files
     List,
+    /// Rebuild the full-text search indexes from the tables they index
+    ///
+    /// The repair for the drift that 'grans admin db info' reports. Re-derives
+    /// each index from its source, so nothing is lost and no re-sync is needed.
+    RebuildFts,
 }
 
 // === Auth Subcommands ===
