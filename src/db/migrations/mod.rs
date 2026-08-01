@@ -29,6 +29,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("v012_rename_is_primary_to_primary.sql")),
         M::up(include_str!("v013_api_snapshot.sql")),
         M::up(include_str!("v014_utterance_speaker_name.sql")),
+        M::up(include_str!("v015_fts_triggers.sql")),
     ])
 }
 
@@ -52,7 +53,7 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         rusqlite_migration::SchemaVersion::Inside(v) => {
             // Check if current version is less than the number of migrations
             let current = v.get();
-            let total = 14; // We have 14 migrations (v001-v014)
+            let total = 15; // We have 15 migrations (v001-v015)
             current < total
         }
         rusqlite_migration::SchemaVersion::Outside(_) => false,
@@ -164,8 +165,8 @@ mod tests {
         let conn = open_and_migrate(&db_path).unwrap();
         let version = get_schema_version(&conn).unwrap();
 
-        // Should be version 14 after all migrations
-        assert_eq!(version, 14);
+        // Should be version 15 after all migrations
+        assert_eq!(version, 15);
     }
 
     #[test]
@@ -834,5 +835,83 @@ mod tests {
             )
             .unwrap();
         assert!(chat_url.is_none());
+    }
+
+    fn transcript_hits(conn: &Connection, query: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM transcript_fts WHERE transcript_fts MATCH ?1",
+            [query],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn assert_fts_consistent(conn: &Connection) {
+        for report in crate::db::integrity::check_fts_indexes(conn).unwrap() {
+            assert_eq!(
+                report.state,
+                crate::db::integrity::FtsIndexState::Consistent,
+                "{}",
+                report.table
+            );
+        }
+    }
+
+    /// Fixing the write path only helps rows written after the fix. Every
+    /// database in existence already holds utterances that an interrupted sync
+    /// committed without ever indexing (#97), so v014 has to repair them too.
+    #[test]
+    fn v014_rebuilds_an_index_that_drifted_before_it_existed() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut conn = Connection::open(&db_path).unwrap();
+
+        migrations().to_version(&mut conn, 13).unwrap();
+
+        // Exactly the shape an interrupted sync left behind: source rows
+        // committed, the trailing FTS insert never reached.
+        conn.execute("INSERT INTO documents (id, title) VALUES ('doc1', 'Test')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text)
+             VALUES ('u1', 'doc1', 'deployment rollback')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            transcript_hits(&conn, "rollback"),
+            0,
+            "precondition: at v013 nothing indexed the row"
+        );
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        assert_eq!(
+            transcript_hits(&conn, "rollback"),
+            1,
+            "v014 should have rebuilt the index from the source table"
+        );
+        assert_fts_consistent(&conn);
+    }
+
+    /// The other half of v014: after it, a row cannot be written without being
+    /// indexed, because the trigger does it in the same statement.
+    #[test]
+    fn v014_installs_triggers_that_index_writes() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = open_and_migrate(&db_path).unwrap();
+
+        conn.execute("INSERT INTO documents (id, title) VALUES ('doc1', 'Test')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text)
+             VALUES ('u1', 'doc1', 'deployment rollback')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(transcript_hits(&conn, "rollback"), 1);
+        assert_fts_consistent(&conn);
     }
 }

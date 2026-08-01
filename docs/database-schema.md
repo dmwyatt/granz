@@ -270,6 +270,51 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 Enables fast text search across meeting notes (both plain and markdown formats). This is a contentless FTS table that references `documents`.
 
+### panels_fts
+
+Full-text search index for AI-generated panel content.
+
+```sql
+CREATE VIRTUAL TABLE panels_fts USING fts5(
+    content_markdown,
+    content='panels',
+    content_rowid='rowid'
+);
+```
+
+Enables fast text search across panel markdown. This is a contentless FTS table that references `panels`.
+
+### Keeping the indexes in step
+
+These are external-content tables (`content=`), so SQLite does not maintain them
+for you: the index is a separate structure that happens to describe the source
+table, and it only stays true if something keeps writing to it.
+
+`transcript_fts` and `panels_fts` are maintained by triggers on their source
+tables (`v015_fts_triggers.sql`), which is SQLite's documented pattern. The index
+entry is written in the same statement as the row, so nothing can commit a row
+without indexing it and no code path has to remember to.
+
+They were previously maintained by hand in `db/transcripts.rs` and
+`db/panels.rs`, in a statement issued after the source rows had already been
+committed and with no transaction around either. Any interruption in between
+stranded rows that search could never find; a 456 MB database had accumulated
+237 of them out of 515,606 (#97).
+
+`notes_fts` has no write path at all and has never been populated in production
+(#85), which is why the triggers do not cover it yet.
+
+Drift does not show up in `PRAGMA quick_check` or `PRAGMA integrity_check`.
+Only FTS5's own command compares an external-content index against its source,
+and only at rank 1:
+
+```sql
+INSERT INTO transcript_fts(transcript_fts, rank) VALUES('integrity-check', 1);
+```
+
+`grans admin db info` runs that for each maintained index and reports the result;
+`grans admin db rebuild-fts` re-derives them from their sources.
+
 ## Data Flow
 
 ```mermaid

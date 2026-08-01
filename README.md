@@ -88,7 +88,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `auth logout` - Remove the stored credentials
 
 **Admin Commands** (maintenance):
-- `admin db` - Database management (clear, info, list)
+- `admin db` - Database management (clear, info, list, rebuild-fts)
 - `admin token` - Print the current Granola API token
 - `benchmark quality` - Measure search quality (FTS or semantic) against a labeled test suite
 
@@ -472,12 +472,21 @@ grans admin db clear
 # Clear all database files
 grans admin db clear --all
 
-# Show database location and size
+# Show database location, size and search index health
 grans admin db info
 
 # List all database files
 grans admin db list
+
+# Rebuild the full-text search indexes from the tables they index
+grans admin db rebuild-fts
 ```
+
+`admin db info` ends with a line per full-text index saying whether it still
+agrees with the table it indexes. An index that has drifted makes `grep` and
+`search` quietly return too few results while the database otherwise looks
+healthy, and `admin db rebuild-fts` repairs it by re-deriving each index from
+its source. Nothing is lost and no re-sync is needed.
 
 ### Dropbox Sync
 

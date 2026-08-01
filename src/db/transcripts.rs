@@ -255,23 +255,22 @@ pub fn insert_transcript_from_api(
         anyhow::bail!("Document {} not found in database", document_id);
     }
 
-    // Delete from FTS index first (before deleting from source table)
-    // The FTS table is content-synced, so we need to handle this specially
-    conn.execute(
-        "DELETE FROM transcript_fts WHERE rowid IN (
-            SELECT rowid FROM transcript_utterances WHERE document_id = ?1
-        )",
-        [document_id],
-    ).ok(); // Ignore errors if already deleted
+    // One transaction for the whole replace, so an interrupted sync leaves the
+    // document with its old transcript rather than a half-written one.
+    // transcript_fts needs no handling here: the v015 triggers index each row in
+    // the same statement that writes it.
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin transcript replacement")?;
 
     // Delete existing transcripts for this document
-    conn.execute(
+    tx.execute(
         "DELETE FROM transcript_utterances WHERE document_id = ?1",
         [document_id],
     )?;
 
     // Insert new utterances with 'api' source
-    let mut stmt = conn.prepare(
+    let mut stmt = tx.prepare(
         "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, transcript_source, source, is_final, api_snapshot, speaker_name)
          VALUES (?1, ?2, ?3, ?4, ?5, 'api', ?6, ?7, ?8, ?9)",
     )?;
@@ -299,12 +298,9 @@ pub fn insert_transcript_from_api(
         inserted += 1;
     }
 
-    // Update FTS index for the new utterances
-    conn.execute(
-        "INSERT INTO transcript_fts(rowid, text)
-         SELECT rowid, text FROM transcript_utterances WHERE document_id = ?1",
-        [document_id],
-    )?;
+    drop(stmt);
+    tx.commit()
+        .context("Failed to commit transcript replacement")?;
 
     Ok(inserted)
 }
@@ -502,6 +498,66 @@ mod tests {
 
         // NEW text SHOULD be searchable
         assert_eq!(fts_count("quantum computing"), 1, "Should find 'quantum computing' after replacement");
+
+        // And the index agrees with the source, which the old hand-maintained
+        // path could not promise.
+        for report in crate::db::integrity::check_fts_indexes(&conn).unwrap() {
+            assert_eq!(
+                report.state,
+                crate::db::integrity::FtsIndexState::Consistent,
+                "{}",
+                report.table
+            );
+        }
+    }
+
+    /// Indexing used to be a statement of its own that ran after the source rows
+    /// had already been committed, with no transaction around either. Anything
+    /// that stopped the process in between left rows nothing would ever index,
+    /// and search could not find them again (#97). The v015 triggers make the
+    /// index entry part of the write, so there is no such window and no code
+    /// path that can skip it.
+    #[test]
+    fn writing_an_utterance_indexes_it_without_a_separate_step() {
+        let conn = build_test_db(&transcripts_state());
+
+        let hits = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM transcript_fts WHERE transcript_fts MATCH ?1",
+                [query],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, text)
+             VALUES ('u-bare', 'doc-1', 'photosynthesis')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(hits("photosynthesis"), 1, "the insert alone should index it");
+
+        conn.execute(
+            "UPDATE transcript_utterances SET text = 'respiration' WHERE id = 'u-bare'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(hits("photosynthesis"), 0, "the update should unindex the old text");
+        assert_eq!(hits("respiration"), 1, "the update should index the new text");
+
+        conn.execute("DELETE FROM transcript_utterances WHERE id = 'u-bare'", [])
+            .unwrap();
+        assert_eq!(hits("respiration"), 0, "the delete alone should unindex it");
+
+        for report in crate::db::integrity::check_fts_indexes(&conn).unwrap() {
+            assert_eq!(
+                report.state,
+                crate::db::integrity::FtsIndexState::Consistent,
+                "{}",
+                report.table
+            );
+        }
     }
 
     #[test]

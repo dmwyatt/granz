@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::cli::args::DbAction;
+use crate::db::integrity;
 
 pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
     match action {
@@ -17,6 +18,9 @@ pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
         }
         DbAction::List => {
             list_all_databases()?;
+        }
+        DbAction::RebuildFts => {
+            rebuild_search_indexes(db_path)?;
         }
     }
     Ok(())
@@ -75,11 +79,11 @@ fn show_database_info(db_path: &Path) -> Result<()> {
 
         // Try to read metadata from the database
         if let Ok(conn) = rusqlite::Connection::open(db_path) {
-            if let Ok(schema_version) = conn.query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            ) {
+            // From PRAGMA user_version, which is what the migration system
+            // actually tracks. The `metadata` row this used to read is a fossil
+            // of the pre-migration scheme: nothing has written it since, so it
+            // reported 3 on a database at 14.
+            if let Ok(schema_version) = crate::db::migrations::get_schema_version(&conn) {
                 println!("Schema version: {}", schema_version);
             }
 
@@ -117,9 +121,55 @@ fn show_database_info(db_path: &Path) -> Result<()> {
             ) {
                 println!("Transcript utterances: {}", transcript_count);
             }
+
+            report_search_index_health(&conn);
         }
     } else {
         println!("Status: does not exist (run 'grans sync' to create)");
+    }
+
+    Ok(())
+}
+
+/// Print whether each full-text index still agrees with the table it indexes.
+///
+/// This is where FTS drift surfaces. The pull-time check in `db::integrity`
+/// cannot do it: FTS5 spells its check as an `INSERT`, and SQLite refuses that
+/// on the read-only connection that check deliberately opens.
+fn report_search_index_health(conn: &rusqlite::Connection) {
+    let reports = match integrity::check_fts_indexes(conn) {
+        Ok(reports) => reports,
+        Err(err) => {
+            println!("Search indexes: could not be checked ({})", err);
+            return;
+        }
+    };
+
+    for report in reports {
+        match report.state {
+            integrity::FtsIndexState::Consistent => {
+                println!("Search index {}: consistent", report.table);
+            }
+            integrity::FtsIndexState::Drifted(detail) => {
+                println!(
+                    "Search index {}: DRIFTED ({}) -- search under-reports; \
+                     run 'grans admin db rebuild-fts' to repair",
+                    report.table, detail
+                );
+            }
+        }
+    }
+}
+
+fn rebuild_search_indexes(db_path: &Path) -> Result<()> {
+    if !db_path.exists() {
+        println!("No database found at {}", db_path.display());
+        return Ok(());
+    }
+
+    let conn = crate::db::connection::open_db_at_path(db_path)?;
+    for table in integrity::rebuild_fts_indexes(&conn)? {
+        println!("Rebuilt {}", table);
     }
 
     Ok(())
