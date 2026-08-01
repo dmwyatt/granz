@@ -30,6 +30,21 @@ on:
     - cron: '0 9 * * 1'
   workflow_dispatch:
 
+# Cancel only the pull_request runs. Those exist to exercise a change to this
+# file and a newer push to the same PR supersedes them, at a cost of 4-11
+# minutes of a Windows leg spent answering about the wrong commit.
+#
+# Every other trigger gets github.run_id, which is unique, so those runs share
+# no group and cancel-in-progress never reaches them. `cancel-in-progress:
+# false` over a shared group is not the same thing: GitHub holds at most one
+# pending run per group and cancels the previous pending one, so three merges
+# landing in quick succession would drop the middle commit's run entirely. This
+# workflow is the only thing running the integration suites on macOS and
+# Windows, so every merged commit needs its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
