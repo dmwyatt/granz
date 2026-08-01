@@ -438,10 +438,12 @@ pub fn build_test_db(state: &Value) -> Connection {
         }
     }
 
-    // Populate FTS indexes
-    conn.execute("INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')", []).unwrap();
+    // transcript_fts and panels_fts were indexed by their triggers as the rows
+    // above went in, the same way production indexes them. Rebuilding here would
+    // hide a broken trigger behind a fixture, which is how #85 went unnoticed.
+    //
+    // notes_fts has no write path at all yet (#85), so it still needs this.
     conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", []).unwrap();
-    conn.execute("INSERT INTO panels_fts(panels_fts) VALUES('rebuild')", []).unwrap();
 
     conn
 }

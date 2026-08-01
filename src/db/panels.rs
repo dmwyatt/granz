@@ -242,22 +242,21 @@ pub fn insert_panels_from_api(
         anyhow::bail!("Document {} not found in database", document_id);
     }
 
-    // Delete from FTS index first
-    conn.execute(
-        "DELETE FROM panels_fts WHERE rowid IN (
-            SELECT rowid FROM panels WHERE document_id = ?1
-        )",
-        [document_id],
-    )
-    .ok();
+    // One transaction for the whole replace, so an interrupted sync leaves the
+    // document with its old panels rather than a half-written set. panels_fts
+    // needs no handling here: the v014 triggers index each row in the same
+    // statement that writes it.
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin panel replacement")?;
 
     // Delete existing panels for this document
-    conn.execute(
+    tx.execute(
         "DELETE FROM panels WHERE document_id = ?1",
         [document_id],
     )?;
 
-    let mut stmt = conn.prepare(
+    let mut stmt = tx.prepare(
         "INSERT INTO panels (id, document_id, title, content_json, content_markdown,
                              original_content_json, template_slug,
                              created_at, updated_at, deleted_at, extra_json, chat_url,
@@ -290,12 +289,9 @@ pub fn insert_panels_from_api(
         inserted += 1;
     }
 
-    // Update FTS index for the new panels
-    conn.execute(
-        "INSERT INTO panels_fts(rowid, content_markdown)
-         SELECT rowid, content_markdown FROM panels WHERE document_id = ?1",
-        [document_id],
-    )?;
+    drop(stmt);
+    tx.commit()
+        .context("Failed to commit panel replacement")?;
 
     Ok(inserted)
 }
@@ -523,6 +519,53 @@ mod tests {
 
         // New content should be searchable
         assert_eq!(fts_count("quantum mechanics"), 1);
+
+        for report in crate::db::integrity::check_fts_indexes(&conn).unwrap() {
+            assert_eq!(
+                report.state,
+                crate::db::integrity::FtsIndexState::Consistent,
+                "{}",
+                report.table
+            );
+        }
+    }
+
+    /// The panels index was maintained the same hand-rolled way transcripts
+    /// were, in a statement after the source rows had already been committed
+    /// (#97). The v014 triggers make the index entry part of the write.
+    #[test]
+    fn writing_a_panel_indexes_it_without_a_separate_step() {
+        let conn = build_test_db(&panels_state());
+
+        let hits = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM panels_fts WHERE panels_fts MATCH ?1",
+                [query],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        conn.execute(
+            "INSERT INTO panels (id, document_id, content_markdown)
+             VALUES ('panel-bare', 'doc-1', 'photosynthesis')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(hits("photosynthesis"), 1, "the insert alone should index it");
+
+        conn.execute("DELETE FROM panels WHERE id = 'panel-bare'", [])
+            .unwrap();
+        assert_eq!(hits("photosynthesis"), 0, "the delete alone should unindex it");
+
+        for report in crate::db::integrity::check_fts_indexes(&conn).unwrap() {
+            assert_eq!(
+                report.state,
+                crate::db::integrity::FtsIndexState::Consistent,
+                "{}",
+                report.table
+            );
+        }
     }
 
     #[test]
