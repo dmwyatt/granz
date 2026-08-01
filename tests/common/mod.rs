@@ -245,6 +245,33 @@ fn create_test_tables(conn: &Connection) {
             content_rowid='rowid'
         );
 
+        -- Must mirror v014_fts_triggers.sql. Without these, rows inserted below
+        -- land in the source tables and never reach the index, so every search
+        -- assertion in tests/ would be testing an empty index.
+        CREATE TRIGGER transcript_utterances_ai AFTER INSERT ON transcript_utterances BEGIN
+            INSERT INTO transcript_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+        CREATE TRIGGER transcript_utterances_ad AFTER DELETE ON transcript_utterances BEGIN
+            INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+        END;
+        CREATE TRIGGER transcript_utterances_au AFTER UPDATE ON transcript_utterances BEGIN
+            INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+            INSERT INTO transcript_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+
+        CREATE TRIGGER panels_ai AFTER INSERT ON panels BEGIN
+            INSERT INTO panels_fts(rowid, content_markdown) VALUES (new.rowid, new.content_markdown);
+        END;
+        CREATE TRIGGER panels_ad AFTER DELETE ON panels BEGIN
+            INSERT INTO panels_fts(panels_fts, rowid, content_markdown)
+                VALUES('delete', old.rowid, old.content_markdown);
+        END;
+        CREATE TRIGGER panels_au AFTER UPDATE ON panels BEGIN
+            INSERT INTO panels_fts(panels_fts, rowid, content_markdown)
+                VALUES('delete', old.rowid, old.content_markdown);
+            INSERT INTO panels_fts(rowid, content_markdown) VALUES (new.rowid, new.content_markdown);
+        END;
+
         -- Set schema version via user_version pragma (used by rusqlite_migration)
         PRAGMA user_version = 14;
         "#,
@@ -475,10 +502,15 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
         }
     }
 
-    // Populate FTS indexes
-    conn.execute("INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')", []).unwrap();
+    // transcript_fts and panels_fts are already populated: the triggers in
+    // create_test_tables indexed each row as it was inserted, which is the same
+    // path production takes. Rebuilding them here would paper over a broken
+    // trigger, which is the mistake #85 documents.
+    //
+    // notes_fts still needs the explicit rebuild, because nothing populates it
+    // anywhere -- that is the bug in #85, and until it is fixed this is what
+    // makes `--in notes` return anything in tests.
     conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", []).unwrap();
-    conn.execute("INSERT INTO panels_fts(panels_fts) VALUES('rebuild')", []).unwrap();
 }
 
 /// Build a fixture state with known, deterministic data.
