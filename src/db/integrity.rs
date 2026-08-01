@@ -19,7 +19,7 @@ const SENTINEL_TABLE: &str = "documents";
 /// production, so it fails this check on every database in existence and would
 /// report a known gap as if it were damage. It belongs here once #85 gives it a
 /// write path.
-const MAINTAINED_FTS_TABLES: [&str; 2] = ["transcript_fts", "panels_fts"];
+const MAINTAINED_FTS_TABLES: [&str; 3] = ["transcript_fts", "panels_fts", "titles_fts"];
 
 /// Whether an FTS5 index still agrees with the table it indexes.
 #[derive(Debug, PartialEq, Eq)]
@@ -233,7 +233,7 @@ mod tests {
 
         let reports = check_fts_indexes(&conn).unwrap();
 
-        assert_eq!(reports.len(), 2);
+        assert_eq!(reports.len(), 3);
         for report in &reports {
             assert_eq!(
                 report.state,
