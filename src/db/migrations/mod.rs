@@ -918,9 +918,9 @@ mod tests {
 
     /// Fixing the write path only helps rows written after the fix. Every
     /// database in existence already holds utterances that an interrupted sync
-    /// committed without ever indexing (#97), so v014 has to repair them too.
+    /// committed without ever indexing (#97), so v015 has to repair them too.
     #[test]
-    fn v014_rebuilds_an_index_that_drifted_before_it_existed() {
+    fn v015_rebuilds_an_index_that_drifted_before_it_existed() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let mut conn = Connection::open(&db_path).unwrap();
@@ -948,15 +948,15 @@ mod tests {
         assert_eq!(
             transcript_hits(&conn, "rollback"),
             1,
-            "v014 should have rebuilt the index from the source table"
+            "v015 should have rebuilt the index from the source table"
         );
         assert_fts_consistent(&conn);
     }
 
-    /// The other half of v014: after it, a row cannot be written without being
+    /// The other half of v015: after it, a row cannot be written without being
     /// indexed, because the trigger does it in the same statement.
     #[test]
-    fn v014_installs_triggers_that_index_writes() {
+    fn v015_installs_triggers_that_index_writes() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let conn = open_and_migrate(&db_path).unwrap();
