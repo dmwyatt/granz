@@ -132,6 +132,38 @@ pub fn rerank_hybrid(
     )
 }
 
+/// Ranked (id, score) pairs for the fused candidates of a hybrid ranking.
+/// With a reranker the cross-encoder decides the order and supplies the
+/// score; without one the fusion order stands and no score is attached,
+/// since RRF ranks are not comparable across queries. `min_score` applies
+/// to rerank scores only.
+pub fn order_candidates(
+    conn: &Connection,
+    query: &str,
+    ranking: &HybridRanking,
+    reranker: Option<&dyn Reranker>,
+    min_score: Option<f32>,
+) -> Result<Vec<(String, Option<f32>)>> {
+    let Some(reranker) = reranker else {
+        return Ok(ranking
+            .fused
+            .iter()
+            .map(|d| (d.document_id.clone(), None))
+            .collect());
+    };
+
+    let ctx = RankingContext::load(conn)?;
+    let cfg = RankingConfig::default();
+    let mut reranked = rerank_hybrid(conn, reranker, query, ranking, &ctx, &cfg)?;
+    if let Some(min) = min_score {
+        reranked.retain(|d| d.score >= min);
+    }
+    Ok(reranked
+        .into_iter()
+        .map(|d| (d.document_id, Some(d.score)))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,5 +507,74 @@ mod tests {
 
         assert_eq!(reranked.len(), RERANK_POOL);
         assert!(reranked.iter().all(|d| d.document_id != "doc-59"));
+    }
+
+    /// Documents whose fused order is the reverse of cross-encoder
+    /// relevance: doc-chunk matches "kumquat" twice via its chunk,
+    /// doc-title once via its title, doc-none not at all.
+    fn order_candidates_fixture() -> (Connection, HybridRanking) {
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-none": {"id": "doc-none", "title": "Unrelated", "created_at": "2026-01-01T10:00:00Z"},
+                "doc-title": {"id": "doc-title", "title": "Kumquat sync", "created_at": "2026-01-02T10:00:00Z"},
+                "doc-chunk": {"id": "doc-chunk", "title": "Planning", "created_at": "2026-01-03T10:00:00Z"}
+            }
+        }));
+        let ranking = make_ranking(
+            fused(&["doc-none", "doc-title", "doc-chunk"]),
+            HashMap::from([("doc-chunk".to_string(), chunk("kumquat kumquat"))]),
+        );
+        (conn, ranking)
+    }
+
+    #[test]
+    fn order_candidates_without_reranker_keeps_fusion_order_unscored() {
+        // min_score applies to rerank scores only: with no reranker the
+        // fusion order must survive unfiltered even with a threshold set.
+        let (conn, ranking) = order_candidates_fixture();
+
+        let ordered = order_candidates(&conn, "kumquat", &ranking, None, Some(0.9)).unwrap();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("doc-none".to_string(), None),
+                ("doc-title".to_string(), None),
+                ("doc-chunk".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_candidates_with_reranker_reorders_and_scores() {
+        let (conn, ranking) = order_candidates_fixture();
+
+        let ordered =
+            order_candidates(&conn, "kumquat", &ranking, Some(&MockReranker), None).unwrap();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("doc-chunk".to_string(), Some(2.0)),
+                ("doc-title".to_string(), Some(1.0)),
+                ("doc-none".to_string(), Some(0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_candidates_min_score_drops_low_scoring_candidates() {
+        let (conn, ranking) = order_candidates_fixture();
+
+        let ordered =
+            order_candidates(&conn, "kumquat", &ranking, Some(&MockReranker), Some(0.5)).unwrap();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("doc-chunk".to_string(), Some(2.0)),
+                ("doc-title".to_string(), Some(1.0)),
+            ]
+        );
     }
 }
