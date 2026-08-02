@@ -143,6 +143,31 @@ fn transcript_chunk_metadata(
     })
 }
 
+/// A finalized transcript window chunk for the buffered text.
+fn make_transcript_chunk(
+    doc_id: &str,
+    chunk_idx: usize,
+    text: &str,
+    header: Option<&String>,
+    utterances: &[Utterance],
+    start_idx: usize,
+    end_idx: usize,
+    start_ts: Option<&str>,
+    end_ts: Option<&str>,
+) -> Chunk {
+    Chunk {
+        source_type: ChunkSourceType::TranscriptWindow,
+        source_id: format!("{}:c{}", doc_id, chunk_idx),
+        document_id: doc_id.to_string(),
+        text: text.to_string(),
+        content_hash: hash_embed_input(header.map(String::as_str), text),
+        header: header.cloned(),
+        metadata: Some(transcript_chunk_metadata(
+            utterances, start_idx, end_idx, start_ts, end_ts,
+        )),
+    }
+}
+
 /// Generate transcript window chunks using adaptive token-based chunking.
 /// This normalizes chunk sizes to be within the model's token limits.
 /// When `headers` is provided, each document's contextual header is
@@ -199,25 +224,20 @@ pub fn transcript_window_chunker_adaptive(
         // utterance-boundary overlap. Oversized-split fragments are not
         // utterances and are deliberately never tracked.
         let mut buffer_utts: Vec<String> = Vec::new();
+        // False while the buffer holds only overlap carryover. A buffer
+        // is only ever finalized once fresh content lands on top of the
+        // carryover; finalizing before that would emit a chunk that is
+        // 100% text duplicated from its neighbor (#123).
+        let mut buffer_has_new_content = false;
         let mut buffer_start_idx = 0;
         let mut buffer_end_idx = 0;
         let mut buffer_start_ts: Option<&str> = None;
         let mut buffer_end_ts: Option<&str> = None;
-        let mut carryover = String::new();
         let mut chunk_idx = 0;
 
         for (i, utt) in utterances.iter().enumerate() {
             // Format utterance with speaker label
-            let formatted_text = format_utterance_text(&utt.text, utt.source.as_deref());
-
-            // Combine carryover with current utterance
-            let text_to_add = if carryover.is_empty() {
-                formatted_text
-            } else {
-                let combined = format!("{}\n{}", carryover, formatted_text);
-                carryover.clear();
-                combined
-            };
+            let text_to_add = format_utterance_text(&utt.text, utt.source.as_deref());
 
             if text_to_add.trim().is_empty() {
                 continue;
@@ -229,25 +249,24 @@ pub fn transcript_window_chunker_adaptive(
                 buffer.len() + 1 + text_to_add.len() // +1 for newline
             };
 
-            // Check if adding this would exceed max
-            if combined_len > max_chars && !buffer.is_empty() {
+            // Check if adding this would exceed max. Like the target check
+            // below, a buffer holding only carryover is never finalized;
+            // the split loop can leave one behind when an oversized
+            // utterance's post-boundary remainder trims to nothing.
+            if combined_len > max_chars && buffer_has_new_content {
                 // Finalize current buffer as a chunk
                 if buffer.len() >= config.min_chars {
-                    chunks.push(Chunk {
-                        source_type: ChunkSourceType::TranscriptWindow,
-                        source_id: format!("{}:c{}", doc_id, chunk_idx),
-                        document_id: doc_id.clone(),
-                        text: buffer.clone(),
-                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                        header: header.cloned(),
-                        metadata: Some(transcript_chunk_metadata(
-                            utterances,
-                            buffer_start_idx,
-                            buffer_end_idx,
-                            buffer_start_ts,
-                            buffer_end_ts,
-                        )),
-                    });
+                    chunks.push(make_transcript_chunk(
+                        doc_id,
+                        chunk_idx,
+                        &buffer,
+                        header,
+                        utterances,
+                        buffer_start_idx,
+                        buffer_end_idx,
+                        buffer_start_ts,
+                        buffer_end_ts,
+                    ));
                     chunk_idx += 1;
                 }
 
@@ -258,14 +277,23 @@ pub fn transcript_window_chunker_adaptive(
                     &mut buffer_utts,
                     overlap_chars,
                 );
+                buffer_has_new_content = false;
                 buffer_start_idx = i;
+                buffer_start_ts = None;
             }
 
             // Handle text_to_add that might be too large by itself
             let mut remaining = text_to_add;
             while remaining.len() > max_chars {
-                // Split the oversized text
-                let (fits, rest) = split_text_at_limit(&remaining, max_chars);
+                // Split the oversized text. The split budget subtracts
+                // whatever already sits in the buffer (overlap carryover),
+                // so carryover + fragment stays within the hard cap.
+                let budget = if buffer.is_empty() {
+                    max_chars
+                } else {
+                    max_chars.saturating_sub(buffer.len() + 1)
+                };
+                let (fits, rest) = split_text_at_limit(&remaining, budget);
 
                 if buffer.is_empty() {
                     buffer = fits.to_string();
@@ -274,27 +302,24 @@ pub fn transcript_window_chunker_adaptive(
                     buffer.push('\n');
                     buffer.push_str(fits);
                 }
+                buffer_has_new_content = true;
                 buffer_end_idx = i;
                 buffer_start_ts = buffer_start_ts.or(utt.start_timestamp.as_deref());
                 buffer_end_ts = utt.end_timestamp.as_deref();
 
                 // Finalize this chunk
                 if buffer.len() >= config.min_chars {
-                    chunks.push(Chunk {
-                        source_type: ChunkSourceType::TranscriptWindow,
-                        source_id: format!("{}:c{}", doc_id, chunk_idx),
-                        document_id: doc_id.clone(),
-                        text: buffer.clone(),
-                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                        header: header.cloned(),
-                        metadata: Some(transcript_chunk_metadata(
-                            utterances,
-                            buffer_start_idx,
-                            buffer_end_idx,
-                            buffer_start_ts,
-                            buffer_end_ts,
-                        )),
-                    });
+                    chunks.push(make_transcript_chunk(
+                        doc_id,
+                        chunk_idx,
+                        &buffer,
+                        header,
+                        utterances,
+                        buffer_start_idx,
+                        buffer_end_idx,
+                        buffer_start_ts,
+                        buffer_end_ts,
+                    ));
                     chunk_idx += 1;
                 }
 
@@ -307,6 +332,7 @@ pub fn transcript_window_chunker_adaptive(
                     &mut buffer_utts,
                     overlap_chars,
                 );
+                buffer_has_new_content = false;
                 buffer_start_idx = i;
                 buffer_start_ts = None;
                 remaining = rest.to_string();
@@ -320,25 +346,23 @@ pub fn transcript_window_chunker_adaptive(
                     buffer.len() + 1 + remaining.len()
                 };
 
-                // Check if adding would exceed target (but not max)
-                if new_combined_len > target_chars && !buffer.is_empty() {
+                // Check if adding would exceed target (but not max). A
+                // buffer holding only carryover is never finalized: that
+                // would duplicate its neighbor's text wholesale (#123).
+                if new_combined_len > target_chars && buffer_has_new_content {
                     // Finalize current buffer
                     if buffer.len() >= config.min_chars {
-                        chunks.push(Chunk {
-                            source_type: ChunkSourceType::TranscriptWindow,
-                            source_id: format!("{}:c{}", doc_id, chunk_idx),
-                            document_id: doc_id.clone(),
-                            text: buffer.clone(),
-                            content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                            header: header.cloned(),
-                            metadata: Some(transcript_chunk_metadata(
-                                utterances,
-                                buffer_start_idx,
-                                buffer_end_idx,
-                                buffer_start_ts,
-                                buffer_end_ts,
-                            )),
-                        });
+                        chunks.push(make_transcript_chunk(
+                            doc_id,
+                            chunk_idx,
+                            &buffer,
+                            header,
+                            utterances,
+                            buffer_start_idx,
+                            buffer_end_idx,
+                            buffer_start_ts,
+                            buffer_end_ts,
+                        ));
                         chunk_idx += 1;
                     }
 
@@ -349,8 +373,23 @@ pub fn transcript_window_chunker_adaptive(
                         &mut buffer_utts,
                         overlap_chars,
                     );
+                    buffer_has_new_content = false;
                     buffer_start_idx = i;
                     buffer_start_ts = None;
+                }
+
+                // If the carried-over text alone would push this utterance
+                // past the hard cap, shrink the carryover to fit.
+                if !buffer_has_new_content
+                    && !buffer.is_empty()
+                    && buffer.len() + 1 + remaining.len() > max_chars
+                {
+                    trim_carryover(
+                        config.overlap_mode,
+                        &mut buffer,
+                        &mut buffer_utts,
+                        max_chars.saturating_sub(remaining.len() + 1),
+                    );
                 }
 
                 // Add to buffer
@@ -362,36 +401,30 @@ pub fn transcript_window_chunker_adaptive(
                 } else {
                     buffer.push('\n');
                     buffer.push_str(&remaining);
+                    // After a reseed the carryover has no timestamp; the
+                    // first appended utterance starts the window.
+                    buffer_start_ts = buffer_start_ts.or(utt.start_timestamp.as_deref());
                 }
+                buffer_has_new_content = true;
                 buffer_end_idx = i;
                 buffer_end_ts = utt.end_timestamp.as_deref();
             }
         }
 
-        // Finalize any remaining buffer + carryover
-        if !carryover.is_empty() {
-            if !buffer.is_empty() {
-                buffer.push('\n');
-            }
-            buffer.push_str(&carryover);
-        }
-
-        if buffer.len() >= config.min_chars {
-            chunks.push(Chunk {
-                source_type: ChunkSourceType::TranscriptWindow,
-                source_id: format!("{}:c{}", doc_id, chunk_idx),
-                document_id: doc_id.clone(),
-                text: buffer.clone(),
-                content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                header: header.cloned(),
-                metadata: Some(transcript_chunk_metadata(
-                    utterances,
-                    buffer_start_idx,
-                    buffer_end_idx,
-                    buffer_start_ts,
-                    buffer_end_ts,
-                )),
-            });
+        // Finalize any remaining buffer, unless it is only carryover
+        // already emitted with the previous chunk.
+        if buffer_has_new_content && buffer.len() >= config.min_chars {
+            chunks.push(make_transcript_chunk(
+                doc_id,
+                chunk_idx,
+                &buffer,
+                header,
+                utterances,
+                buffer_start_idx,
+                buffer_end_idx,
+                buffer_start_ts,
+                buffer_end_ts,
+            ));
         }
     }
 
@@ -451,6 +484,61 @@ fn overlap_carryover(
             buffer_utts.join("\n")
         }
     }
+}
+
+/// Split `text` into fragments of at most `budget` bytes, preferring
+/// sentence boundaries. Fragments are non-empty; the caller applies its
+/// own minimum-length policy.
+fn split_to_cap(text: &str, budget: usize) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    loop {
+        let (fits, remainder) = split_text_at_limit(rest, budget);
+        parts.push(fits);
+        if remainder.is_empty() {
+            break;
+        }
+        rest = remainder;
+    }
+    parts
+}
+
+/// Shrink an all-carryover buffer to at most `allowed` bytes so that
+/// carryover + incoming content stays within the hard cap. Overlap is a
+/// soft budget; the model cap is not. Chars mode keeps the trailing
+/// characters; Utterances mode drops whole utterances from the front
+/// (`buffer_utts` mirrors the survivors) so chunks still start at
+/// utterance boundaries.
+fn trim_carryover(
+    mode: OverlapMode,
+    buffer: &mut String,
+    buffer_utts: &mut Vec<String>,
+    allowed: usize,
+) {
+    if buffer.len() <= allowed {
+        return;
+    }
+    match mode {
+        OverlapMode::Chars => {
+            let mut start = buffer.len() - allowed;
+            while !buffer.is_char_boundary(start) {
+                start += 1;
+            }
+            *buffer = buffer[start..].to_string();
+        }
+        OverlapMode::Utterances => {
+            while !buffer_utts.is_empty() && joined_len(buffer_utts) > allowed {
+                buffer_utts.remove(0);
+            }
+            *buffer = buffer_utts.join("\n");
+        }
+    }
+}
+
+/// Byte length of `parts` joined with single newlines.
+fn joined_len(parts: &[String]) -> usize {
+    let text: usize = parts.iter().map(String::len).sum();
+    text + parts.len().saturating_sub(1)
 }
 
 /// Split text to fit within max_chars, returning (fits, remainder).
@@ -556,21 +644,36 @@ pub fn panel_section_chunker(
             }
 
             let header = headers.and_then(|h| h.get(panel.document_id.as_str()));
-            let content_hash = hash_embed_input(header.map(String::as_str), &text);
+            // Sections longer than the model cap are split; header + text
+            // must stay within the cap (#123). The first part keeps the
+            // unsuffixed id so within-cap sections keep their identity.
+            let budget = config
+                .max_chars()
+                .saturating_sub(header.map_or(0, |h| h.len()));
 
-            chunks.push(Chunk {
-                source_type: ChunkSourceType::PanelSection,
-                source_id: format!("{}:s{}", panel.id, section_idx),
-                document_id: panel.document_id.clone(),
-                text,
-                content_hash,
-                header: header.cloned(),
-                metadata: Some(serde_json::json!({
-                    "panel_id": panel.id,
-                    "section_heading": heading,
-                    "section_idx": section_idx,
-                })),
-            });
+            for (part, fragment) in split_to_cap(&text, budget).into_iter().enumerate() {
+                if fragment.len() < config.min_chars {
+                    continue;
+                }
+                let source_id = if part == 0 {
+                    format!("{}:s{}", panel.id, section_idx)
+                } else {
+                    format!("{}:s{}p{}", panel.id, section_idx, part)
+                };
+                chunks.push(Chunk {
+                    source_type: ChunkSourceType::PanelSection,
+                    source_id,
+                    document_id: panel.document_id.clone(),
+                    text: fragment.to_string(),
+                    content_hash: hash_embed_input(header.map(String::as_str), fragment),
+                    header: header.cloned(),
+                    metadata: Some(serde_json::json!({
+                        "panel_id": panel.id,
+                        "section_heading": heading,
+                        "section_idx": section_idx,
+                    })),
+                });
+            }
         }
     }
 
@@ -580,7 +683,7 @@ pub fn panel_section_chunker(
 /// Generate chunks from document notes paragraphs.
 pub fn notes_paragraph_chunker(
     conn: &Connection,
-    min_chars: usize,
+    config: &ChunkingConfig,
     headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
@@ -611,25 +714,38 @@ pub fn notes_paragraph_chunker(
             .notes_plain
             .split("\n\n")
             .map(|p| p.trim())
-            .filter(|p| p.len() >= min_chars)
+            .filter(|p| p.len() >= config.min_chars)
             .collect();
 
         let header = headers.and_then(|h| h.get(doc.id.as_str()));
-        for (para_idx, para) in paragraphs.iter().enumerate() {
-            let text = para.to_string();
-            let content_hash = hash_embed_input(header.map(String::as_str), &text);
-
-            chunks.push(Chunk {
-                source_type: ChunkSourceType::NotesParagraph,
-                source_id: format!("{}:n{}", doc.id, para_idx),
-                document_id: doc.id.clone(),
-                text,
-                content_hash,
-                header: header.cloned(),
-                metadata: Some(serde_json::json!({
-                    "paragraph_idx": para_idx,
-                })),
-            });
+        // Paragraphs longer than the model cap are split; header + text
+        // must stay within the cap (#123). The first part keeps the
+        // unsuffixed id so within-cap paragraphs keep their identity.
+        let budget = config
+            .max_chars()
+            .saturating_sub(header.map_or(0, |h| h.len()));
+        for (para_idx, para) in paragraphs.into_iter().enumerate() {
+            for (part, fragment) in split_to_cap(para, budget).into_iter().enumerate() {
+                if fragment.len() < config.min_chars {
+                    continue;
+                }
+                let source_id = if part == 0 {
+                    format!("{}:n{}", doc.id, para_idx)
+                } else {
+                    format!("{}:n{}p{}", doc.id, para_idx, part)
+                };
+                chunks.push(Chunk {
+                    source_type: ChunkSourceType::NotesParagraph,
+                    source_id,
+                    document_id: doc.id.clone(),
+                    text: fragment.to_string(),
+                    content_hash: hash_embed_input(header.map(String::as_str), fragment),
+                    header: header.cloned(),
+                    metadata: Some(serde_json::json!({
+                        "paragraph_idx": para_idx,
+                    })),
+                });
+            }
         }
     }
 
@@ -917,10 +1033,242 @@ mod tests {
         // Each chunk should not exceed max_chars
         for chunk in &chunks {
             assert!(
-                chunk.text.len() <= config.max_chars() + 50, // Allow some margin for sentence boundaries
+                chunk.text.len() <= config.max_chars(),
                 "Chunk too large: {} chars, max was {}",
                 chunk.text.len(),
                 config.max_chars()
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaptive_split_path_counts_carryover_against_max() {
+        // #123 defect 1: an oversized utterance arriving on a non-empty
+        // buffer used to be split at max_chars and appended to the overlap
+        // carryover, producing chunks up to overlap + 1 + max chars.
+        let filler = "a".repeat(90);
+        let huge = "x".repeat(400); // no split boundaries: forces hard splits
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", filler.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", huge.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert!(
+            chunks.len() >= 4,
+            "expected several chunks, got {}",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.text.len() <= config.max_chars(),
+                "chunk {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.text.len(),
+                config.max_chars()
+            );
+        }
+        // The tail of the oversized utterance survives the splits.
+        assert!(chunks.last().unwrap().text.ends_with("xxx"));
+    }
+
+    #[test]
+    fn test_adaptive_no_pure_carryover_duplicate_chunk() {
+        // #123 defect 2: a large utterance arriving at a max boundary used
+        // to double-finalize, emitting a chunk that was 100% overlap
+        // carryover duplicated from its neighbor, with an inverted window
+        // (window_start_idx > window_end_idx). The live database had 149
+        // of these, every one exactly overlap_chars long.
+        let first = "a".repeat(140);
+        let second = "b".repeat(120);
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", first.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", second.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2, "duplicate carryover chunk emitted");
+        for chunk in &chunks {
+            let meta = chunk.metadata.as_ref().unwrap();
+            assert!(
+                meta["window_start_idx"].as_u64() <= meta["window_end_idx"].as_u64(),
+                "inverted window in {}: {:?}",
+                chunk.source_id,
+                meta
+            );
+            assert!(chunk.text.len() <= config.max_chars());
+        }
+        // The second chunk keeps the whole utterance, with the carryover
+        // trimmed to fit the cap, and its window points at it.
+        assert!(chunks[1].text.ends_with(second.as_str()));
+        let meta = chunks[1].metadata.as_ref().unwrap();
+        assert_eq!(meta["window_start_idx"], 1);
+    }
+
+    #[test]
+    fn test_adaptive_utterance_overlap_dropped_at_max_boundary() {
+        // Utterances-mode variant of the same boundary: carried whole
+        // utterances are dropped from the front rather than char-sliced
+        // when they would push the incoming utterance past the cap, so
+        // chunks still start at utterance boundaries.
+        let u0 = "a".repeat(60);
+        let u1 = "b".repeat(70);
+        let u2 = "c".repeat(120);
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", u0.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", u1.as_str(), None),
+            ("doc1", "2025-01-01T10:02:00Z", u2.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 80,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        for chunk in &chunks {
+            assert!(chunk.text.len() <= config.max_chars());
+            let meta = chunk.metadata.as_ref().unwrap();
+            assert!(
+                meta["window_start_idx"].as_u64() <= meta["window_end_idx"].as_u64(),
+                "inverted window in {}: {:?}",
+                chunk.source_id,
+                meta
+            );
+        }
+        // No carried utterance fits next to u2, so the last chunk starts
+        // clean at the utterance boundary.
+        assert_eq!(chunks.last().unwrap().text, u2);
+    }
+
+    #[test]
+    fn test_adaptive_empty_split_remainder_no_carryover_flush() {
+        // Review follow-up on #123 defect 2: split_text_at_limit trims the
+        // remainder, so an oversized utterance whose post-boundary tail is
+        // pure whitespace leaves `remaining` empty. Nothing is appended,
+        // the buffer stays carryover-only, and the end-of-document flush
+        // used to emit it as a chunk duplicating the previous chunk's tail.
+        let text = format!("{}.{}", "x".repeat(140), " ".repeat(20));
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text.as_str(), None)]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(
+            chunks.len(),
+            1,
+            "carryover-only buffer flushed as a duplicate chunk"
+        );
+        assert_eq!(chunks[0].text, format!("{}.", "x".repeat(140)));
+    }
+
+    #[test]
+    fn test_adaptive_empty_split_remainder_no_carryover_finalize_at_max() {
+        // Same setup, but a following large utterance trips the max check
+        // while the buffer is still carryover-only. The max check used to
+        // finalize it as a duplicate chunk; it must instead be trimmed and
+        // absorbed into the next chunk.
+        let first = format!("{}.{}", "x".repeat(140), " ".repeat(20));
+        let second = "b".repeat(140);
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", first.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", second.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(
+            chunks.len(),
+            2,
+            "carryover-only buffer finalized as a duplicate chunk"
+        );
+        assert!(chunks[1].text.ends_with(second.as_str()));
+        for chunk in &chunks {
+            assert!(chunk.text.len() <= config.max_chars());
+        }
+    }
+
+    #[test]
+    fn test_adaptive_start_timestamp_survives_chunk_boundaries() {
+        // #123 defect 3: the target-path reseed cleared buffer_start_ts and
+        // nothing restored it on the normal append path, so every chunk
+        // after a document's first carried a null start_timestamp (97% of
+        // the live corpus). The max-path reseed had the mirror bug: it kept
+        // the previous chunk's stale value. Every chunk's start_timestamp
+        // must match the utterance its window starts at. The 250-char
+        // utterance routes one boundary through the max path so both
+        // reseed sites are exercised.
+        let timestamps = [
+            "2025-01-01T10:00:00Z",
+            "2025-01-01T10:01:00Z",
+            "2025-01-01T10:02:00Z",
+            "2025-01-01T10:03:00Z",
+            "2025-01-01T10:04:00Z",
+        ];
+        let texts = [
+            "a".repeat(80),
+            "b".repeat(80),
+            "c".repeat(80),
+            "d".repeat(250),
+            "e".repeat(80),
+        ];
+        let utts: Vec<(&str, &str, &str, Option<&str>)> = timestamps
+            .iter()
+            .zip(texts.iter())
+            .map(|(&ts, text)| ("doc1", ts, text.as_str(), None))
+            .collect();
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 300,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert!(chunks.len() >= 3);
+        for chunk in &chunks {
+            let meta = chunk.metadata.as_ref().unwrap();
+            let start_idx = meta["window_start_idx"].as_u64().unwrap() as usize;
+            assert_eq!(
+                meta["start_timestamp"],
+                serde_json::json!(timestamps[start_idx]),
+                "chunk {} start_timestamp should match its window start",
+                chunk.source_id
             );
         }
     }
@@ -1162,10 +1510,18 @@ mod tests {
     }
 
     // Tests for notes_paragraph_chunker
+
+    /// The production notes config: 20-char minimum on the default spec.
+    fn notes_test_config() -> ChunkingConfig {
+        ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        }
+    }
     #[test]
     fn test_notes_paragraph_chunker_empty_db() {
         let conn = setup_panel_test_db();
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -1177,7 +1533,7 @@ mod tests {
             ["First paragraph with enough content.\n\nSecond paragraph also with enough content."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].source_type, ChunkSourceType::NotesParagraph);
@@ -1193,7 +1549,7 @@ mod tests {
             ["ok\n\nThis paragraph is long enough to be included in the embedding."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
 
         // "ok" is too short
         assert_eq!(chunks.len(), 1);
@@ -1208,7 +1564,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -1220,10 +1576,109 @@ mod tests {
             ["A paragraph that is long enough to be embedded."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["paragraph_idx"], 0);
+    }
+
+    #[test]
+    fn test_panel_section_chunker_splits_oversized_section() {
+        // #123 defect 4: a section longer than the model cap became one
+        // chunk of whatever length, and the embedder truncated its tail
+        // (the live outlier was a 2,843-char panel section).
+        let conn = setup_panel_test_db();
+        let body = "This sentence pads the section out to a useful length. ".repeat(60);
+        let markdown = format!("### Big Section\n\n{}", body);
+        insert_test_panel(&conn, "panel1", "doc1", &markdown);
+
+        let config = ChunkingConfig::default();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
+
+        assert!(
+            chunks.len() >= 2,
+            "oversized section not split: {} chunk(s)",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.text.len() <= config.max_chars(),
+                "chunk {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.text.len(),
+                config.max_chars()
+            );
+            let meta = chunk.metadata.as_ref().unwrap();
+            assert_eq!(meta["section_idx"], 0);
+        }
+        // Parts get distinct source ids (UNIQUE constraint), and the first
+        // part keeps the unsuffixed id so within-cap sections keep their
+        // identity and never re-embed.
+        let ids: std::collections::HashSet<_> = chunks.iter().map(|c| &c.source_id).collect();
+        assert_eq!(ids.len(), chunks.len());
+        assert_eq!(chunks[0].source_id, "panel1:s0");
+    }
+
+    #[test]
+    fn test_notes_paragraph_chunker_splits_oversized_paragraph() {
+        // #123 defect 4, notes flavor: one huge paragraph became one huge
+        // chunk. Same cap, same split.
+        let conn = setup_panel_test_db();
+        let para = "Another sentence keeps this paragraph growing longer. ".repeat(60);
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at, notes_plain) VALUES ('doc1', 'Test', '2025-01-01T00:00:00Z', ?1)",
+            [para.trim()],
+        )
+        .unwrap();
+
+        let config = notes_test_config();
+        let chunks = notes_paragraph_chunker(&conn, &config, None).unwrap();
+
+        assert!(
+            chunks.len() >= 2,
+            "oversized paragraph not split: {} chunk(s)",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.text.len() <= config.max_chars(),
+                "chunk {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.text.len(),
+                config.max_chars()
+            );
+        }
+        let ids: std::collections::HashSet<_> = chunks.iter().map(|c| &c.source_id).collect();
+        assert_eq!(ids.len(), chunks.len());
+        assert_eq!(chunks[0].source_id, "doc1:n0");
+    }
+
+    #[test]
+    fn test_panel_header_counts_against_cap() {
+        // Header + section must stay within the model cap, matching the
+        // budget the transcript chunker already applies.
+        let conn = setup_panel_test_db();
+        let body = "This sentence pads the section out to a useful length. ".repeat(35);
+        let markdown = format!("### Big Section\n\n{}", body);
+        insert_test_panel(&conn, "panel1", "doc1", &markdown);
+
+        let header = format!("Meeting: {}\n\n", "x".repeat(300));
+        let mut headers = HashMap::new();
+        headers.insert("doc1".to_string(), header);
+
+        let config = ChunkingConfig::default();
+        let chunks = panel_section_chunker(&conn, &config, Some(&headers)).unwrap();
+
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(
+                chunk.embed_input().len() <= config.max_chars(),
+                "embed input for {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.embed_input().len(),
+                config.max_chars()
+            );
+        }
     }
 
     #[test]
@@ -1472,7 +1927,7 @@ mod tests {
         ).unwrap();
         let headers = headers_for("doc1", "Meeting: Sync\n\n");
 
-        let chunks = notes_paragraph_chunker(&conn, 20, Some(&headers)).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), Some(&headers)).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
