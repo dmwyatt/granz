@@ -87,10 +87,16 @@ pub struct PendingReranker {
 
 impl PendingReranker {
     /// Begin loading `choice`.
+    ///
+    /// Before spawning anything this resolves and creates the model cache
+    /// directory on disk and, on the process's first call, writes the
+    /// `HF_HOME` environment variable via
+    /// [`set_hf_cache_dir`](super::model::set_hf_cache_dir).
     pub fn spawn(choice: RerankModel) -> Result<Self> {
-        // Model init reads the process environment; `set_hf_cache_dir`
-        // writes it. Do the write here, while this thread is still the
-        // only one, so the loader can never read it mid-write.
+        // The loader thread reads the process environment (platform paths,
+        // hf-hub's endpoint and token variables), so set_hf_cache_dir must
+        // run before the thread exists; the full ordering argument lives on
+        // that function.
         super::model::set_hf_cache_dir()?;
         Ok(Self {
             handle: std::thread::spawn(move || FastEmbedReranker::new(choice)),

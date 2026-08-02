@@ -36,25 +36,30 @@ pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
 
 /// Set HF_HOME so fastembed's hf-hub downloads land in [`hf_cache_dir`].
 ///
-/// The write happens at most once per process. Model init reads the
-/// environment, and since a reranker can load on its own thread (see
-/// [`crate::embed::rerank::PendingReranker`]) two models can be reading it
-/// at once; a single ordered write is what keeps that sound.
+/// Callers must invoke this before spawning any thread that might read the
+/// process environment. Model loader threads do read it, not for HF_HOME
+/// but for the platform paths (XDG_DATA_HOME, HOME, USERPROFILE) and
+/// hf-hub's HF_ENDPOINT and HF_TOKEN, and setenv racing any getenv is
+/// undefined behavior regardless of which variable each touches. The write
+/// happens at most once per process; later calls only re-resolve the cache
+/// directory, so a failed [`hf_cache_dir`] is retried rather than memoized.
 pub(crate) fn set_hf_cache_dir() -> Result<()> {
-    static HF_HOME: OnceLock<Result<(), String>> = OnceLock::new();
+    static HF_HOME: OnceLock<()> = OnceLock::new();
 
-    HF_HOME
-        .get_or_init(|| {
-            let cache_dir = hf_cache_dir().map_err(|e| e.to_string())?;
-            // SAFETY: the process's only environment write, and OnceLock
-            // orders it before every read that follows on any thread.
-            unsafe {
-                env::set_var("HF_HOME", cache_dir);
-            }
-            Ok(())
-        })
-        .clone()
-        .map_err(anyhow::Error::msg)
+    let cache_dir = hf_cache_dir()?;
+    HF_HOME.get_or_init(|| {
+        // SAFETY: sound only under the contract above. The first caller
+        // runs before any environment-reading thread exists, so
+        // thread::spawn's happens-before edge (not this OnceLock, which
+        // those readers never touch) orders the write ahead of every
+        // getenv on a later thread. What the OnceLock adds is that the
+        // write cannot recur once loader threads are running: every call
+        // after the first is read-only.
+        unsafe {
+            env::set_var("HF_HOME", cache_dir);
+        }
+    });
+    Ok(())
 }
 
 /// Hardware execution providers enabled by cargo features. CPU is always
