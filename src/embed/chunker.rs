@@ -275,8 +275,15 @@ pub fn transcript_window_chunker_adaptive(
             // Handle text_to_add that might be too large by itself
             let mut remaining = text_to_add;
             while remaining.len() > max_chars {
-                // Split the oversized text
-                let (fits, rest) = split_text_at_limit(&remaining, max_chars);
+                // Split the oversized text. The split budget subtracts
+                // whatever already sits in the buffer (overlap carryover),
+                // so carryover + fragment stays within the hard cap.
+                let budget = if buffer.is_empty() {
+                    max_chars
+                } else {
+                    max_chars.saturating_sub(buffer.len() + 1)
+                };
+                let (fits, rest) = split_text_at_limit(&remaining, budget);
 
                 if buffer.is_empty() {
                     buffer = fits.to_string();
@@ -915,6 +922,45 @@ mod tests {
                 config.max_chars()
             );
         }
+    }
+
+    #[test]
+    fn test_adaptive_split_path_counts_carryover_against_max() {
+        // #123 defect 1: an oversized utterance arriving on a non-empty
+        // buffer used to be split at max_chars and appended to the overlap
+        // carryover, producing chunks up to overlap + 1 + max chars.
+        let filler = "a".repeat(90);
+        let huge = "x".repeat(400); // no split boundaries: forces hard splits
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", filler.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", huge.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert!(
+            chunks.len() >= 4,
+            "expected several chunks, got {}",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.text.len() <= config.max_chars(),
+                "chunk {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.text.len(),
+                config.max_chars()
+            );
+        }
+        // The tail of the oversized utterance survives the splits.
+        assert!(chunks.last().unwrap().text.ends_with("xxx"));
     }
 
     #[test]
