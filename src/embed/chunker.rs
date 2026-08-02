@@ -87,6 +87,62 @@ impl ChunkingConfig {
     }
 }
 
+/// A transcript utterance as read by the transcript window chunker.
+struct Utterance {
+    document_id: String,
+    text: String,
+    start_timestamp: Option<String>,
+    end_timestamp: Option<String>,
+    source: Option<String>,
+    speaker_name: Option<String>,
+}
+
+/// Distinct speaker names for the utterance window `start..=end`, in
+/// first-appearance order. Empty-text utterances contributed nothing to
+/// the chunk and are skipped. An empty array is the common case: the
+/// pre-cutover corpus has no names at all, and the local user
+/// (microphone channel) never carries one. The local user gets no
+/// sentinel entry either; the `[You]` label in the chunk text and the
+/// window indices already identify them, and an invented name would sit
+/// in the same namespace speaker filtering matches display names against.
+///
+/// Overlap carryover text duplicated from the previous chunk sits outside
+/// the window, so its speakers are deliberately not listed here, matching
+/// how `window_start_idx`/`window_end_idx` already exclude carryover. The
+/// chunk that owns those utterances attributes them; listing them twice
+/// would double-attribute every speaker near a chunk boundary.
+fn window_speakers(utterances: &[Utterance], start: usize, end: usize) -> Vec<String> {
+    let mut speakers: Vec<String> = Vec::new();
+    for utt in utterances.get(start..=end).unwrap_or(&[]) {
+        if utt.text.trim().is_empty() {
+            continue;
+        }
+        if let Some(name) = &utt.speaker_name {
+            if !speakers.iter().any(|s| s == name) {
+                speakers.push(name.clone());
+            }
+        }
+    }
+    speakers
+}
+
+/// Metadata for a transcript window chunk covering `start_idx..=end_idx`.
+fn transcript_chunk_metadata(
+    utterances: &[Utterance],
+    start_idx: usize,
+    end_idx: usize,
+    start_ts: Option<&str>,
+    end_ts: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "window_start_idx": start_idx,
+        "window_end_idx": end_idx,
+        "start_timestamp": start_ts,
+        "end_timestamp": end_ts,
+        "speakers": window_speakers(utterances, start_idx, end_idx),
+    })
+}
+
 /// Generate transcript window chunks using adaptive token-based chunking.
 /// This normalizes chunk sizes to be within the model's token limits.
 /// When `headers` is provided, each document's contextual header is
@@ -99,18 +155,10 @@ pub fn transcript_window_chunker_adaptive(
     headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = index_conn.prepare(
-        "SELECT document_id, id, text, start_timestamp, end_timestamp, source
+        "SELECT document_id, id, text, start_timestamp, end_timestamp, source, speaker_name
          FROM transcript_utterances
          ORDER BY document_id, start_timestamp, rowid",
     )?;
-
-    struct Utterance {
-        document_id: String,
-        text: String,
-        start_timestamp: Option<String>,
-        end_timestamp: Option<String>,
-        source: Option<String>,
-    }
 
     let rows = stmt.query_map([], |row| {
         Ok(Utterance {
@@ -119,6 +167,7 @@ pub fn transcript_window_chunker_adaptive(
             start_timestamp: row.get(3)?,
             end_timestamp: row.get(4)?,
             source: row.get(5)?,
+            speaker_name: row.get(6)?,
         })
     })?;
 
@@ -191,12 +240,13 @@ pub fn transcript_window_chunker_adaptive(
                         text: buffer.clone(),
                         content_hash: hash_embed_input(header.map(String::as_str), &buffer),
                         header: header.cloned(),
-                        metadata: Some(serde_json::json!({
-                            "window_start_idx": buffer_start_idx,
-                            "window_end_idx": buffer_end_idx,
-                            "start_timestamp": buffer_start_ts,
-                            "end_timestamp": buffer_end_ts,
-                        })),
+                        metadata: Some(transcript_chunk_metadata(
+                            utterances,
+                            buffer_start_idx,
+                            buffer_end_idx,
+                            buffer_start_ts,
+                            buffer_end_ts,
+                        )),
                     });
                     chunk_idx += 1;
                 }
@@ -237,12 +287,13 @@ pub fn transcript_window_chunker_adaptive(
                         text: buffer.clone(),
                         content_hash: hash_embed_input(header.map(String::as_str), &buffer),
                         header: header.cloned(),
-                        metadata: Some(serde_json::json!({
-                            "window_start_idx": buffer_start_idx,
-                            "window_end_idx": buffer_end_idx,
-                            "start_timestamp": buffer_start_ts,
-                            "end_timestamp": buffer_end_ts,
-                        })),
+                        metadata: Some(transcript_chunk_metadata(
+                            utterances,
+                            buffer_start_idx,
+                            buffer_end_idx,
+                            buffer_start_ts,
+                            buffer_end_ts,
+                        )),
                     });
                     chunk_idx += 1;
                 }
@@ -280,12 +331,13 @@ pub fn transcript_window_chunker_adaptive(
                             text: buffer.clone(),
                             content_hash: hash_embed_input(header.map(String::as_str), &buffer),
                             header: header.cloned(),
-                            metadata: Some(serde_json::json!({
-                                "window_start_idx": buffer_start_idx,
-                                "window_end_idx": buffer_end_idx,
-                                "start_timestamp": buffer_start_ts,
-                                "end_timestamp": buffer_end_ts,
-                            })),
+                            metadata: Some(transcript_chunk_metadata(
+                                utterances,
+                                buffer_start_idx,
+                                buffer_end_idx,
+                                buffer_start_ts,
+                                buffer_end_ts,
+                            )),
                         });
                         chunk_idx += 1;
                     }
@@ -332,12 +384,13 @@ pub fn transcript_window_chunker_adaptive(
                 text: buffer.clone(),
                 content_hash: hash_embed_input(header.map(String::as_str), &buffer),
                 header: header.cloned(),
-                metadata: Some(serde_json::json!({
-                    "window_start_idx": buffer_start_idx,
-                    "window_end_idx": buffer_end_idx,
-                    "start_timestamp": buffer_start_ts,
-                    "end_timestamp": buffer_end_ts,
-                })),
+                metadata: Some(transcript_chunk_metadata(
+                    utterances,
+                    buffer_start_idx,
+                    buffer_end_idx,
+                    buffer_start_ts,
+                    buffer_end_ts,
+                )),
             });
         }
     }
@@ -708,6 +761,16 @@ mod tests {
     }
 
     fn setup_test_db(utterances: &[(&str, &str, &str, Option<&str>)]) -> Connection {
+        let with_speakers: Vec<_> = utterances
+            .iter()
+            .map(|&(doc_id, ts, text, source)| (doc_id, ts, text, source, None))
+            .collect();
+        setup_test_db_with_speakers(&with_speakers)
+    }
+
+    fn setup_test_db_with_speakers(
+        utterances: &[(&str, &str, &str, Option<&str>, Option<&str>)],
+    ) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE transcript_utterances (
@@ -716,15 +779,16 @@ mod tests {
                 start_timestamp TEXT,
                 end_timestamp TEXT,
                 text TEXT,
-                source TEXT
+                source TEXT,
+                speaker_name TEXT
             );",
         )
         .unwrap();
 
-        for (i, (doc_id, timestamp, text, source)) in utterances.iter().enumerate() {
+        for (i, (doc_id, timestamp, text, source, speaker_name)) in utterances.iter().enumerate() {
             conn.execute(
-                "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO transcript_utterances (id, document_id, start_timestamp, end_timestamp, text, source, speaker_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     format!("u-{}", i),
                     doc_id,
@@ -732,6 +796,7 @@ mod tests {
                     timestamp,
                     text,
                     source,
+                    speaker_name,
                 ],
             )
             .unwrap();
@@ -1680,6 +1745,247 @@ mod tests {
                 .text
                 .contains("[Other] Labeled utterance from other person.")
         );
+    }
+
+    // Tests for the speakers array in chunk metadata (#110)
+    #[test]
+    fn test_adaptive_speakers_in_metadata() {
+        // Distinct names, first-appearance order, duplicates collapsed.
+        let utts = vec![
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "Jane opens the meeting with the agenda for today.",
+                Some("system"),
+                Some("Jane Doe"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "John responds with an update on the deployment.",
+                Some("system"),
+                Some("John Smith"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:02:00Z",
+                "Jane wraps up with the action items for everyone.",
+                Some("system"),
+                Some("Jane Doe"),
+            ),
+        ];
+        let conn = setup_test_db_with_speakers(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 500,
+            max_tokens: 1000,
+            overlap_tokens: 100,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        let meta = chunks[0].metadata.as_ref().unwrap();
+        assert_eq!(
+            meta["speakers"],
+            serde_json::json!(["Jane Doe", "John Smith"])
+        );
+    }
+
+    #[test]
+    fn test_adaptive_speakers_empty_when_unattributed() {
+        // Pre-cutover data: no names anywhere. The array is present and
+        // empty, not absent and not an error.
+        let utts = vec![
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "An old utterance from before speaker attribution existed.",
+                Some("system"),
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "Another unattributed utterance with plenty of content.",
+                Some("system"),
+                None,
+            ),
+        ];
+        let conn = setup_test_db_with_speakers(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 500,
+            max_tokens: 1000,
+            overlap_tokens: 100,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        let meta = chunks[0].metadata.as_ref().unwrap();
+        assert_eq!(meta["speakers"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_adaptive_speakers_exclude_local_user() {
+        // Microphone utterances are the local user: no name, no sentinel.
+        // Only named speakers from the system channel appear.
+        let utts = vec![
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "I think we should go ahead with the migration plan.",
+                Some("microphone"),
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "Agreed, let me pull up the timeline for that work.",
+                Some("system"),
+                Some("Jane Doe"),
+            ),
+        ];
+        let conn = setup_test_db_with_speakers(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 500,
+            max_tokens: 1000,
+            overlap_tokens: 100,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        let meta = chunks[0].metadata.as_ref().unwrap();
+        assert_eq!(meta["speakers"], serde_json::json!(["Jane Doe"]));
+    }
+
+    #[test]
+    fn test_adaptive_speakers_follow_chunk_windows() {
+        // When a document splits into multiple chunks, each chunk carries
+        // only the speakers of its own window.
+        let utt_a = "Utterance alpha talks about the quarterly budget plan.";
+        let utt_b = "Utterance bravo covers the deployment timeline today.";
+        let utts = vec![
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                utt_a,
+                Some("system"),
+                Some("Jane Doe"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                utt_b,
+                Some("system"),
+                Some("John Smith"),
+            ),
+        ];
+        let conn = setup_test_db_with_speakers(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 20,
+            max_tokens: 100,
+            overlap_tokens: 1,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        let meta0 = chunks[0].metadata.as_ref().unwrap();
+        let meta1 = chunks[1].metadata.as_ref().unwrap();
+        assert_eq!(meta0["speakers"], serde_json::json!(["Jane Doe"]));
+        assert_eq!(meta1["speakers"], serde_json::json!(["John Smith"]));
+    }
+
+    #[test]
+    fn test_adaptive_speakers_exclude_overlap_carryover() {
+        // Chars-mode overlap copies the tail of the previous chunk into
+        // the next one, so a prior speaker's words can appear in a chunk
+        // whose window doesn't include them. The speakers array follows
+        // the window, exactly like window_start_idx/window_end_idx: the
+        // chunk that owns the utterance attributes it, and adjacent
+        // chunks don't double-attribute shared overlap text.
+        let utt_a = "Jane spends a while walking through the quarterly budget figures";
+        let utt_b = "John follows up with a question about the deployment schedule now";
+        let utts = vec![
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                utt_a,
+                Some("system"),
+                Some("Jane Doe"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                utt_b,
+                Some("system"),
+                Some("John Smith"),
+            ),
+        ];
+        let conn = setup_test_db_with_speakers(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 25,
+            max_tokens: 100,
+            overlap_tokens: 15,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        // The second chunk really does carry Jane's words via overlap...
+        assert!(chunks[1].text.contains("budget figures"));
+        // ...but its window is utterance 1 only, and speakers match it.
+        let meta = chunks[1].metadata.as_ref().unwrap();
+        assert_eq!(meta["window_start_idx"], 1);
+        assert_eq!(meta["speakers"], serde_json::json!(["John Smith"]));
+        // Jane is attributed by the chunk that owns her utterance.
+        let meta0 = chunks[0].metadata.as_ref().unwrap();
+        assert_eq!(meta0["speakers"], serde_json::json!(["Jane Doe"]));
+    }
+
+    #[test]
+    fn test_speaker_name_does_not_change_content_hash() {
+        // The core #110 invariant: attaching speaker names is metadata
+        // only. Identical text with and without names must hash the same,
+        // or the whole corpus re-embeds.
+        let text = "This utterance has enough content to form a chunk on its own for the test.";
+        let config = ChunkingConfig::default();
+
+        let conn_named = setup_test_db_with_speakers(&[(
+            "doc1",
+            "2025-01-01T10:00:00Z",
+            text,
+            Some("system"),
+            Some("Jane Doe"),
+        )]);
+        let named = transcript_window_chunker_adaptive(&conn_named, &config, None).unwrap();
+
+        let conn_unnamed = setup_test_db_with_speakers(&[(
+            "doc1",
+            "2025-01-01T10:00:00Z",
+            text,
+            Some("system"),
+            None,
+        )]);
+        let unnamed = transcript_window_chunker_adaptive(&conn_unnamed, &config, None).unwrap();
+
+        assert_eq!(named[0].text, unnamed[0].text);
+        assert_eq!(named[0].content_hash, unnamed[0].content_hash);
+        // Only the metadata differs.
+        let named_meta = named[0].metadata.as_ref().unwrap();
+        let unnamed_meta = unnamed[0].metadata.as_ref().unwrap();
+        assert_ne!(named_meta["speakers"], unnamed_meta["speakers"]);
     }
 
     #[test]

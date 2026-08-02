@@ -14,12 +14,13 @@ pub struct StoredChunk {
     pub content_hash: String,
     #[allow(dead_code)]
     pub text: String,
+    pub metadata_json: Option<String>,
 }
 
 /// Get all stored chunks with their content hashes (for diffing).
 pub fn get_stored_chunks(conn: &Connection) -> Result<Vec<StoredChunk>> {
     let mut stmt = conn.prepare(
-        "SELECT id, source_type, source_id, document_id, content_hash, text FROM chunks",
+        "SELECT id, source_type, source_id, document_id, content_hash, text, metadata_json FROM chunks",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -30,6 +31,7 @@ pub fn get_stored_chunks(conn: &Connection) -> Result<Vec<StoredChunk>> {
             document_id: row.get(3)?,
             content_hash: row.get(4)?,
             text: row.get(5)?,
+            metadata_json: row.get(6)?,
         })
     })?;
 
@@ -165,6 +167,27 @@ pub fn insert_chunks_with_embeddings_batch(
     }
 
     results
+}
+
+/// Update stored chunk metadata in place, leaving embeddings untouched.
+/// This is how metadata-only changes (e.g. speaker attribution arriving
+/// after a chunk was embedded) reach the database without a re-embed.
+pub fn update_chunk_metadata_batch(
+    conn: &Connection,
+    items: &[(i64, Option<String>)],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare("UPDATE chunks SET metadata_json = ?2 WHERE id = ?1")?;
+    for (id, metadata_json) in items {
+        stmt.execute(rusqlite::params![id, metadata_json])?;
+    }
+    drop(stmt);
+    tx.commit()?;
+    Ok(())
 }
 
 /// Delete chunks by their IDs.
@@ -379,7 +402,7 @@ pub fn get_stored_chunks_by_source(
     source_type: &ChunkSourceType,
 ) -> Result<Vec<StoredChunk>> {
     let mut stmt = conn.prepare(
-        "SELECT id, source_type, source_id, document_id, content_hash, text
+        "SELECT id, source_type, source_id, document_id, content_hash, text, metadata_json
          FROM chunks WHERE source_type = ?1",
     )?;
 
@@ -391,6 +414,7 @@ pub fn get_stored_chunks_by_source(
             document_id: row.get(3)?,
             content_hash: row.get(4)?,
             text: row.get(5)?,
+            metadata_json: row.get(6)?,
         })
     })?;
 
@@ -472,6 +496,59 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].source_id, "doc1:w0");
         assert_eq!(stored[0].content_hash, hash_content("test"));
+    }
+
+    #[test]
+    fn test_get_stored_chunks_includes_metadata() {
+        let conn = test_db();
+        let chunk = Chunk {
+            source_type: ChunkSourceType::TranscriptWindow,
+            source_id: "doc1:w0".to_string(),
+            document_id: "doc1".to_string(),
+            text: "test".to_string(),
+            content_hash: hash_content("test"),
+            metadata: Some(serde_json::json!({"speakers": ["Jane Doe"]})),
+            header: None,
+        };
+        insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
+
+        let stored = get_stored_chunks(&conn).unwrap();
+        assert_eq!(stored.len(), 1);
+        let meta: serde_json::Value =
+            serde_json::from_str(stored[0].metadata_json.as_ref().unwrap()).unwrap();
+        assert_eq!(meta["speakers"], serde_json::json!(["Jane Doe"]));
+    }
+
+    #[test]
+    fn test_update_chunk_metadata_batch() {
+        let conn = test_db();
+        let chunk = Chunk {
+            source_type: ChunkSourceType::TranscriptWindow,
+            source_id: "doc1:w0".to_string(),
+            document_id: "doc1".to_string(),
+            text: "test".to_string(),
+            content_hash: hash_content("test"),
+            metadata: Some(serde_json::json!({"speakers": []})),
+            header: None,
+        };
+        let id = insert_chunk_with_embedding(&conn, &chunk, &[1.0, 2.0]).unwrap();
+
+        let new_meta = serde_json::json!({"speakers": ["Jane Doe"]}).to_string();
+        update_chunk_metadata_batch(&conn, &[(id, Some(new_meta))]).unwrap();
+
+        let stored = get_stored_chunks(&conn).unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(stored[0].metadata_json.as_ref().unwrap()).unwrap();
+        assert_eq!(meta["speakers"], serde_json::json!(["Jane Doe"]));
+        // The embedding vector is untouched.
+        let vectors = load_all_vectors(&conn).unwrap();
+        assert_eq!(vectors[0].vector, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_update_chunk_metadata_batch_empty() {
+        let conn = test_db();
+        update_chunk_metadata_batch(&conn, &[]).unwrap();
     }
 
     #[test]
