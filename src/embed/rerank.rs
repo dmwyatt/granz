@@ -81,6 +81,11 @@ impl FastEmbedReranker {
 /// while the query is embedded and retrieval fuses its candidates.
 /// [`join`](Self::join) then waits only for whatever load time did not fit
 /// behind that work, which on a warm model cache is none of it.
+///
+/// Dropping without joining (an error aborting the search between spawn
+/// and join) detaches the loader thread: the process exits without waiting
+/// for a model nothing can use anymore. That is deliberate; blocking the
+/// error path on an abandoned load would only delay it.
 pub struct PendingReranker {
     handle: JoinHandle<Result<FastEmbedReranker>>,
 }
@@ -98,9 +103,10 @@ impl PendingReranker {
         // run before the thread exists; the full ordering argument lives on
         // that function.
         super::model::set_hf_cache_dir()?;
-        Ok(Self {
-            handle: std::thread::spawn(move || FastEmbedReranker::new(choice)),
-        })
+        let handle = std::thread::Builder::new()
+            .name("reranker-load".to_string())
+            .spawn(move || FastEmbedReranker::new(choice))?;
+        Ok(Self { handle })
     }
 
     /// Wait for the model, or for whatever went wrong loading it.
@@ -185,9 +191,11 @@ mod tests {
 
     #[test]
     fn reranker_can_be_loaded_off_thread() {
-        // PendingReranker moves a loaded model back to the caller. If a
-        // fastembed upgrade makes TextRerank thread-bound, this stops
-        // compiling rather than failing at runtime.
+        // Documentation, not an independent guard: the spawn inside
+        // PendingReranker::spawn already requires FastEmbedReranker: Send
+        // for the crate to compile, so that is what catches a fastembed
+        // upgrade making TextRerank thread-bound. This restates the
+        // requirement where tests are read.
         fn assert_send<T: Send>() {}
         assert_send::<FastEmbedReranker>();
     }
