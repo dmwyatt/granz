@@ -143,6 +143,31 @@ fn transcript_chunk_metadata(
     })
 }
 
+/// A finalized transcript window chunk for the buffered text.
+fn make_transcript_chunk(
+    doc_id: &str,
+    chunk_idx: usize,
+    text: &str,
+    header: Option<&String>,
+    utterances: &[Utterance],
+    start_idx: usize,
+    end_idx: usize,
+    start_ts: Option<&str>,
+    end_ts: Option<&str>,
+) -> Chunk {
+    Chunk {
+        source_type: ChunkSourceType::TranscriptWindow,
+        source_id: format!("{}:c{}", doc_id, chunk_idx),
+        document_id: doc_id.to_string(),
+        text: text.to_string(),
+        content_hash: hash_embed_input(header.map(String::as_str), text),
+        header: header.cloned(),
+        metadata: Some(transcript_chunk_metadata(
+            utterances, start_idx, end_idx, start_ts, end_ts,
+        )),
+    }
+}
+
 /// Generate transcript window chunks using adaptive token-based chunking.
 /// This normalizes chunk sizes to be within the model's token limits.
 /// When `headers` is provided, each document's contextual header is
@@ -203,21 +228,11 @@ pub fn transcript_window_chunker_adaptive(
         let mut buffer_end_idx = 0;
         let mut buffer_start_ts: Option<&str> = None;
         let mut buffer_end_ts: Option<&str> = None;
-        let mut carryover = String::new();
         let mut chunk_idx = 0;
 
         for (i, utt) in utterances.iter().enumerate() {
             // Format utterance with speaker label
-            let formatted_text = format_utterance_text(&utt.text, utt.source.as_deref());
-
-            // Combine carryover with current utterance
-            let text_to_add = if carryover.is_empty() {
-                formatted_text
-            } else {
-                let combined = format!("{}\n{}", carryover, formatted_text);
-                carryover.clear();
-                combined
-            };
+            let text_to_add = format_utterance_text(&utt.text, utt.source.as_deref());
 
             if text_to_add.trim().is_empty() {
                 continue;
@@ -233,21 +248,17 @@ pub fn transcript_window_chunker_adaptive(
             if combined_len > max_chars && !buffer.is_empty() {
                 // Finalize current buffer as a chunk
                 if buffer.len() >= config.min_chars {
-                    chunks.push(Chunk {
-                        source_type: ChunkSourceType::TranscriptWindow,
-                        source_id: format!("{}:c{}", doc_id, chunk_idx),
-                        document_id: doc_id.clone(),
-                        text: buffer.clone(),
-                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                        header: header.cloned(),
-                        metadata: Some(transcript_chunk_metadata(
-                            utterances,
-                            buffer_start_idx,
-                            buffer_end_idx,
-                            buffer_start_ts,
-                            buffer_end_ts,
-                        )),
-                    });
+                    chunks.push(make_transcript_chunk(
+                        doc_id,
+                        chunk_idx,
+                        &buffer,
+                        header,
+                        utterances,
+                        buffer_start_idx,
+                        buffer_end_idx,
+                        buffer_start_ts,
+                        buffer_end_ts,
+                    ));
                     chunk_idx += 1;
                 }
 
@@ -280,21 +291,17 @@ pub fn transcript_window_chunker_adaptive(
 
                 // Finalize this chunk
                 if buffer.len() >= config.min_chars {
-                    chunks.push(Chunk {
-                        source_type: ChunkSourceType::TranscriptWindow,
-                        source_id: format!("{}:c{}", doc_id, chunk_idx),
-                        document_id: doc_id.clone(),
-                        text: buffer.clone(),
-                        content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                        header: header.cloned(),
-                        metadata: Some(transcript_chunk_metadata(
-                            utterances,
-                            buffer_start_idx,
-                            buffer_end_idx,
-                            buffer_start_ts,
-                            buffer_end_ts,
-                        )),
-                    });
+                    chunks.push(make_transcript_chunk(
+                        doc_id,
+                        chunk_idx,
+                        &buffer,
+                        header,
+                        utterances,
+                        buffer_start_idx,
+                        buffer_end_idx,
+                        buffer_start_ts,
+                        buffer_end_ts,
+                    ));
                     chunk_idx += 1;
                 }
 
@@ -324,21 +331,17 @@ pub fn transcript_window_chunker_adaptive(
                 if new_combined_len > target_chars && !buffer.is_empty() {
                     // Finalize current buffer
                     if buffer.len() >= config.min_chars {
-                        chunks.push(Chunk {
-                            source_type: ChunkSourceType::TranscriptWindow,
-                            source_id: format!("{}:c{}", doc_id, chunk_idx),
-                            document_id: doc_id.clone(),
-                            text: buffer.clone(),
-                            content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                            header: header.cloned(),
-                            metadata: Some(transcript_chunk_metadata(
-                                utterances,
-                                buffer_start_idx,
-                                buffer_end_idx,
-                                buffer_start_ts,
-                                buffer_end_ts,
-                            )),
-                        });
+                        chunks.push(make_transcript_chunk(
+                            doc_id,
+                            chunk_idx,
+                            &buffer,
+                            header,
+                            utterances,
+                            buffer_start_idx,
+                            buffer_end_idx,
+                            buffer_start_ts,
+                            buffer_end_ts,
+                        ));
                         chunk_idx += 1;
                     }
 
@@ -368,30 +371,19 @@ pub fn transcript_window_chunker_adaptive(
             }
         }
 
-        // Finalize any remaining buffer + carryover
-        if !carryover.is_empty() {
-            if !buffer.is_empty() {
-                buffer.push('\n');
-            }
-            buffer.push_str(&carryover);
-        }
-
+        // Finalize any remaining buffer
         if buffer.len() >= config.min_chars {
-            chunks.push(Chunk {
-                source_type: ChunkSourceType::TranscriptWindow,
-                source_id: format!("{}:c{}", doc_id, chunk_idx),
-                document_id: doc_id.clone(),
-                text: buffer.clone(),
-                content_hash: hash_embed_input(header.map(String::as_str), &buffer),
-                header: header.cloned(),
-                metadata: Some(transcript_chunk_metadata(
-                    utterances,
-                    buffer_start_idx,
-                    buffer_end_idx,
-                    buffer_start_ts,
-                    buffer_end_ts,
-                )),
-            });
+            chunks.push(make_transcript_chunk(
+                doc_id,
+                chunk_idx,
+                &buffer,
+                header,
+                utterances,
+                buffer_start_idx,
+                buffer_end_idx,
+                buffer_start_ts,
+                buffer_end_ts,
+            ));
         }
     }
 
