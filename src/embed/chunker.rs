@@ -276,6 +276,7 @@ pub fn transcript_window_chunker_adaptive(
                 );
                 buffer_has_new_content = false;
                 buffer_start_idx = i;
+                buffer_start_ts = None;
             }
 
             // Handle text_to_add that might be too large by itself
@@ -397,6 +398,9 @@ pub fn transcript_window_chunker_adaptive(
                 } else {
                     buffer.push('\n');
                     buffer.push_str(&remaining);
+                    // After a reseed the carryover has no timestamp; the
+                    // first appended utterance starts the window.
+                    buffer_start_ts = buffer_start_ts.or(utt.start_timestamp.as_deref());
                 }
                 buffer_has_new_content = true;
                 buffer_end_idx = i;
@@ -1105,6 +1109,59 @@ mod tests {
         // No carried utterance fits next to u2, so the last chunk starts
         // clean at the utterance boundary.
         assert_eq!(chunks.last().unwrap().text, u2);
+    }
+
+    #[test]
+    fn test_adaptive_start_timestamp_survives_chunk_boundaries() {
+        // #123 defect 3: the target-path reseed cleared buffer_start_ts and
+        // nothing restored it on the normal append path, so every chunk
+        // after a document's first carried a null start_timestamp (97% of
+        // the live corpus). The max-path reseed had the mirror bug: it kept
+        // the previous chunk's stale value. Every chunk's start_timestamp
+        // must match the utterance its window starts at. The 250-char
+        // utterance routes one boundary through the max path so both
+        // reseed sites are exercised.
+        let timestamps = [
+            "2025-01-01T10:00:00Z",
+            "2025-01-01T10:01:00Z",
+            "2025-01-01T10:02:00Z",
+            "2025-01-01T10:03:00Z",
+            "2025-01-01T10:04:00Z",
+        ];
+        let texts = [
+            "a".repeat(80),
+            "b".repeat(80),
+            "c".repeat(80),
+            "d".repeat(250),
+            "e".repeat(80),
+        ];
+        let utts: Vec<(&str, &str, &str, Option<&str>)> = timestamps
+            .iter()
+            .zip(texts.iter())
+            .map(|(&ts, text)| ("doc1", ts, text.as_str(), None))
+            .collect();
+        let conn = setup_test_db(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 300,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert!(chunks.len() >= 3);
+        for chunk in &chunks {
+            let meta = chunk.metadata.as_ref().unwrap();
+            let start_idx = meta["window_start_idx"].as_u64().unwrap() as usize;
+            assert_eq!(
+                meta["start_timestamp"],
+                serde_json::json!(timestamps[start_idx]),
+                "chunk {} start_timestamp should match its window start",
+                chunk.source_id
+            );
+        }
     }
 
     #[test]
