@@ -4,7 +4,7 @@
 //! grans's own session and, off macOS, `super::local_store` reads the one
 //! Granola's desktop app stored. This module is the order they are tried in.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use log::debug;
 
@@ -229,7 +229,11 @@ mod tests {
 
     // --- refresh chain ---
 
-    fn stored(refresh_token: &str, access_token: Option<&str>, expires_at: Option<i64>) -> GranolaCredentials {
+    fn stored(
+        refresh_token: &str,
+        access_token: Option<&str>,
+        expires_at: Option<i64>,
+    ) -> GranolaCredentials {
         GranolaCredentials {
             refresh_token: refresh_token.to_string(),
             access_token: access_token.map(str::to_string),
@@ -286,8 +290,8 @@ mod tests {
         let creds = stored("refresh-dead", None, None);
         store.save(&creds).unwrap();
 
-        let err = refresh_and_persist(creds, 1_000, &store, |_| bail!("token expired"))
-            .unwrap_err();
+        let err =
+            refresh_and_persist(creds, 1_000, &store, |_| bail!("token expired")).unwrap_err();
 
         assert!(err.to_string().contains("grans auth login"));
     }
@@ -300,11 +304,15 @@ mod tests {
         let store = CredentialStore::file(dir.path().join("auth.toml"));
         let ours = stored("refresh-old", None, None);
         store
-            .save(&stored("refresh-rotated", Some("access-from-other-run"), Some(9_000)))
+            .save(&stored(
+                "refresh-rotated",
+                Some("access-from-other-run"),
+                Some(9_000),
+            ))
             .unwrap();
 
-        let token = refresh_and_persist(ours, 1_000, &store, |_| bail!("token already used"))
-            .unwrap();
+        let token =
+            refresh_and_persist(ours, 1_000, &store, |_| bail!("token already used")).unwrap();
 
         assert_eq!(token, "access-from-other-run");
     }
@@ -352,5 +360,4 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(attempts.get(), 1);
     }
-
 }

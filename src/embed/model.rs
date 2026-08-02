@@ -119,7 +119,10 @@ impl Embedder for FastEmbedModel {
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let results = self.model.borrow_mut().embed(vec![text.to_string()], None)?;
+        let results = self
+            .model
+            .borrow_mut()
+            .embed(vec![text.to_string()], None)?;
         results
             .into_iter()
             .next()
@@ -271,5 +274,4 @@ mod tests {
         let v2 = embedder.embed_query("goodbye").unwrap();
         assert_ne!(v1, v2);
     }
-
 }

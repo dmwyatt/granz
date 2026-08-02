@@ -351,9 +351,7 @@ pub fn check_model_consistency(conn: &Connection, current_model: &str) -> Result
         Some(stored) if stored == current_model => Ok(true),
         Some(_) => {
             // Model changed — wipe embeddings
-            conn.execute_batch(
-                "DELETE FROM embeddings; DELETE FROM chunks;",
-            )?;
+            conn.execute_batch("DELETE FROM embeddings; DELETE FROM chunks;")?;
             Ok(false)
         }
         None => Ok(false),
@@ -406,7 +404,7 @@ pub fn get_stored_chunks_by_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embed::chunk::{hash_content, ChunkSourceType};
+    use crate::embed::chunk::{ChunkSourceType, hash_content};
 
     fn test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

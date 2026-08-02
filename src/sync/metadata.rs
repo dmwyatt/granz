@@ -71,7 +71,6 @@ impl SyncMetadata {
             embeddings_db: None, // No longer using separate embeddings.db
         })
     }
-
 }
 
 impl IndexDbStats {

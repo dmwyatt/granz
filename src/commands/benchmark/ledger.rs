@@ -83,7 +83,8 @@ pub(super) fn record_run(ctx: &RecordContext, run: &ModeRun) -> Result<PathBuf> 
         db: ctx.db,
         run,
     };
-    let (run_path, rel_path) = write_unique(&runs_dir, &base, &serde_json::to_string_pretty(&run_file)?)?;
+    let (run_path, rel_path) =
+        write_unique(&runs_dir, &base, &serde_json::to_string_pretty(&run_file)?)?;
 
     let entry = LedgerEntry {
         date: ctx.date,
@@ -119,7 +120,11 @@ fn write_unique(dir: &Path, base: &str, content: &str) -> Result<(PathBuf, Strin
             format!("{}-{}.json", base, attempt)
         };
         let path = dir.join(&name);
-        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(content.as_bytes())
                     .with_context(|| format!("Failed to write run file: {}", path.display()))?;
@@ -128,7 +133,7 @@ fn write_unique(dir: &Path, base: &str, content: &str) -> Result<(PathBuf, Strin
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 return Err(e)
-                    .with_context(|| format!("Failed to create run file: {}", path.display()))
+                    .with_context(|| format!("Failed to create run file: {}", path.display()));
             }
         }
     }
@@ -241,7 +246,8 @@ mod tests {
         record_run(&ctx, &test_run("semantic")).unwrap();
 
         let ledger = fs::read_to_string(dir.path().join("ledger.jsonl")).unwrap();
-        let entry: serde_json::Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+        let entry: serde_json::Value =
+            serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
         assert!(entry.get("notes").is_none());
     }
 }

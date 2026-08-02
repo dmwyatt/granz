@@ -34,19 +34,21 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 
     let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 /// Parse window indices from metadata JSON.
 fn parse_window_indices(metadata_json: &Option<String>) -> (Option<usize>, Option<usize>) {
     if let Some(json_str) = metadata_json {
         if let Ok(meta) = serde_json::from_str::<serde_json::Value>(json_str) {
-            let start = meta.get("window_start_idx").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let end = meta.get("window_end_idx").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let start = meta
+                .get("window_start_idx")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let end = meta
+                .get("window_end_idx")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             return (start, end);
         }
     }
@@ -131,7 +133,11 @@ pub fn rank_results(
     }
 
     let mut results: Vec<SemanticSearchResult> = doc_best.into_values().collect();
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -372,7 +378,12 @@ mod tests {
         assert_eq!(results[0].document_id, "doc2");
 
         // Filter to transcript + notes
-        let results = rank_results(&query, &stored, 0.0, Some(&["transcript_window", "notes_paragraph"]));
+        let results = rank_results(
+            &query,
+            &stored,
+            0.0,
+            Some(&["transcript_window", "notes_paragraph"]),
+        );
         assert_eq!(results.len(), 2);
 
         // No filter = all results

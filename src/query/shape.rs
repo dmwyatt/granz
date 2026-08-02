@@ -315,7 +315,11 @@ mod tests {
 
     #[test]
     fn phrase_token_highlights_as_one_span() {
-        let e = excerpt("the database migration ran fine", "\"database migration\"", 80);
+        let e = excerpt(
+            "the database migration ran fine",
+            "\"database migration\"",
+            80,
+        );
         assert_eq!(highlighted(&e), vec!["database migration"]);
     }
 

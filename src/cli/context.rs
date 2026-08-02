@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::FixedOffset;
 
-use crate::output::format::{detect_output_mode, OutputMode};
+use crate::output::format::{OutputMode, detect_output_mode};
 
 pub struct RunContext {
     pub output_mode: OutputMode,

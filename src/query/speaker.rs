@@ -12,7 +12,7 @@
 //! lets a typo be an error instead of an empty result set that reads as
 //! "nobody said that".
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rusqlite::Connection;
 
 /// How many known speakers an error message lists before it truncates.
@@ -63,8 +63,9 @@ impl SpeakerFilter {
         match self {
             SpeakerFilter::Me => source == Some("microphone"),
             SpeakerFilter::Other => source == Some("system"),
-            SpeakerFilter::Names(names) => speaker_name
-                .is_some_and(|name| names.iter().any(|n| n.eq_ignore_ascii_case(name))),
+            SpeakerFilter::Names(names) => {
+                speaker_name.is_some_and(|name| names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+            }
         }
     }
 }
@@ -216,8 +217,14 @@ mod tests {
     fn parse_reserves_me_and_other_case_insensitively() {
         assert_eq!(SpeakerSelector::parse("me"), Some(SpeakerSelector::Me));
         assert_eq!(SpeakerSelector::parse("ME"), Some(SpeakerSelector::Me));
-        assert_eq!(SpeakerSelector::parse("other"), Some(SpeakerSelector::Other));
-        assert_eq!(SpeakerSelector::parse("OTHER"), Some(SpeakerSelector::Other));
+        assert_eq!(
+            SpeakerSelector::parse("other"),
+            Some(SpeakerSelector::Other)
+        );
+        assert_eq!(
+            SpeakerSelector::parse("OTHER"),
+            Some(SpeakerSelector::Other)
+        );
     }
 
     #[test]
@@ -369,7 +376,10 @@ mod tests {
     #[test]
     fn no_match_message_distinguishes_a_corpus_with_no_attribution() {
         let msg = no_match_message("jane", &[]);
-        assert!(msg.contains("no utterances have speaker attribution"), "got: {msg}");
+        assert!(
+            msg.contains("no utterances have speaker attribution"),
+            "got: {msg}"
+        );
         assert!(msg.contains("2026-07-21"), "got: {msg}");
     }
 

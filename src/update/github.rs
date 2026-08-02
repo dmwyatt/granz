@@ -55,9 +55,7 @@ pub struct Asset {
 impl Asset {
     /// Extract SHA256 hash from digest field.
     pub fn sha256(&self) -> Option<&str> {
-        self.digest
-            .as_ref()
-            .and_then(|d| d.strip_prefix("sha256:"))
+        self.digest.as_ref().and_then(|d| d.strip_prefix("sha256:"))
     }
 }
 
@@ -360,9 +358,6 @@ mod tests {
         };
 
         let run2 = run1.clone();
-        assert_eq!(
-            BuildStatus::Completed(run1),
-            BuildStatus::Completed(run2)
-        );
+        assert_eq!(BuildStatus::Completed(run1), BuildStatus::Completed(run2));
     }
 }

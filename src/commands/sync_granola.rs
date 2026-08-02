@@ -10,8 +10,8 @@ use rusqlite::Connection;
 use crate::api::ApiClient;
 use crate::cli::args::SyncAction;
 use crate::db::sync::{
-    self, upsert_calendar_events, upsert_calendars_from_selection, upsert_documents, upsert_people,
-    upsert_recipes, upsert_templates, SyncStats,
+    self, SyncStats, upsert_calendar_events, upsert_calendars_from_selection, upsert_documents,
+    upsert_people, upsert_recipes, upsert_templates,
 };
 use crate::output::format::OutputMode;
 use crate::output::progress::create_spinner;
@@ -241,7 +241,12 @@ fn print_full_sync_summary(stats: &FullSyncStats, dry_run: bool, mode: OutputMod
 // Individual sync functions
 // ============================================================================
 
-fn sync_documents(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputMode) -> Result<()> {
+fn sync_documents(
+    conn: &Connection,
+    dry_run: bool,
+    token: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     debug!("sync_documents (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
     let client = ApiClient::new(token)?;
@@ -291,7 +296,12 @@ fn sync_documents_with_client(
     upsert_documents(conn, &documents)
 }
 
-fn sync_people(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputMode) -> Result<()> {
+fn sync_people(
+    conn: &Connection,
+    dry_run: bool,
+    token: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     debug!("sync_people (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
     let client = ApiClient::new(token)?;
@@ -341,7 +351,12 @@ fn sync_people_with_client(
     upsert_people(conn, &people)
 }
 
-fn sync_calendars(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputMode) -> Result<()> {
+fn sync_calendars(
+    conn: &Connection,
+    dry_run: bool,
+    token: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     debug!("sync_calendars (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
     let client = ApiClient::new(token)?;
@@ -412,7 +427,12 @@ fn sync_calendars_with_client(
     upsert_calendar_events(conn, &events)
 }
 
-fn sync_templates(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputMode) -> Result<()> {
+fn sync_templates(
+    conn: &Connection,
+    dry_run: bool,
+    token: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     debug!("sync_templates (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
     let client = ApiClient::new(token)?;
@@ -462,7 +482,12 @@ fn sync_templates_with_client(
     upsert_templates(conn, &templates)
 }
 
-fn sync_recipes(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputMode) -> Result<()> {
+fn sync_recipes(
+    conn: &Connection,
+    dry_run: bool,
+    token: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     debug!("sync_recipes (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
     let client = ApiClient::new(token)?;

@@ -119,8 +119,7 @@ pub fn replace_binary(content: &[u8]) -> UpdateResult<()> {
     }
 
     // Replace the binary
-    self_replace::self_replace(&temp_path)
-        .map_err(|e| UpdateError::Replace(e.to_string()))?;
+    self_replace::self_replace(&temp_path).map_err(|e| UpdateError::Replace(e.to_string()))?;
 
     // Clean up temp file (may fail on Windows, that's okay)
     let _ = std::fs::remove_file(&temp_path);

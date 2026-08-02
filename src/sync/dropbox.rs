@@ -105,10 +105,16 @@ impl DropboxClient {
         let start = Instant::now();
 
         let uploaded = if file_size <= UPLOAD_SINGLE_LIMIT {
-            debug!("upload {} ({} bytes, single request)", dropbox_path, file_size);
+            debug!(
+                "upload {} ({} bytes, single request)",
+                dropbox_path, file_size
+            );
             self.upload_single(local_path, dropbox_path, file_size, on_progress)
         } else {
-            debug!("upload {} ({} bytes, chunked session)", dropbox_path, file_size);
+            debug!(
+                "upload {} ({} bytes, chunked session)",
+                dropbox_path, file_size
+            );
             self.upload_chunked(local_path, dropbox_path, file_size, on_progress)
         }?;
 
@@ -154,7 +160,8 @@ impl DropboxClient {
         // 150 MB out of memory and lets reqwest's pull of the body drive the
         // progress report.
         let file = std::fs::File::open(local_path)?;
-        let body = reqwest::blocking::Body::sized(ProgressReader::new(file, on_progress), file_size);
+        let body =
+            reqwest::blocking::Body::sized(ProgressReader::new(file, on_progress), file_size);
 
         let response = self
             .http
@@ -247,12 +254,7 @@ impl DropboxClient {
     }
 
     /// Append data to an upload session.
-    fn upload_session_append(
-        &self,
-        session_id: &str,
-        offset: u64,
-        data: &[u8],
-    ) -> SyncResult<()> {
+    fn upload_session_append(&self, session_id: &str, offset: u64, data: &[u8]) -> SyncResult<()> {
         #[derive(Serialize)]
         struct AppendArg {
             cursor: SessionCursor,
@@ -512,7 +514,9 @@ pub fn format_timestamp(ts: u64) -> String {
     use chrono::{DateTime, Local};
     let dt = DateTime::from_timestamp(ts as i64, 0)
         .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
-    dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()
+    dt.with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 #[cfg(test)]

@@ -7,14 +7,12 @@ use rand::Rng;
 use thiserror::Error;
 
 use super::types::{
-    ApiPanel, GetDocumentsRequest, GetDocumentsResponse, GetDocumentPanelsRequest,
+    ApiPanel, GetDocumentPanelsRequest, GetDocumentsRequest, GetDocumentsResponse,
     GetPanelTemplatesRequest, GetPeopleRequest, GetRecipesRequest, GetRecipesResponse,
     GetSelectedCalendarsRequest, GetSelectedCalendarsResponse, GetTranscriptRequest,
     RefreshCalendarEventsRequest, RefreshCalendarEventsResponse, TranscriptResponse,
 };
-use crate::models::{
-    CalendarEvent, Document, PanelTemplate, Person, TranscriptUtterance,
-};
+use crate::models::{CalendarEvent, Document, PanelTemplate, Person, TranscriptUtterance};
 
 const API_V1_URL: &str = "https://api.granola.ai/v1";
 const API_V2_URL: &str = "https://api.granola.ai/v2";
@@ -39,7 +37,9 @@ fn truncate_for_log(s: &str, max_len: usize) -> String {
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("Authentication failed (401). Your token may have expired. Please re-login to Granola.")]
+    #[error(
+        "Authentication failed (401). Your token may have expired. Please re-login to Granola."
+    )]
     Unauthorized,
 
     #[error("Resource not found (404). The requested resource may not exist.")]
@@ -128,9 +128,9 @@ impl ApiClient {
         match status.as_u16() {
             200 => {
                 // Read body as text first so we can include it in error messages
-                let body = response
-                    .text()
-                    .map_err(|e| ApiError::InvalidResponse(format!("failed to read body: {}", e)))?;
+                let body = response.text().map_err(|e| {
+                    ApiError::InvalidResponse(format!("failed to read body: {}", e))
+                })?;
                 debug!("  response body: {} bytes", body.len());
                 debug!("  response preview: {}", truncate_for_log(&body, 200));
                 serde_json::from_str(&body).map_err(|e| {
@@ -149,7 +149,10 @@ impl ApiClient {
                             if start < body.len() {
                                 format!(
                                     "Context around column {} (chars {}-{}):\n...{}...",
-                                    col, start, end, safe_slice(&body, start, end)
+                                    col,
+                                    start,
+                                    end,
+                                    safe_slice(&body, start, end)
                                 )
                             } else {
                                 format!("Column {} is beyond body length {}", col, body.len())
@@ -190,7 +193,11 @@ impl ApiClient {
             }
             _ => {
                 let body = response.text().unwrap_or_default();
-                debug!("  server error ({}): {}", status.as_u16(), truncate_for_log(&body, 500));
+                debug!(
+                    "  server error ({}): {}",
+                    status.as_u16(),
+                    truncate_for_log(&body, 500)
+                );
                 Err(ApiError::ServerError(status.as_u16(), body))
             }
         }
@@ -229,12 +236,10 @@ impl ApiClient {
         match status.as_u16() {
             200 => {
                 // API returns array directly, not wrapped in {"transcript": [...]}
-                let utterances: Vec<TranscriptUtterance> = response
-                    .json()
-                    .map_err(|e| {
-                        debug!("  deserialization error: {}", e);
-                        ApiError::InvalidResponse(e.to_string())
-                    })?;
+                let utterances: Vec<TranscriptUtterance> = response.json().map_err(|e| {
+                    debug!("  deserialization error: {}", e);
+                    ApiError::InvalidResponse(e.to_string())
+                })?;
                 debug!("  got {} utterances", utterances.len());
                 Ok(TranscriptResponse {
                     transcript: utterances,
@@ -254,7 +259,11 @@ impl ApiClient {
             }
             _ => {
                 let body = response.text().unwrap_or_default();
-                debug!("  server error ({}): {}", status.as_u16(), truncate_for_log(&body, 500));
+                debug!(
+                    "  server error ({}): {}",
+                    status.as_u16(),
+                    truncate_for_log(&body, 500)
+                );
                 Err(ApiError::ServerError(status.as_u16(), body))
             }
         }
@@ -297,10 +306,7 @@ impl ApiClient {
         let request = RefreshCalendarEventsRequest::default();
         let response: RefreshCalendarEventsResponse =
             self.post_v1("refresh-calendar-events", &request)?;
-        Ok(response
-            .results
-            .map(|r| r.events)
-            .unwrap_or_default())
+        Ok(response.results.map(|r| r.events).unwrap_or_default())
     }
 
     // ========================================================================
@@ -339,15 +345,15 @@ impl ApiClient {
 
 /// Convenience function to fetch a transcript with a given token
 pub fn fetch_transcript(token: &str, document_id: &str) -> Result<TranscriptResponse, ApiError> {
-    let client = ApiClient::new(token.to_string())
-        .map_err(|e| ApiError::NetworkError(e.to_string()))?;
+    let client =
+        ApiClient::new(token.to_string()).map_err(|e| ApiError::NetworkError(e.to_string()))?;
     client.fetch_transcript(document_id)
 }
 
 /// Convenience function to fetch panels with a given token
 pub fn fetch_panels(token: &str, document_id: &str) -> Result<Vec<ApiPanel>, ApiError> {
-    let client = ApiClient::new(token.to_string())
-        .map_err(|e| ApiError::NetworkError(e.to_string()))?;
+    let client =
+        ApiClient::new(token.to_string()).map_err(|e| ApiError::NetworkError(e.to_string()))?;
     client.fetch_panels(document_id)
 }
 
@@ -430,7 +436,7 @@ mod tests {
     #[test]
     fn test_safe_slice_utf8_multibyte() {
         // Each emoji is 4 bytes
-        let s = "a😀b😀c";  // bytes: a(1) + 😀(4) + b(1) + 😀(4) + c(1) = 11 bytes
+        let s = "a😀b😀c"; // bytes: a(1) + 😀(4) + b(1) + 😀(4) + c(1) = 11 bytes
 
         // Slicing at byte 1 would be mid-emoji without safe_slice
         // safe_slice should adjust to valid boundaries

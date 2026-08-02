@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use log::debug;
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 
@@ -46,9 +46,7 @@ pub struct FtsIndexReport {
 pub fn check_fts_indexes(conn: &Connection) -> Result<Vec<FtsIndexReport>> {
     MAINTAINED_FTS_TABLES
         .iter()
-        .map(|&table| {
-            check_fts_index(conn, table).map(|state| FtsIndexReport { table, state })
-        })
+        .map(|&table| check_fts_index(conn, table).map(|state| FtsIndexReport { table, state }))
         .collect()
 }
 
@@ -84,8 +82,11 @@ fn check_fts_index(conn: &Connection, table: &str) -> Result<FtsIndexState> {
 /// consistent one.
 pub fn rebuild_fts_indexes(conn: &Connection) -> Result<Vec<&'static str>> {
     for table in MAINTAINED_FTS_TABLES {
-        conn.execute(&format!("INSERT INTO {table}({table}) VALUES('rebuild')"), [])
-            .with_context(|| format!("rebuilding {table}"))?;
+        conn.execute(
+            &format!("INSERT INTO {table}({table}) VALUES('rebuild')"),
+            [],
+        )
+        .with_context(|| format!("rebuilding {table}"))?;
     }
 
     Ok(MAINTAINED_FTS_TABLES.to_vec())
@@ -202,7 +203,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("other.db");
         let conn = Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE unrelated (id INTEGER)", []).unwrap();
+        conn.execute("CREATE TABLE unrelated (id INTEGER)", [])
+            .unwrap();
         drop(conn);
 
         assert!(check_pulled_database(&path).is_err());
@@ -253,7 +255,10 @@ mod tests {
 
         let reports = check_fts_indexes(&conn).unwrap();
 
-        let transcripts = reports.iter().find(|r| r.table == "transcript_fts").unwrap();
+        let transcripts = reports
+            .iter()
+            .find(|r| r.table == "transcript_fts")
+            .unwrap();
         assert!(
             matches!(transcripts.state, FtsIndexState::Drifted(_)),
             "expected drift, got {:?}",

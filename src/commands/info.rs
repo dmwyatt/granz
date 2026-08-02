@@ -5,8 +5,8 @@ use chrono::{DateTime, FixedOffset};
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::db::info::{get_info_db_only, DbInfo};
-use crate::output::format::{format_size, OutputMode};
+use crate::db::info::{DbInfo, get_info_db_only};
+use crate::output::format::{OutputMode, format_size};
 
 /// Run info command
 pub fn run(conn: &Connection, db_path: &Path, ctx: &RunContext) -> Result<()> {
@@ -58,12 +58,21 @@ fn print_tty(info: &DbInfo, tz: &FixedOffset) {
     }
 
     println!("People:             {}", format_number(info.total_people));
-    println!("Calendars:          {}", format_number(info.total_calendars));
+    println!(
+        "Calendars:          {}",
+        format_number(info.total_calendars)
+    );
     println!("Events:             {}", format_number(info.total_events));
-    println!("Templates:          {}", format_number(info.total_templates));
+    println!(
+        "Templates:          {}",
+        format_number(info.total_templates)
+    );
     println!("Recipes:            {}", format_number(info.total_recipes));
     println!("Panels:             {}", format_number(info.total_panels));
-    println!("Utterances:         {}", format_number(info.total_utterances));
+    println!(
+        "Utterances:         {}",
+        format_number(info.total_utterances)
+    );
 
     if info.total_chunks > 0 {
         if let Some(stats) = &info.chunk_size_stats {
@@ -83,18 +92,9 @@ fn print_tty(info: &DbInfo, tz: &FixedOffset) {
     println!("\x1b[1mDatabase\x1b[0m");
     println!("\x1b[2m────────\x1b[0m");
 
-    println!(
-        "Path:           {}",
-        info.db_path.display()
-    );
-    println!(
-        "Size:           {}",
-        format_size(info.db_size_bytes)
-    );
-    println!(
-        "Schema version: {}",
-        info.schema_version
-    );
+    println!("Path:           {}", info.db_path.display());
+    println!("Size:           {}", format_size(info.db_size_bytes));
+    println!("Schema version: {}", info.schema_version);
 }
 
 fn format_number(n: i64) -> String {

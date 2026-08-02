@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use super::chunk::{hash_embed_input, Chunk, ChunkSourceType};
+use super::chunk::{Chunk, ChunkSourceType, hash_embed_input};
 
 /// How consecutive transcript chunks overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,7 +202,12 @@ pub fn transcript_window_chunker_adaptive(
                 }
 
                 // Start new buffer with overlap
-                buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
+                buffer = overlap_carryover(
+                    config.overlap_mode,
+                    &buffer,
+                    &mut buffer_utts,
+                    overlap_chars,
+                );
                 buffer_start_idx = i;
             }
 
@@ -245,7 +250,12 @@ pub fn transcript_window_chunker_adaptive(
                 // Start fresh buffer with overlap. The buffer ends in a
                 // split fragment here, so utterance mode carries nothing.
                 buffer_utts.clear();
-                buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
+                buffer = overlap_carryover(
+                    config.overlap_mode,
+                    &buffer,
+                    &mut buffer_utts,
+                    overlap_chars,
+                );
                 buffer_start_idx = i;
                 buffer_start_ts = None;
                 remaining = rest.to_string();
@@ -281,7 +291,12 @@ pub fn transcript_window_chunker_adaptive(
                     }
 
                     // Start new buffer with overlap
-                    buffer = overlap_carryover(config.overlap_mode, &buffer, &mut buffer_utts, overlap_chars);
+                    buffer = overlap_carryover(
+                        config.overlap_mode,
+                        &buffer,
+                        &mut buffer_utts,
+                        overlap_chars,
+                    );
                     buffer_start_idx = i;
                     buffer_start_ts = None;
                 }
@@ -775,9 +790,24 @@ mod tests {
         // Create utterances that together exceed target but not max
         // Use a config with small target to force splits
         let utts = vec![
-            ("doc1", "2025-01-01T10:00:00Z", "First utterance with some content.", None),
-            ("doc1", "2025-01-01T10:01:00Z", "Second utterance with more content.", None),
-            ("doc1", "2025-01-01T10:02:00Z", "Third utterance continues on.", None),
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "First utterance with some content.",
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "Second utterance with more content.",
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:02:00Z",
+                "Third utterance continues on.",
+                None,
+            ),
         ];
         let conn = setup_test_db(&utts);
         // Small target: ~20 tokens = ~80 chars
@@ -791,7 +821,11 @@ mod tests {
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // Should have multiple chunks
-        assert!(chunks.len() >= 2, "Expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "Expected multiple chunks, got {}",
+            chunks.len()
+        );
     }
 
     #[test]
@@ -810,7 +844,11 @@ mod tests {
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         // The huge text should result in multiple chunks
-        assert!(chunks.len() > 1, "Expected split chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "Expected split chunks, got {}",
+            chunks.len()
+        );
         // Each chunk should not exceed max_chars
         for chunk in &chunks {
             assert!(
@@ -826,8 +864,13 @@ mod tests {
     fn test_adaptive_very_small_chunks_dropped() {
         // Chunks below min_chars should be dropped
         let conn = setup_test_db(&[
-            ("doc1", "2025-01-01T10:00:00Z", "ok", None),  // 2 chars - too small
-            ("doc1", "2025-01-01T10:01:00Z", "This is adequate content for a chunk.", None),
+            ("doc1", "2025-01-01T10:00:00Z", "ok", None), // 2 chars - too small
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "This is adequate content for a chunk.",
+                None,
+            ),
         ]);
         let config = ChunkingConfig {
             target_tokens: 100,
@@ -848,8 +891,18 @@ mod tests {
     #[test]
     fn test_adaptive_multiple_documents() {
         let utts = vec![
-            ("doc1", "2025-01-01T10:00:00Z", "Document one content that is long enough to meet the minimum chunk size requirements.", None),
-            ("doc2", "2025-01-01T11:00:00Z", "Document two content that is also long enough to meet the minimum chunk size requirements.", None),
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "Document one content that is long enough to meet the minimum chunk size requirements.",
+                None,
+            ),
+            (
+                "doc2",
+                "2025-01-01T11:00:00Z",
+                "Document two content that is also long enough to meet the minimum chunk size requirements.",
+                None,
+            ),
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig::default();
@@ -888,8 +941,18 @@ mod tests {
     #[test]
     fn test_adaptive_metadata_tracks_timestamps() {
         let utts = vec![
-            ("doc1", "2025-01-01T10:00:00Z", "First utterance with enough content to pass the minimum.", None),
-            ("doc1", "2025-01-01T10:05:00Z", "Last utterance with additional content to meet requirements.", None),
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "First utterance with enough content to pass the minimum.",
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:05:00Z",
+                "Last utterance with additional content to meet requirements.",
+                None,
+            ),
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig::default();
@@ -902,7 +965,12 @@ mod tests {
 
     #[test]
     fn test_adaptive_source_id_format() {
-        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", "Content here that is long enough to meet minimum chunk size requirements for the test.", None)]);
+        let conn = setup_test_db(&[(
+            "doc1",
+            "2025-01-01T10:00:00Z",
+            "Content here that is long enough to meet minimum chunk size requirements for the test.",
+            None,
+        )]);
         let config = ChunkingConfig::default();
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
@@ -924,7 +992,8 @@ mod tests {
         conn.execute(
             "INSERT INTO panels (id, document_id, content_markdown) VALUES (?1, ?2, ?3)",
             rusqlite::params![panel_id, doc_id, markdown],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -941,7 +1010,10 @@ mod tests {
         let markdown = "### Action Items\n\nWe need to complete the deployment process for the new release version.\n\n### Key Decisions\n\nThe team agreed to postpone the feature release until after testing is complete.";
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
-        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        };
         let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 2);
@@ -958,7 +1030,10 @@ mod tests {
         let markdown = "### Action Items\n\nComplete the deployment process for the entire team.\n\n---\nChat with Granola for more details.";
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
-        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        };
         let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
@@ -971,7 +1046,10 @@ mod tests {
         let markdown = "### Action Items\n\nOk.\n\n### Key Decisions\n\nWe decided to postpone the feature release until after quality testing is complete.";
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
-        let config = ChunkingConfig { min_chars: 50, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 50,
+            ..ChunkingConfig::default()
+        };
         let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         // "Ok." section is too short, only "Key Decisions" should remain
@@ -992,7 +1070,10 @@ mod tests {
             [markdown],
         ).unwrap();
 
-        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        };
         let chunks = panel_section_chunker(&conn, &config, None).unwrap();
         assert!(chunks.is_empty());
     }
@@ -1003,7 +1084,10 @@ mod tests {
         let markdown = "### Budget Review\n\nThe quarterly budget needs revision for the marketing department.";
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
-        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        };
         let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
@@ -1083,7 +1167,10 @@ mod tests {
         let markdown = "# Announcements\n\nNew hire starting Monday and onboarding schedule is ready.\n\n# Updates\n\nProject is on track for the quarterly deadline.\n\n# Action Items\n\n- Send welcome email to the new team member";
         insert_test_panel(&conn, "panel1", "doc1", markdown);
 
-        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        };
         let chunks = panel_section_chunker(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 3);
@@ -1129,10 +1216,16 @@ mod tests {
 
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
-        assert!(chunks.len() >= 2, "expected a split, got {} chunks", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "expected a split, got {} chunks",
+            chunks.len()
+        );
         for chunk in &chunks {
             assert!(
-                [utt_a, utt_b, utt_c].iter().any(|u| chunk.text.starts_with(u)),
+                [utt_a, utt_b, utt_c]
+                    .iter()
+                    .any(|u| chunk.text.starts_with(u)),
                 "chunk must start at an utterance boundary, got: {:?}",
                 &chunk.text[..chunk.text.len().min(60)]
             );
@@ -1143,7 +1236,10 @@ mod tests {
         assert!(all_text.matches(utt_b).count() >= 2 || all_text.matches(utt_a).count() >= 2);
 
         // Contrast: chars mode slices mid-utterance under the same config.
-        let chars_config = ChunkingConfig { overlap_mode: OverlapMode::Chars, ..config };
+        let chars_config = ChunkingConfig {
+            overlap_mode: OverlapMode::Chars,
+            ..config
+        };
         let chars_chunks = transcript_window_chunker_adaptive(&conn, &chars_config, None).unwrap();
         assert!(
             chars_chunks
@@ -1158,7 +1254,8 @@ mod tests {
         // The trailing utterance is bigger than the overlap budget, so
         // nothing is carried: the next chunk starts with the new utterance.
         let utt_a = "Utterance alpha talks about the quarterly budget and it keeps going for a while longer.";
-        let utt_b = "Utterance bravo is the next one and stands alone with plenty of content of its own.";
+        let utt_b =
+            "Utterance bravo is the next one and stands alone with plenty of content of its own.";
         let utts = vec![
             ("doc1", "2025-01-01T10:00:00Z", utt_a, None),
             ("doc1", "2025-01-01T10:01:00Z", utt_b, None),
@@ -1182,7 +1279,10 @@ mod tests {
 
     #[test]
     fn test_overlap_mode_roundtrip() {
-        assert_eq!(OverlapMode::parse(OverlapMode::Chars.as_str()), Some(OverlapMode::Chars));
+        assert_eq!(
+            OverlapMode::parse(OverlapMode::Chars.as_str()),
+            Some(OverlapMode::Chars)
+        );
         assert_eq!(
             OverlapMode::parse(OverlapMode::Utterances.as_str()),
             Some(OverlapMode::Utterances)
@@ -1204,8 +1304,7 @@ mod tests {
         let config = ChunkingConfig::default();
         let headers = headers_for("doc1", "Meeting: Sync\n\n");
 
-        let chunks =
-            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));
@@ -1219,8 +1318,7 @@ mod tests {
         let config = ChunkingConfig::default();
 
         let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text, None)]);
-        let without =
-            transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+        let without = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
         let with_a = transcript_window_chunker_adaptive(
             &conn,
             &config,
@@ -1243,7 +1341,8 @@ mod tests {
     #[test]
     fn test_adaptive_header_shrinks_chunk_budget() {
         // With a header, header + text must stay within max_chars.
-        let long_text = "This is a fairly long sentence that keeps going with more words. ".repeat(10);
+        let long_text =
+            "This is a fairly long sentence that keeps going with more words. ".repeat(10);
         let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", &long_text, None)]);
         let config = ChunkingConfig {
             target_tokens: 30,
@@ -1256,8 +1355,7 @@ mod tests {
         let header = "Meeting: Budget Review Session\nDate: 2026-02-01\n\n";
         let headers = headers_for("doc1", header);
 
-        let chunks =
-            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
 
         assert!(chunks.len() > 1);
         for chunk in &chunks {
@@ -1277,8 +1375,7 @@ mod tests {
         let config = ChunkingConfig::default();
         let headers = headers_for("other-doc", "Meeting: Other\n\n");
 
-        let chunks =
-            transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, Some(&headers)).unwrap();
 
         assert_eq!(chunks[0].header, None);
     }
@@ -1288,7 +1385,10 @@ mod tests {
         let conn = setup_panel_test_db();
         let markdown = "### Action Items\n\nComplete the deployment process for the entire team.";
         insert_test_panel(&conn, "panel1", "doc1", markdown);
-        let config = ChunkingConfig { min_chars: 20, ..ChunkingConfig::default() };
+        let config = ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        };
         let headers = headers_for("doc1", "Meeting: Sync\n\n");
 
         let chunks = panel_section_chunker(&conn, &config, Some(&headers)).unwrap();
@@ -1393,12 +1493,18 @@ mod tests {
     // Tests for format_utterance_text
     #[test]
     fn test_format_utterance_text_microphone() {
-        assert_eq!(format_utterance_text("hello", Some("microphone")), "[You] hello");
+        assert_eq!(
+            format_utterance_text("hello", Some("microphone")),
+            "[You] hello"
+        );
     }
 
     #[test]
     fn test_format_utterance_text_system() {
-        assert_eq!(format_utterance_text("hello", Some("system")), "[Other] hello");
+        assert_eq!(
+            format_utterance_text("hello", Some("system")),
+            "[Other] hello"
+        );
     }
 
     #[test]
@@ -1408,7 +1514,10 @@ mod tests {
 
     #[test]
     fn test_format_utterance_text_unknown() {
-        assert_eq!(format_utterance_text("hello", Some("unknown_source")), "hello");
+        assert_eq!(
+            format_utterance_text("hello", Some("unknown_source")),
+            "hello"
+        );
     }
 
     #[test]
@@ -1439,16 +1548,35 @@ mod tests {
             overlap_mode: OverlapMode::Chars,
         };
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
-        assert!(chunks.is_empty(), "Empty text with source should produce no chunks, got {}", chunks.len());
+        assert!(
+            chunks.is_empty(),
+            "Empty text with source should produce no chunks, got {}",
+            chunks.len()
+        );
     }
 
     // Integration tests for speaker labels in chunkers
     #[test]
     fn test_adaptive_speaker_labels_in_chunks() {
         let utts = vec![
-            ("doc1", "2025-01-01T10:00:00Z", "I think we should proceed with the plan.", Some("microphone")),
-            ("doc1", "2025-01-01T10:01:00Z", "That sounds good, let me check the timeline.", Some("system")),
-            ("doc1", "2025-01-01T10:02:00Z", "Great, I will send the details after this meeting.", Some("microphone")),
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "I think we should proceed with the plan.",
+                Some("microphone"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "That sounds good, let me check the timeline.",
+                Some("system"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:02:00Z",
+                "Great, I will send the details after this meeting.",
+                Some("microphone"),
+            ),
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig {
@@ -1470,8 +1598,18 @@ mod tests {
     #[test]
     fn test_adaptive_no_labels_when_source_null() {
         let utts = vec![
-            ("doc1", "2025-01-01T10:00:00Z", "First utterance with enough content for chunking.", None),
-            ("doc1", "2025-01-01T10:01:00Z", "Second utterance also with enough content here.", None),
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "First utterance with enough content for chunking.",
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "Second utterance also with enough content here.",
+                None,
+            ),
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig {
@@ -1494,9 +1632,24 @@ mod tests {
     #[test]
     fn test_adaptive_mixed_sources_and_null() {
         let utts = vec![
-            ("doc1", "2025-01-01T10:00:00Z", "Labeled utterance from the user.", Some("microphone")),
-            ("doc1", "2025-01-01T10:01:00Z", "Unlabeled utterance with no source.", None),
-            ("doc1", "2025-01-01T10:02:00Z", "Labeled utterance from other person.", Some("system")),
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                "Labeled utterance from the user.",
+                Some("microphone"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                "Unlabeled utterance with no source.",
+                None,
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:02:00Z",
+                "Labeled utterance from other person.",
+                Some("system"),
+            ),
         ];
         let conn = setup_test_db(&utts);
         let config = ChunkingConfig {
@@ -1510,26 +1663,32 @@ mod tests {
         let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
 
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].text.contains("[You] Labeled utterance from the user."));
-        assert!(chunks[0].text.contains("Unlabeled utterance with no source."));
+        assert!(
+            chunks[0]
+                .text
+                .contains("[You] Labeled utterance from the user.")
+        );
+        assert!(
+            chunks[0]
+                .text
+                .contains("Unlabeled utterance with no source.")
+        );
         assert!(!chunks[0].text.contains("[You] Unlabeled"));
         assert!(!chunks[0].text.contains("[Other] Unlabeled"));
-        assert!(chunks[0].text.contains("[Other] Labeled utterance from other person."));
+        assert!(
+            chunks[0]
+                .text
+                .contains("[Other] Labeled utterance from other person.")
+        );
     }
 
     #[test]
     fn test_content_hash_changes_with_speaker_label() {
         // Same text but different source → different hash
         let text = "This is a test utterance with enough content to meet minimum chunk size requirements for the test.";
-        let utts_mic = vec![
-            ("doc1", "2025-01-01T10:00:00Z", text, Some("microphone")),
-        ];
-        let utts_sys = vec![
-            ("doc1", "2025-01-01T10:00:00Z", text, Some("system")),
-        ];
-        let utts_none = vec![
-            ("doc1", "2025-01-01T10:00:00Z", text, None),
-        ];
+        let utts_mic = vec![("doc1", "2025-01-01T10:00:00Z", text, Some("microphone"))];
+        let utts_sys = vec![("doc1", "2025-01-01T10:00:00Z", text, Some("system"))];
+        let utts_none = vec![("doc1", "2025-01-01T10:00:00Z", text, None)];
         let config = ChunkingConfig::default();
 
         let conn_mic = setup_test_db(&utts_mic);
@@ -1546,5 +1705,4 @@ mod tests {
         assert_ne!(chunks_mic[0].content_hash, chunks_none[0].content_hash);
         assert_ne!(chunks_sys[0].content_hash, chunks_none[0].content_hash);
     }
-
 }

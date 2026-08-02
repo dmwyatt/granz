@@ -41,19 +41,21 @@ fn main() -> Result<()> {
 
     // Resolve the token override once, here at the boundary, so nothing below
     // reads the environment for itself.
-    let token_override = api::token_override(
-        cli.token.as_deref(),
-        std::env::var(api::TOKEN_ENV_VAR).ok(),
-    );
+    let token_override =
+        api::token_override(cli.token.as_deref(), std::env::var(api::TOKEN_ENV_VAR).ok());
 
     // Admin DB commands don't need a database connection
     if let Commands::Admin {
         action: AdminAction::Db { action },
     } = &cli.command
     {
-        let db_path = cli.db.as_deref().map(|p| p.to_path_buf()).unwrap_or_else(|| {
-            db::connection::default_db_path().expect("Failed to get default db path")
-        });
+        let db_path = cli
+            .db
+            .as_deref()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| {
+                db::connection::default_db_path().expect("Failed to get default db path")
+            });
         commands::db::run_with_path(action, &db_path)?;
         return Ok(());
     }
@@ -98,10 +100,19 @@ fn main() -> Result<()> {
         let overrides = embed::config::EmbedOverrides {
             target_tokens: *chunk_target_tokens,
             overlap_tokens: *chunk_overlap_tokens,
-            overlap_mode: overlap_mode.as_deref().and_then(embed::chunker::OverlapMode::parse),
+            overlap_mode: overlap_mode
+                .as_deref()
+                .and_then(embed::chunker::OverlapMode::parse),
             contextual_headers: *contextual_headers,
         };
-        commands::embed::run(&conn, action.as_ref(), *yes, *batch_size, ctx.output_mode, &overrides)?;
+        commands::embed::run(
+            &conn,
+            action.as_ref(),
+            *yes,
+            *batch_size,
+            ctx.output_mode,
+            &overrides,
+        )?;
         return Ok(());
     }
 
@@ -141,13 +152,7 @@ fn main() -> Result<()> {
                 include_deleted: *include_deleted,
             };
             let opts = SearchOptions::from_cli_args(
-                *fast,
-                *min_score,
-                *context,
-                *yes,
-                *limit,
-                *matches,
-                echo,
+                *fast, *min_score, *context, *yes, *limit, *matches, echo,
             );
             let date_range = query::dates::build_date_range(
                 from.as_deref(),
@@ -237,15 +242,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Recent => {
-            commands::meetings::list(
-                &conn,
-                None,
-                None,
-                None,
-                Some("this-week"),
-                false,
-                &ctx,
-            )?;
+            commands::meetings::list(&conn, None, None, None, Some("this-week"), false, &ctx)?;
         }
 
         Commands::Today => {
@@ -253,18 +250,22 @@ fn main() -> Result<()> {
         }
 
         Commands::Info => {
-            let db_path = cli.db.as_deref().map(|p| p.to_path_buf()).unwrap_or_else(|| {
-                db::connection::default_db_path().expect("Failed to get default db path")
-            });
+            let db_path = cli
+                .db
+                .as_deref()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| {
+                    db::connection::default_db_path().expect("Failed to get default db path")
+                });
             commands::info::run(&conn, &db_path, &ctx)?;
         }
 
         Commands::Benchmark { .. } => unreachable!(), // Handled above
-        Commands::Dropbox { .. } => unreachable!(), // Handled above
-        Commands::Auth { .. } => unreachable!(), // Handled above
-        Commands::Update { .. } => unreachable!(), // Handled above
-        Commands::Sync { .. } => unreachable!(), // Handled above
-        Commands::Embed { .. } => unreachable!(), // Handled above
+        Commands::Dropbox { .. } => unreachable!(),   // Handled above
+        Commands::Auth { .. } => unreachable!(),      // Handled above
+        Commands::Update { .. } => unreachable!(),    // Handled above
+        Commands::Sync { .. } => unreachable!(),      // Handled above
+        Commands::Embed { .. } => unreachable!(),     // Handled above
 
         // === Browse Commands ===
         Commands::Browse { action } => {

@@ -18,10 +18,7 @@ fn meetings_list_from_date_filters_correctly() {
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(docs.len(), 2);
 
-    let titles: Vec<&str> = docs
-        .iter()
-        .map(|d| d["title"].as_str().unwrap())
-        .collect();
+    let titles: Vec<&str> = docs.iter().map(|d| d["title"].as_str().unwrap()).collect();
     assert!(!titles.contains(&"Project Alpha Kickoff"));
     assert!(titles.contains(&"Beta Feature Review"));
     assert!(titles.contains(&"Gamma Sprint Planning"));
@@ -49,9 +46,7 @@ fn meetings_list_from_and_to_range() {
     // --from 2025-07-01 --to 2025-08-01 should only include doc-beta
     let output = env
         .cmd_json()
-        .args([
-            "list", "--from", "2025-07-01", "--to", "2025-08-01",
-        ])
+        .args(["list", "--from", "2025-07-01", "--to", "2025-08-01"])
         .output()
         .unwrap();
 
@@ -98,9 +93,7 @@ fn meetings_search_with_date_filter() {
     // Only doc-gamma (2025-08-10) should match
     let output = env
         .cmd_json()
-        .args([
-            "grep", "Sprint", "--in", "titles", "--from", "2025-08-01",
-        ])
+        .args(["grep", "Sprint", "--in", "titles", "--from", "2025-08-01"])
         .output()
         .unwrap();
 
@@ -119,9 +112,7 @@ fn transcripts_search_with_date_filter() {
     // Using search with --context to search transcripts
     let output = env
         .cmd_json()
-        .args([
-            "grep", "kickoff", "--context", "2", "--from", "2025-07-01",
-        ])
+        .args(["grep", "kickoff", "--context", "2", "--from", "2025-07-01"])
         .output()
         .unwrap();
 
@@ -136,7 +127,13 @@ fn calendars_events_with_date_filter() {
     // Filter events to only July
     env.cmd()
         .args([
-            "browse", "calendars", "events", "--from", "2025-07-01", "--to", "2025-08-01",
+            "browse",
+            "calendars",
+            "events",
+            "--from",
+            "2025-07-01",
+            "--to",
+            "2025-08-01",
         ])
         .assert()
         .success()

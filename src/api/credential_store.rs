@@ -149,7 +149,10 @@ impl CredentialStore {
             return Ok(None);
         };
 
-        debug!("Moving credentials from {} into the keychain", path.display());
+        debug!(
+            "Moving credentials from {} into the keychain",
+            path.display()
+        );
         self.save(&credentials)?;
         delete_file(&path)?;
 
@@ -205,14 +208,16 @@ fn open_up_pinned_item(json: &str) {
     match keychain_acl::open_up_existing(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, json.as_bytes()) {
         Ok(true) => debug!("Reset the keychain entry's ACL; later reads will not be challenged"),
         Ok(false) => {}
-        Err(e) => warn!("Could not stop the keychain challenging every read: {:#}", e),
+        Err(e) => warn!(
+            "Could not stop the keychain challenging every read: {:#}",
+            e
+        ),
     }
 }
 
 /// Nothing to do: no other platform ties reads to the caller's code signature.
 #[cfg(not(target_os = "macos"))]
 fn open_up_pinned_item(_json: &str) {}
-
 
 /// Write the secret so the next build of grans can still read it.
 ///

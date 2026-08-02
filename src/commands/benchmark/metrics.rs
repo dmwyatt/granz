@@ -352,11 +352,7 @@ mod tests {
         let a = qs(Some(1), 10, 1.0);
         let b = qs(None, 10, 0.0);
         let c = qs(Some(2), 10, 1.0);
-        let strata = vec![
-            ("exact-term", &a),
-            ("paraphrase", &b),
-            ("exact-term", &c),
-        ];
+        let strata = vec![("exact-term", &a), ("paraphrase", &b), ("exact-term", &c)];
         let by = aggregate_by_stratum(&strata);
 
         assert_eq!(by.len(), 2);

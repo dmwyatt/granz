@@ -583,6 +583,10 @@ mod tests {
         let msg = err.to_string();
 
         assert!(msg.contains("512"), "message should report actual: {}", msg);
-        assert!(msg.contains("1024"), "message should report expected: {}", msg);
+        assert!(
+            msg.contains("1024"),
+            "message should report expected: {}",
+            msg
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! and keep embedding with that scheme instead of silently re-chunking
 //! to its own compiled-in defaults.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rusqlite::Connection;
 
 use super::chunker::{ChunkingConfig, OverlapMode};
@@ -120,10 +120,18 @@ impl EmbedSpec {
         }
         let defaults = Self::default_for(self.chunking.max_tokens);
         let stored_fields = (
-            stored.target_tokens.unwrap_or(defaults.chunking.target_tokens),
-            stored.overlap_tokens.unwrap_or(defaults.chunking.overlap_tokens),
-            stored.overlap_mode.unwrap_or(defaults.chunking.overlap_mode),
-            stored.contextual_headers.unwrap_or(defaults.contextual_headers),
+            stored
+                .target_tokens
+                .unwrap_or(defaults.chunking.target_tokens),
+            stored
+                .overlap_tokens
+                .unwrap_or(defaults.chunking.overlap_tokens),
+            stored
+                .overlap_mode
+                .unwrap_or(defaults.chunking.overlap_mode),
+            stored
+                .contextual_headers
+                .unwrap_or(defaults.contextual_headers),
         );
         self.persisted_fields() != stored_fields
     }
@@ -152,7 +160,10 @@ mod tests {
     fn resolve_stored_defaults_when_nothing_stored() {
         let conn = test_db();
         let spec = EmbedSpec::resolve_stored(&conn, 512);
-        assert_eq!(spec.persisted_fields(), EmbedSpec::default_for(512).persisted_fields());
+        assert_eq!(
+            spec.persisted_fields(),
+            EmbedSpec::default_for(512).persisted_fields()
+        );
     }
 
     #[test]
@@ -190,7 +201,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(spec.persisted_fields(), (192, 48, OverlapMode::Utterances, true));
+        assert_eq!(
+            spec.persisted_fields(),
+            (192, 48, OverlapMode::Utterances, true)
+        );
     }
 
     #[test]

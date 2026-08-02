@@ -37,9 +37,8 @@ pub fn build_doc_headers(conn: &Connection) -> Result<HashMap<String, String>> {
         names.dedup();
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT id, title, created_at FROM documents WHERE deleted_at IS NULL",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, title, created_at FROM documents WHERE deleted_at IS NULL")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -93,7 +92,11 @@ fn assemble_header(title: &str, created_at: Option<&str>, names: &[String]) -> O
         let prefix = "Attendees: ";
         let mut line = String::new();
         for name in names {
-            let addition = if line.is_empty() { name.len() } else { name.len() + 2 };
+            let addition = if line.is_empty() {
+                name.len()
+            } else {
+                name.len() + 2
+            };
             // +2 accounts for this line's '\n' and the trailing blank line.
             if header.len() + prefix.len() + line.len() + addition + 2 > HEADER_MAX_CHARS {
                 break;
@@ -149,7 +152,9 @@ mod tests {
 
         assert_eq!(
             headers.get("doc-1").map(String::as_str),
-            Some("Meeting: AI Strategy Meeting\nDate: 2026-01-20\nAttendees: Alice Smith, Bob Jones, Zoe Adams\n\n")
+            Some(
+                "Meeting: AI Strategy Meeting\nDate: 2026-01-20\nAttendees: Alice Smith, Bob Jones, Zoe Adams\n\n"
+            )
         );
     }
 
@@ -264,8 +269,15 @@ mod tests {
         let headers = build_doc_headers(&conn).unwrap();
 
         let header = headers.get("doc-1").unwrap();
-        assert!(header.len() <= HEADER_MAX_CHARS, "header is {} bytes", header.len());
-        assert!(header.starts_with("Meeting: All Hands\nDate: 2026-02-01\nAttendees: Attendee Number 00"));
+        assert!(
+            header.len() <= HEADER_MAX_CHARS,
+            "header is {} bytes",
+            header.len()
+        );
+        assert!(
+            header
+                .starts_with("Meeting: All Hands\nDate: 2026-02-01\nAttendees: Attendee Number 00")
+        );
         assert!(header.ends_with("\n\n"));
     }
 
@@ -284,7 +296,11 @@ mod tests {
         let headers = build_doc_headers(&conn).unwrap();
 
         let header = headers.get("doc-1").unwrap();
-        assert!(header.len() <= HEADER_MAX_CHARS, "header is {} bytes", header.len());
+        assert!(
+            header.len() <= HEADER_MAX_CHARS,
+            "header is {} bytes",
+            header.len()
+        );
         assert!(header.starts_with("Meeting: Budget"));
         assert!(header.contains("\nDate: 2026-02-01\n"));
         assert!(header.ends_with("\n\n"));

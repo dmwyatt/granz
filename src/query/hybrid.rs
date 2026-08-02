@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::embed::model::Embedder;
 use crate::embed::EmbeddingIndex;
+use crate::embed::model::Embedder;
 use crate::query::dates::DateRange;
-use crate::query::filter::{meeting_filter_matches, semantic_source_filter, SearchTarget};
-use crate::query::fusion::{reciprocal_rank_fusion, FusedDoc, RRF_K};
+use crate::query::filter::{SearchTarget, meeting_filter_matches, semantic_source_filter};
+use crate::query::fusion::{FusedDoc, RRF_K, reciprocal_rank_fusion};
 
 /// How many top documents each retriever contributes to fusion.
 pub const CANDIDATE_POOL: usize = 100;
@@ -63,7 +63,9 @@ pub fn hybrid_ranked(
     date_range: Option<&DateRange>,
     include_deleted: bool,
 ) -> Result<HybridRanking> {
-    let allowed = meeting_filter.map(|f| allowed_meeting_ids(conn, f)).transpose()?;
+    let allowed = meeting_filter
+        .map(|f| allowed_meeting_ids(conn, f))
+        .transpose()?;
     let is_allowed = |id: &str| allowed.as_ref().is_none_or(|set| set.contains(id));
 
     let fts_docs = crate::db::meetings::search_meetings(
@@ -76,8 +78,11 @@ pub fn hybrid_ranked(
         date_range,
         include_deleted,
     )?;
-    let fts_ids: Vec<String> =
-        fts_docs.into_iter().filter_map(|d| d.id).filter(|id| is_allowed(id)).collect();
+    let fts_ids: Vec<String> = fts_docs
+        .into_iter()
+        .filter_map(|d| d.id)
+        .filter(|id| is_allowed(id))
+        .collect();
 
     // No limit: the per-document best chunks must cover every candidate,
     // including FTS-only documents outside the semantic top of the pool.
@@ -215,10 +220,18 @@ mod tests {
         let conn = build_test_db(&hybrid_state());
         let index = hybrid_index();
 
-        let fused =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
-                .unwrap()
-                .fused;
+        let fused = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap()
+        .fused;
 
         // FTS title tier orders by recency: [doc-fts, doc-both].
         // Semantic orders by cosine: [doc-both, doc-sem].
@@ -240,10 +253,18 @@ mod tests {
         let index = hybrid_index();
         let targets = vec![SearchTarget::Titles];
 
-        let fused =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &targets, None, None, false)
-                .unwrap()
-                .fused;
+        let fused = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &targets,
+            None,
+            None,
+            false,
+        )
+        .unwrap()
+        .fused;
 
         // Semantic search is filtered to no embeddable source types, so
         // only the FTS title matches remain, in FTS order.
@@ -264,9 +285,17 @@ mod tests {
             stats: None,
         };
 
-        let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
-                .unwrap();
+        let ranking = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             ranking.best_chunks.get("doc-both").map(|c| c.text.as_str()),
@@ -277,7 +306,10 @@ mod tests {
             Some("strong chunk")
         );
         assert_eq!(
-            ranking.best_chunks.get("doc-sem").map(|c| c.source_type.as_str()),
+            ranking
+                .best_chunks
+                .get("doc-sem")
+                .map(|c| c.source_type.as_str()),
             Some("transcript_window")
         );
         // doc-fts has no chunks, so it has no passage entry.
@@ -289,9 +321,17 @@ mod tests {
         let conn = build_test_db(&hybrid_state());
         let index = hybrid_index();
 
-        let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
-                .unwrap();
+        let ranking = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         // Both kumquat-titled docs come from FTS; the semantic-only doc
         // does not.
@@ -318,11 +358,22 @@ mod tests {
             );
         }
         let conn = build_test_db(&json!({ "documents": docs }));
-        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+        let index = EmbeddingIndex {
+            vectors: Vec::new(),
+            stats: None,
+        };
 
-        let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "kumquat", &all_targets(), None, None, false)
-                .unwrap();
+        let ranking = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ranking.keyword_total, 120);
         assert_eq!(ranking.fused.len(), CANDIDATE_POOL);
@@ -361,7 +412,10 @@ mod tests {
         // pool. The beta doc ranks 121st in FTS (past CANDIDATE_POOL), so
         // only a pushdown before truncation can surface it.
         let conn = build_test_db(&pooled_state_with_beta_target());
-        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+        let index = EmbeddingIndex {
+            vectors: Vec::new(),
+            stats: None,
+        };
 
         let ranking = hybrid_ranked(
             &conn,
@@ -375,7 +429,11 @@ mod tests {
         )
         .unwrap();
 
-        let ids: Vec<&str> = ranking.fused.iter().map(|d| d.document_id.as_str()).collect();
+        let ids: Vec<&str> = ranking
+            .fused
+            .iter()
+            .map(|d| d.document_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["doc-beta-target"]);
         assert_eq!(ranking.keyword_total, 1);
 
@@ -391,10 +449,12 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(!unfiltered
-            .fused
-            .iter()
-            .any(|d| d.document_id == "doc-beta-target"));
+        assert!(
+            !unfiltered
+                .fused
+                .iter()
+                .any(|d| d.document_id == "doc-beta-target")
+        );
     }
 
     #[test]
@@ -416,7 +476,11 @@ mod tests {
         )
         .unwrap();
 
-        let ids: Vec<&str> = ranking.fused.iter().map(|d| d.document_id.as_str()).collect();
+        let ids: Vec<&str> = ranking
+            .fused
+            .iter()
+            .map(|d| d.document_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["doc-sem"]);
         // Nothing FTS-matched survives the filter.
         assert_eq!(ranking.keyword_total, 0);
@@ -431,15 +495,33 @@ mod tests {
 
         // Title substring, different case.
         let by_title = hybrid_ranked(
-            &conn, &FixedEmbedder, &index, "kumquat", &all_targets(), Some("SYNC A"), None, false,
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            Some("SYNC A"),
+            None,
+            false,
         )
         .unwrap();
-        let ids: Vec<&str> = by_title.fused.iter().map(|d| d.document_id.as_str()).collect();
+        let ids: Vec<&str> = by_title
+            .fused
+            .iter()
+            .map(|d| d.document_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["doc-both"]);
 
         // Id substring.
         let by_id = hybrid_ranked(
-            &conn, &FixedEmbedder, &index, "kumquat", &all_targets(), Some("doc-fts"), None, false,
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "kumquat",
+            &all_targets(),
+            Some("doc-fts"),
+            None,
+            false,
         )
         .unwrap();
         let ids: Vec<&str> = by_id.fused.iter().map(|d| d.document_id.as_str()).collect();
@@ -481,11 +563,22 @@ mod tests {
     #[test]
     fn no_matches_fuse_to_empty() {
         let conn = build_test_db(&hybrid_state());
-        let index = EmbeddingIndex { vectors: Vec::new(), stats: None };
+        let index = EmbeddingIndex {
+            vectors: Vec::new(),
+            stats: None,
+        };
 
-        let ranking =
-            hybrid_ranked(&conn, &FixedEmbedder, &index, "zyzzyva", &all_targets(), None, None, false)
-                .unwrap();
+        let ranking = hybrid_ranked(
+            &conn,
+            &FixedEmbedder,
+            &index,
+            "zyzzyva",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         assert!(ranking.fused.is_empty());
         assert!(ranking.best_chunks.is_empty());

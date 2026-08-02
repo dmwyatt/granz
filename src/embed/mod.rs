@@ -149,7 +149,10 @@ pub fn calculate_chunk_size_stats(conn: &Connection) -> Result<Option<ChunkSizeS
 
     // Count problematic chunks
     let max_chars_for_limit = (MODEL_MAX_TOKENS as f64 * CHARS_PER_TOKEN) as usize;
-    let chunks_over_limit = lengths.iter().filter(|&&len| len > max_chars_for_limit).count();
+    let chunks_over_limit = lengths
+        .iter()
+        .filter(|&&len| len > max_chars_for_limit)
+        .count();
 
     // Very small chunks (< 50 chars, roughly < 12 tokens)
     let chunks_very_small = lengths.iter().filter(|&&len| len < 50).count();
@@ -291,7 +294,11 @@ fn desired_chunks_for_spec(conn: &Connection, spec: &config::EmbedSpec) -> Resul
 
     let mut chunks =
         chunker::transcript_window_chunker_adaptive(conn, &spec.chunking, doc_headers)?;
-    chunks.extend(chunker::panel_section_chunker(conn, &spec.chunking, doc_headers)?);
+    chunks.extend(chunker::panel_section_chunker(
+        conn,
+        &spec.chunking,
+        doc_headers,
+    )?);
     chunks.extend(chunker::notes_paragraph_chunker(conn, 20, doc_headers)?);
     Ok(chunks)
 }
@@ -299,7 +306,9 @@ fn desired_chunks_for_spec(conn: &Connection, spec: &config::EmbedSpec) -> Resul
 /// Wipe all embeddings from the database.
 /// Used by `grans embed --force` to force re-embedding.
 pub fn wipe_all_embeddings(conn: &Connection) -> Result<()> {
-    conn.execute_batch("DELETE FROM embeddings; DELETE FROM chunks; DELETE FROM embedding_metadata;")?;
+    conn.execute_batch(
+        "DELETE FROM embeddings; DELETE FROM chunks; DELETE FROM embedding_metadata;",
+    )?;
     Ok(())
 }
 
@@ -322,7 +331,12 @@ pub struct EmbeddingIndex {
 }
 
 impl EmbeddingIndex {
-    pub fn search(&self, query_vec: &[f32], min_score: f32, source_type_filter: Option<&[&str]>) -> Vec<SemanticSearchResult> {
+    pub fn search(
+        &self,
+        query_vec: &[f32],
+        min_score: f32,
+        source_type_filter: Option<&[&str]>,
+    ) -> Vec<SemanticSearchResult> {
         search::rank_results(query_vec, &self.vectors, min_score, source_type_filter)
     }
 
@@ -355,7 +369,12 @@ pub fn ensure_embeddings(
 
     if desired_chunks.is_empty() {
         if !model_consistent {
-            store::set_model_metadata(conn, embedder.model_name(), embedder.dimension(), embedder.max_length())?;
+            store::set_model_metadata(
+                conn,
+                embedder.model_name(),
+                embedder.dimension(),
+                embedder.max_length(),
+            )?;
         }
         eprintln!("[grans] No embeddable content found.");
         return Ok(EmbeddingIndex {
@@ -465,7 +484,12 @@ pub fn ensure_embeddings(
     };
 
     // Store model metadata and the chunking scheme the chunks now reflect
-    store::set_model_metadata(conn, embedder.model_name(), embedder.dimension(), embedder.max_length())?;
+    store::set_model_metadata(
+        conn,
+        embedder.model_name(),
+        embedder.dimension(),
+        embedder.max_length(),
+    )?;
     store::set_chunking_metadata(conn, spec)?;
 
     // Load all vectors for search
@@ -493,14 +517,21 @@ fn filter_results_by_date(
 
     // Query documents table to get created_at dates
     let placeholders = doc_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let deleted_filter = if include_deleted { "" } else { " AND deleted_at IS NULL" };
+    let deleted_filter = if include_deleted {
+        ""
+    } else {
+        " AND deleted_at IS NULL"
+    };
     let sql = format!(
         "SELECT id, created_at FROM documents WHERE id IN ({}){}",
         placeholders, deleted_filter
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::types::ToSql> = doc_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    let params: Vec<&dyn rusqlite::types::ToSql> = doc_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
 
     let mut valid_doc_ids = HashSet::new();
     let rows = stmt.query_map(params.as_slice(), |row| {
@@ -605,8 +636,8 @@ pub fn semantic_search_with_embedder_and_limit(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::model::MockEmbedder;
+    use super::*;
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -618,7 +649,11 @@ mod tests {
         // First ensure the document exists (for foreign key constraint)
         conn.execute(
             "INSERT OR IGNORE INTO documents (id, title, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![doc_id, format!("Test Doc {}", doc_id), "2025-01-01T00:00:00Z"],
+            rusqlite::params![
+                doc_id,
+                format!("Test Doc {}", doc_id),
+                "2025-01-01T00:00:00Z"
+            ],
         )
         .unwrap();
 
@@ -646,7 +681,13 @@ mod tests {
         let conn = setup_test_db();
         let embedder = MockEmbedder::default();
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert!(index.is_empty());
     }
 
@@ -654,13 +695,23 @@ mod tests {
     fn test_ensure_embeddings_creates_vectors() {
         let conn = setup_test_db();
         // Use content long enough to pass min_chars threshold (50 chars)
-        insert_utterances(&conn, "doc1", &[
-            "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding."
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert!(!index.is_empty());
     }
 
@@ -668,19 +719,35 @@ mod tests {
     fn test_ensure_embeddings_incremental() {
         let conn = setup_test_db();
         // Use content long enough to pass min_chars threshold
-        insert_utterances(&conn, "doc1", &[
-            "First document content that is long enough to pass the minimum character threshold for embedding chunks."
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "First document content that is long enough to pass the minimum character threshold for embedding chunks.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
 
         // First run
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         let count1 = index.vectors.len();
         assert!(count1 > 0);
 
         // Second run with same data — should not re-embed
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert_eq!(index.vectors.len(), count1);
 
         // Add more data (with document first for foreign key)
@@ -696,7 +763,13 @@ mod tests {
         )
         .unwrap();
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert!(index.vectors.len() > count1);
     }
 
@@ -707,15 +780,22 @@ mod tests {
         insert_utterances(
             &conn,
             "doc1",
-            &["We had a detailed deployment strategy discussion today about how to deploy the application to production servers efficiently."],
+            &[
+                "We had a detailed deployment strategy discussion today about how to deploy the application to production servers efficiently.",
+            ],
         );
         insert_utterances(
             &conn,
             "doc2",
-            &["We discussed lunch plans for tomorrow and various options for what we should eat together as a team."],
+            &[
+                "We discussed lunch plans for tomorrow and various options for what we should eat together as a team.",
+            ],
         );
 
-        let embedder = MockEmbedder { dim: 8, max_length: 512 };
+        let embedder = MockEmbedder {
+            dim: 8,
+            max_length: 512,
+        };
 
         let (results, total_count) =
             semantic_search_with_embedder(&conn, "deploy", &embedder).unwrap();
@@ -736,11 +816,17 @@ mod tests {
             insert_utterances(
                 &conn,
                 &format!("doc{}", i),
-                &[&format!("This is document {} with content about topic {} that is long enough to meet the minimum character threshold for embedding.", i, i)],
+                &[&format!(
+                    "This is document {} with content about topic {} that is long enough to meet the minimum character threshold for embedding.",
+                    i, i
+                )],
             );
         }
 
-        let embedder = MockEmbedder { dim: 8, max_length: 512 };
+        let embedder = MockEmbedder {
+            dim: 8,
+            max_length: 512,
+        };
 
         // Search with limit=2
         let (results, total_count) =
@@ -767,17 +853,29 @@ mod tests {
     #[test]
     fn test_ensure_embeddings_returns_stats_when_embedding() {
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &[
-            "This is document content that is long enough to meet the minimum character threshold for the embedding chunker."
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is document content that is long enough to meet the minimum character threshold for the embedding chunker.",
+            ],
+        );
 
         let embedder = MockEmbedder {
             dim: 4,
             ..Default::default()
         };
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
-        let stats = index.stats.expect("stats should be present after embedding");
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+        let stats = index
+            .stats
+            .expect("stats should be present after embedding");
         assert!(stats.chunks_embedded > 0);
         assert!(stats.elapsed_secs >= 0.0);
         assert!(stats.chunks_per_sec >= 0.0);
@@ -786,9 +884,13 @@ mod tests {
     #[test]
     fn test_ensure_embeddings_no_stats_when_already_embedded() {
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &[
-            "This is document content that is long enough to meet the minimum character threshold for the embedding chunker."
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is document content that is long enough to meet the minimum character threshold for the embedding chunker.",
+            ],
+        );
 
         let embedder = MockEmbedder {
             dim: 4,
@@ -796,11 +898,26 @@ mod tests {
         };
 
         // First run embeds everything
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
 
         // Second run — nothing to embed
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
-        assert!(index.stats.is_none(), "stats should be None when no new chunks embedded");
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+        assert!(
+            index.stats.is_none(),
+            "stats should be None when no new chunks embedded"
+        );
     }
 
     #[test]
@@ -811,22 +928,41 @@ mod tests {
             ..Default::default()
         };
 
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
-        assert!(index.stats.is_none(), "stats should be None when no content exists");
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+        assert!(
+            index.stats.is_none(),
+            "stats should be None when no content exists"
+        );
     }
 
     #[test]
     fn test_orphan_cleanup() {
         let conn = setup_test_db();
         // Use content long enough to pass min_chars threshold
-        insert_utterances(&conn, "doc1", &[
-            "This is document content that is long enough to meet the minimum character threshold for the embedding chunker."
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is document content that is long enough to meet the minimum character threshold for the embedding chunker.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
 
         // First run creates embeddings for doc1
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert_eq!(index.vectors.len(), 1);
 
         // Remove doc1's utterances
@@ -834,7 +970,13 @@ mod tests {
             .unwrap();
 
         // Re-run — should clean up orphan
-        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        let index = ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert!(index.is_empty());
     }
 
@@ -845,10 +987,14 @@ mod tests {
         // back to defaults when a search/benchmark path opens it, because
         // those paths resolve the spec from stored metadata.
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &[
-            "First utterance about the deployment strategy with enough content to chunk.",
-            "Second utterance continuing the discussion with plenty of additional words here.",
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "First utterance about the deployment strategy with enough content to chunk.",
+                "Second utterance continuing the discussion with plenty of additional words here.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
         let variant = config::EmbedSpec {
@@ -875,15 +1021,13 @@ mod tests {
         assert_eq!(index.vectors.len(), variant_count);
 
         // And status agrees: nothing pending, no scheme-change warning.
-        let status =
-            get_embedding_status(&conn, embedder.model_name(), &resolved).unwrap();
+        let status = get_embedding_status(&conn, embedder.model_name(), &resolved).unwrap();
         assert_eq!(status.pending_chunks, 0);
         assert!(!status.chunking_changed_warning);
 
         // A default-spec embed WOULD be a scheme change, and status says so.
         let default_spec = config::EmbedSpec::default_for(512);
-        let status =
-            get_embedding_status(&conn, embedder.model_name(), &default_spec).unwrap();
+        let status = get_embedding_status(&conn, embedder.model_name(), &default_spec).unwrap();
         assert!(status.chunking_changed_warning);
         assert!(status.pending_chunks > 0);
     }
@@ -893,9 +1037,11 @@ mod tests {
         // With headers on, the text sent to the embedder carries the
         // meeting context while the stored chunk text stays raw.
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &[
-            "A single utterance long enough to form a chunk for the header test.",
-        ]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &["A single utterance long enough to form a chunk for the header test."],
+        );
 
         let embedder = MockEmbedder::default();
         let spec = config::EmbedSpec {
@@ -926,10 +1072,10 @@ mod tests {
         // 10 elements (indices 0-9)
         // Formula: idx = ((len-1) * p / 100).round()
         let sorted = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-        assert_eq!(percentile(&sorted, 0.0), 10);   // idx = 0
-        assert_eq!(percentile(&sorted, 10.0), 20);  // idx = round(9 * 0.1) = 1
-        assert_eq!(percentile(&sorted, 50.0), 60);  // idx = round(9 * 0.5) = 5
-        assert_eq!(percentile(&sorted, 90.0), 90);  // idx = round(9 * 0.9) = 8
+        assert_eq!(percentile(&sorted, 0.0), 10); // idx = 0
+        assert_eq!(percentile(&sorted, 10.0), 20); // idx = round(9 * 0.1) = 1
+        assert_eq!(percentile(&sorted, 50.0), 60); // idx = round(9 * 0.5) = 5
+        assert_eq!(percentile(&sorted, 90.0), 90); // idx = round(9 * 0.9) = 8
         assert_eq!(percentile(&sorted, 100.0), 100); // idx = 9
     }
 
@@ -1031,13 +1177,29 @@ mod tests {
     #[test]
     fn test_embedding_status_includes_max_length() {
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "Hello world, this is a test with enough content to meet minimum chunk size requirements.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
 
-        let status =
-            get_embedding_status(&conn, embedder.model_name(), &config::EmbedSpec::default_for(512)).unwrap();
+        let status = get_embedding_status(
+            &conn,
+            embedder.model_name(),
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert_eq!(status.max_length, Some(512));
         assert!(!status.legacy_max_length_warning);
     }
@@ -1054,7 +1216,9 @@ mod tests {
         )
         .unwrap();
 
-        let status = get_embedding_status(&conn, "mock-embedder", &config::EmbedSpec::default_for(512)).unwrap();
+        let status =
+            get_embedding_status(&conn, "mock-embedder", &config::EmbedSpec::default_for(512))
+                .unwrap();
         assert_eq!(status.max_length, None);
         // Model exists but no max_length -> warning
         assert!(status.legacy_max_length_warning);
@@ -1064,7 +1228,9 @@ mod tests {
     fn test_embedding_status_no_warning_when_no_model() {
         let conn = setup_test_db();
         // No embeddings at all - no model name, no max_length
-        let status = get_embedding_status(&conn, "mock-embedder", &config::EmbedSpec::default_for(512)).unwrap();
+        let status =
+            get_embedding_status(&conn, "mock-embedder", &config::EmbedSpec::default_for(512))
+                .unwrap();
         assert_eq!(status.max_length, None);
         // No model means no warning (nothing to warn about)
         assert!(!status.legacy_max_length_warning);
@@ -1075,12 +1241,29 @@ mod tests {
     #[test]
     fn test_embedding_status_matching_model_no_rebuild() {
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "Hello world, this is a test with enough content to meet minimum chunk size requirements.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
 
-        let status = get_embedding_status(&conn, embedder.model_name(), &config::EmbedSpec::default_for(512)).unwrap();
+        let status = get_embedding_status(
+            &conn,
+            embedder.model_name(),
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
         assert!(!status.model_changed_warning);
         assert_eq!(status.pending_chunks, 0);
     }
@@ -1088,12 +1271,26 @@ mod tests {
     #[test]
     fn test_embedding_status_model_change_marks_all_pending() {
         let conn = setup_test_db();
-        insert_utterances(&conn, "doc1", &["Hello world, this is a test with enough content to meet minimum chunk size requirements."]);
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "Hello world, this is a test with enough content to meet minimum chunk size requirements.",
+            ],
+        );
 
         let embedder = MockEmbedder::default();
-        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &config::EmbedSpec::default_for(512)).unwrap();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
 
-        let status = get_embedding_status(&conn, "other-model", &config::EmbedSpec::default_for(512)).unwrap();
+        let status =
+            get_embedding_status(&conn, "other-model", &config::EmbedSpec::default_for(512))
+                .unwrap();
         assert!(status.model_changed_warning);
         assert_eq!(status.pending_chunks, status.total_chunks);
         assert_eq!(status.embedded_chunks, 0);

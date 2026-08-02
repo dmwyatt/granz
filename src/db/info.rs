@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::db::schema::get_schema_version;
-use crate::embed::{calculate_chunk_size_stats, ChunkSizeStats};
+use crate::embed::{ChunkSizeStats, calculate_chunk_size_stats};
 
 #[derive(Debug, Serialize)]
 pub struct DbInfo {
@@ -61,14 +61,12 @@ pub fn get_info_db_only(conn: &Connection, db_path: &Path) -> Result<DbInfo> {
     )?;
 
     // Other counts
-    let total_people: i64 =
-        conn.query_row("SELECT COUNT(*) FROM people", [], |row| row.get(0))?;
+    let total_people: i64 = conn.query_row("SELECT COUNT(*) FROM people", [], |row| row.get(0))?;
 
     let total_calendars: i64 =
         conn.query_row("SELECT COUNT(*) FROM calendars", [], |row| row.get(0))?;
 
-    let total_events: i64 =
-        conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+    let total_events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
 
     let total_templates: i64 = conn.query_row(
         "SELECT COUNT(*) FROM templates WHERE deleted_at IS NULL",
@@ -84,11 +82,10 @@ pub fn get_info_db_only(conn: &Connection, db_path: &Path) -> Result<DbInfo> {
 
     let total_panels: i64 = crate::db::panels::count_panels(conn).unwrap_or(0);
 
-    let total_utterances: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transcript_utterances",
-        [],
-        |row| row.get(0),
-    )?;
+    let total_utterances: i64 =
+        conn.query_row("SELECT COUNT(*) FROM transcript_utterances", [], |row| {
+            row.get(0)
+        })?;
 
     // Embedding stats
     let total_chunks: i64 = conn
@@ -109,9 +106,7 @@ pub fn get_info_db_only(conn: &Connection, db_path: &Path) -> Result<DbInfo> {
 
     let chunk_size_stats = calculate_chunk_size_stats(conn).unwrap_or(None);
 
-    let db_size_bytes = std::fs::metadata(db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
     let schema_version = get_schema_version(conn).unwrap_or(0);
 
@@ -189,8 +184,14 @@ mod tests {
         assert_eq!(info.total_documents, 2);
         assert_eq!(info.documents_with_transcripts, 1);
         assert_eq!(info.documents_without_transcripts, 1);
-        assert_eq!(info.earliest_document, Some("2024-01-15T10:00:00Z".to_string()));
-        assert_eq!(info.latest_document, Some("2024-06-20T10:00:00Z".to_string()));
+        assert_eq!(
+            info.earliest_document,
+            Some("2024-01-15T10:00:00Z".to_string())
+        );
+        assert_eq!(
+            info.latest_document,
+            Some("2024-06-20T10:00:00Z".to_string())
+        );
         assert_eq!(info.total_people, 1);
         assert_eq!(info.total_calendars, 1);
         assert_eq!(info.total_events, 0);

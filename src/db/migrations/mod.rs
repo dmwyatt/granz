@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{M, Migrations};
 
 /// All migrations, in order. Each migration brings the schema from version N to N+1.
 /// The `user_version` pragma is used automatically by rusqlite_migration to track
@@ -45,7 +45,8 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
     let m = migrations();
 
     // Check if there are pending migrations
-    let current_version = m.current_version(&conn)
+    let current_version = m
+        .current_version(&conn)
         .context("Failed to check current schema version")?;
 
     // Check if we need to apply migrations by comparing current vs target
@@ -60,7 +61,10 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         rusqlite_migration::SchemaVersion::Outside(_) => false,
     };
 
-    if needs_migration && db_exists && !matches!(current_version, rusqlite_migration::SchemaVersion::NoneSet) {
+    if needs_migration
+        && db_exists
+        && !matches!(current_version, rusqlite_migration::SchemaVersion::NoneSet)
+    {
         backup_database(db_path)?;
         eprintln!("[grans] Applying database migration(s)...");
     } else if needs_migration && !db_exists {
@@ -76,7 +80,8 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
 /// Get the current schema version from the database.
 pub fn get_schema_version(conn: &Connection) -> Result<usize> {
     let m = migrations();
-    let version = m.current_version(conn)
+    let version = m
+        .current_version(conn)
         .context("Failed to get schema version")?;
 
     Ok(match version {
@@ -410,11 +415,8 @@ mod tests {
         assert_eq!(attempts, 1);
 
         // Verify panels_fts virtual table exists and is searchable
-        conn.execute(
-            "INSERT INTO panels_fts(panels_fts) VALUES('rebuild')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO panels_fts(panels_fts) VALUES('rebuild')", [])
+            .unwrap();
 
         let fts_count: i64 = conn
             .query_row(
@@ -442,27 +444,20 @@ mod tests {
 
         // Verify title can be retrieved as String (not Option<String>)
         let title: String = conn
-            .query_row(
-                "SELECT title FROM documents WHERE id = 'doc1'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT title FROM documents WHERE id = 'doc1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(title, "Test Doc");
 
         // Insert a document with empty string title - should work fine
-        conn.execute(
-            "INSERT INTO documents (id, title) VALUES ('doc2', '')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO documents (id, title) VALUES ('doc2', '')", [])
+            .unwrap();
 
         let title: String = conn
-            .query_row(
-                "SELECT title FROM documents WHERE id = 'doc2'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT title FROM documents WHERE id = 'doc2'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(title, "");
     }
@@ -504,7 +499,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(raw_json, Some("{\"id\":\"doc1\",\"title\":\"Test Doc\"}".to_string()));
+        assert_eq!(
+            raw_json,
+            Some("{\"id\":\"doc1\",\"title\":\"Test Doc\"}".to_string())
+        );
 
         // Verify NULL is allowed
         conn.execute(
@@ -538,14 +536,29 @@ mod tests {
         .unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM templates WHERE id = 't1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT raw_json FROM templates WHERE id = 't1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(raw_json, Some("{\"id\":\"t1\",\"title\":\"Test Template\"}".to_string()));
+        assert_eq!(
+            raw_json,
+            Some("{\"id\":\"t1\",\"title\":\"Test Template\"}".to_string())
+        );
 
         // Templates: NULL is allowed
-        conn.execute("INSERT INTO templates (id, title) VALUES ('t2', 'No Raw')", []).unwrap();
+        conn.execute(
+            "INSERT INTO templates (id, title) VALUES ('t2', 'No Raw')",
+            [],
+        )
+        .unwrap();
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM templates WHERE id = 't2'", [], |row| row.get(0))
+            .query_row(
+                "SELECT raw_json FROM templates WHERE id = 't2'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert!(raw_json.is_none());
 
@@ -557,14 +570,22 @@ mod tests {
         .unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM recipes WHERE id = 'r1'", [], |row| row.get(0))
+            .query_row("SELECT raw_json FROM recipes WHERE id = 'r1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(raw_json, Some("{\"id\":\"r1\",\"slug\":\"test-recipe\"}".to_string()));
+        assert_eq!(
+            raw_json,
+            Some("{\"id\":\"r1\",\"slug\":\"test-recipe\"}".to_string())
+        );
 
         // Recipes: NULL is allowed
-        conn.execute("INSERT INTO recipes (id, slug) VALUES ('r2', 'no-raw')", []).unwrap();
+        conn.execute("INSERT INTO recipes (id, slug) VALUES ('r2', 'no-raw')", [])
+            .unwrap();
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM recipes WHERE id = 'r2'", [], |row| row.get(0))
+            .query_row("SELECT raw_json FROM recipes WHERE id = 'r2'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!(raw_json.is_none());
 
@@ -576,14 +597,25 @@ mod tests {
         .unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM events WHERE id = 'e1'", [], |row| row.get(0))
+            .query_row("SELECT raw_json FROM events WHERE id = 'e1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(raw_json, Some("{\"id\":\"e1\",\"summary\":\"Test Event\"}".to_string()));
+        assert_eq!(
+            raw_json,
+            Some("{\"id\":\"e1\",\"summary\":\"Test Event\"}".to_string())
+        );
 
         // Events: NULL is allowed
-        conn.execute("INSERT INTO events (id, summary) VALUES ('e2', 'No Raw')", []).unwrap();
+        conn.execute(
+            "INSERT INTO events (id, summary) VALUES ('e2', 'No Raw')",
+            [],
+        )
+        .unwrap();
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM events WHERE id = 'e2'", [], |row| row.get(0))
+            .query_row("SELECT raw_json FROM events WHERE id = 'e2'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!(raw_json.is_none());
     }
@@ -876,7 +908,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(chat_url, Some("https://notes.granola.ai/t/abc123".to_string()));
+        assert_eq!(
+            chat_url,
+            Some("https://notes.granola.ai/t/abc123".to_string())
+        );
 
         // Verify NULL is allowed
         conn.execute(
@@ -929,8 +964,11 @@ mod tests {
 
         // Exactly the shape an interrupted sync left behind: source rows
         // committed, the trailing FTS insert never reached.
-        conn.execute("INSERT INTO documents (id, title) VALUES ('doc1', 'Test')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc1', 'Test')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO transcript_utterances (id, document_id, text)
              VALUES ('u1', 'doc1', 'deployment rollback')",
@@ -961,8 +999,11 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let conn = open_and_migrate(&db_path).unwrap();
 
-        conn.execute("INSERT INTO documents (id, title) VALUES ('doc1', 'Test')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc1', 'Test')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO transcript_utterances (id, document_id, text)
              VALUES ('u1', 'doc1', 'deployment rollback')",

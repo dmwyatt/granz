@@ -30,7 +30,9 @@ impl CandidateDumpWriter {
     pub(super) fn create(path: &Path) -> Result<Self> {
         let file = File::create(path)
             .with_context(|| format!("Failed to create dump file: {}", path.display()))?;
-        Ok(Self { writer: BufWriter::new(file) })
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
     }
 
     pub(super) fn write_query(
@@ -73,8 +75,15 @@ mod tests {
         let path = dir.path().join("dump.jsonl");
 
         let mut writer = CandidateDumpWriter::create(&path).unwrap();
-        writer.write_query("first query", &[candidate("doc-a", 1), candidate("doc-b", 2)]).unwrap();
-        writer.write_query("second query", &[candidate("doc-c", 1)]).unwrap();
+        writer
+            .write_query(
+                "first query",
+                &[candidate("doc-a", 1), candidate("doc-b", 2)],
+            )
+            .unwrap();
+        writer
+            .write_query("second query", &[candidate("doc-c", 1)])
+            .unwrap();
         writer.finish().unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
@@ -87,7 +96,10 @@ mod tests {
         assert_eq!(first["candidates"][0]["document_id"], "doc-a");
         assert_eq!(first["candidates"][0]["fused_rank"], 1);
         assert_eq!(first["candidates"][0]["fused_score"], 0.016);
-        assert_eq!(first["candidates"][0]["passage"], "Title doc-a\n\nchunk text");
+        assert_eq!(
+            first["candidates"][0]["passage"],
+            "Title doc-a\n\nchunk text"
+        );
         assert_eq!(first["candidates"][0]["title"], "Title doc-a");
         assert_eq!(first["candidates"][0]["created_at"], "2026-01-02T10:00:00Z");
         assert!((first["candidates"][0]["rerank_score"].as_f64().unwrap() - 0.9).abs() < 1e-6);

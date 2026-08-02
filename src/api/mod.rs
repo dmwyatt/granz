@@ -16,6 +16,6 @@ pub mod local_store;
 mod token_store;
 pub mod types;
 
-pub use auth::{resolve_token, token_override, TOKEN_ENV_VAR};
-pub use client::{fetch_panels, fetch_transcript, ApiClient, ApiError};
+pub use auth::{TOKEN_ENV_VAR, resolve_token, token_override};
+pub use client::{ApiClient, ApiError, fetch_panels, fetch_transcript};
 pub use types::ApiPanel;

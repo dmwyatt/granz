@@ -43,8 +43,10 @@ pub fn shape_and_page<'a>(
         let page = apply_limit(docs, limit);
         Ok((shape(&page)?, total))
     } else {
-        let survivors: Vec<_> =
-            shape(&docs)?.into_iter().filter(|m| m.total_matches > 0).collect();
+        let survivors: Vec<_> = shape(&docs)?
+            .into_iter()
+            .filter(|m| m.total_matches > 0)
+            .collect();
         let total = survivors.len();
         Ok((apply_limit(survivors, limit), total))
     }
@@ -70,11 +72,17 @@ mod tests {
     fn ranked_docs(conn: &Connection) -> Vec<(Document, Option<f32>)> {
         let docs = crate::db::meetings::get_meetings_by_ids(
             &conn,
-            &["doc-c".to_string(), "doc-a".to_string(), "doc-b".to_string()],
+            &[
+                "doc-c".to_string(),
+                "doc-a".to_string(),
+                "doc-b".to_string(),
+            ],
         )
         .unwrap();
-        let mut by_id: std::collections::HashMap<String, Document> =
-            docs.into_iter().map(|d| (d.id.clone().unwrap(), d)).collect();
+        let mut by_id: std::collections::HashMap<String, Document> = docs
+            .into_iter()
+            .map(|d| (d.id.clone().unwrap(), d))
+            .collect();
         vec![
             (by_id.remove("doc-c").unwrap(), Some(0.5)),
             (by_id.remove("doc-a").unwrap(), Some(0.9)),
@@ -82,8 +90,15 @@ mod tests {
         ]
     }
 
-    fn plain_facts<'a>(_: &Document, score: Option<f32>) -> crate::query::evidence::RankingFacts<'a> {
-        crate::query::evidence::RankingFacts { keyword: true, best_chunk: None, score }
+    fn plain_facts<'a>(
+        _: &Document,
+        score: Option<f32>,
+    ) -> crate::query::evidence::RankingFacts<'a> {
+        crate::query::evidence::RankingFacts {
+            keyword: true,
+            best_chunk: None,
+            score,
+        }
     }
 
     #[test]

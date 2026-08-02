@@ -52,8 +52,8 @@ impl SyncConfig {
             fs::create_dir_all(parent)?;
         }
 
-        let content =
-            toml::to_string_pretty(self).map_err(|e| SyncError::Config(format!("serialize: {}", e)))?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| SyncError::Config(format!("serialize: {}", e)))?;
 
         // Write to temp file first for atomic operation
         let temp_path = path.with_extension("toml.tmp");

@@ -14,8 +14,9 @@ use crate::query::rerank::RerankCandidate;
 /// Words too common to signal which meeting a query is about. The Phase 5
 /// sweep showed the boost is insensitive to the exact list, so it stays
 /// minimal.
-const STOPWORDS: &[&str] =
-    &["a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "and", "or"];
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "and", "or",
+];
 
 /// Weights for the ordering score. Defaults are the winners of recorded
 /// sweeps on the 93-query golden set; a weight of 0.0 disables that
@@ -44,14 +45,20 @@ pub struct RankingConfig {
 
 impl Default for RankingConfig {
     fn default() -> Self {
-        Self { fusion_blend_weight: 30.0, title_boost_weight: 0.2 }
+        Self {
+            fusion_blend_weight: 30.0,
+            title_boost_weight: 0.2,
+        }
     }
 }
 
 impl RankingConfig {
     /// Apply experiment-flag overrides; `None` keeps the default.
     pub fn with_overrides(self, title_boost_weight: Option<f32>) -> Self {
-        Self { title_boost_weight: title_boost_weight.unwrap_or(self.title_boost_weight), ..self }
+        Self {
+            title_boost_weight: title_boost_weight.unwrap_or(self.title_boost_weight),
+            ..self
+        }
     }
 }
 
@@ -65,7 +72,9 @@ pub struct RankingContext {
 
 impl RankingContext {
     pub fn load(conn: &Connection) -> Result<Self> {
-        Ok(Self { title_counts: crate::db::meetings::title_series_counts(conn)? })
+        Ok(Self {
+            title_counts: crate::db::meetings::title_series_counts(conn)?,
+        })
     }
 }
 
@@ -99,8 +108,8 @@ fn title_signal(query_tokens: &HashSet<String>, title: Option<&str>, series_coun
     if title_tokens.is_empty() {
         return 0.0;
     }
-    let overlap = query_tokens.intersection(&title_tokens).count() as f64
-        / query_tokens.len() as f64;
+    let overlap =
+        query_tokens.intersection(&title_tokens).count() as f64 / query_tokens.len() as f64;
     (overlap / f64::from(1 + series_count).log2()) as f32
 }
 
@@ -159,7 +168,10 @@ mod tests {
     }
 
     fn no_boost() -> RankingConfig {
-        RankingConfig { title_boost_weight: 0.0, ..Default::default() }
+        RankingConfig {
+            title_boost_weight: 0.0,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -182,8 +194,10 @@ mod tests {
     #[test]
     fn content_tokens_drop_stopwords_short_tokens_and_case() {
         let tokens = content_tokens("The Kumquat & Q1 Review of x");
-        let expected: HashSet<String> =
-            ["kumquat", "q1", "review"].into_iter().map(str::to_string).collect();
+        let expected: HashSet<String> = ["kumquat", "q1", "review"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         assert_eq!(tokens, expected);
     }
 
@@ -196,8 +210,10 @@ mod tests {
 
     #[test]
     fn title_signal_is_overlap_fraction_damped_by_series() {
-        let q: HashSet<String> =
-            ["kumquat", "sync"].into_iter().map(str::to_string).collect();
+        let q: HashSet<String> = ["kumquat", "sync"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         // Full overlap, unique title: log2(1 + 1) = 1, no damping.
         assert_eq!(title_signal(&q, Some("Kumquat Sync"), 1), 1.0);
         // Full overlap in a 3-meeting series: damped by log2(4) = 2.
@@ -225,7 +241,10 @@ mod tests {
             cand("c", 0.0, -1.5, Some("Unrelated")),
         ] {
             let expected = c.rerank_score + 30.0 * c.fused_score as f32;
-            assert_eq!(ordering_score(&c, &q, &ctx, &cfg).to_bits(), expected.to_bits());
+            assert_eq!(
+                ordering_score(&c, &q, &ctx, &cfg).to_bits(),
+                expected.to_bits()
+            );
         }
     }
 
@@ -237,7 +256,10 @@ mod tests {
             cand("titled", 0.016, 0.5, Some("Kumquat Sync")),
         ];
         let ctx = RankingContext::default();
-        let cfg = RankingConfig { title_boost_weight: 0.2, ..Default::default() };
+        let cfg = RankingConfig {
+            title_boost_weight: 0.2,
+            ..Default::default()
+        };
 
         let sorted = sort_candidates(candidates, "kumquat sync", &ctx, &cfg);
 
@@ -258,7 +280,10 @@ mod tests {
                 ("kumquat deep dive".to_string(), 1),
             ]),
         };
-        let cfg = RankingConfig { title_boost_weight: 0.2, ..Default::default() };
+        let cfg = RankingConfig {
+            title_boost_weight: 0.2,
+            ..Default::default()
+        };
 
         let sorted = sort_candidates(candidates, "kumquat", &ctx, &cfg);
 
@@ -272,8 +297,12 @@ mod tests {
             cand("second", 0.02, 0.5, None),
             cand("third", 0.02, 0.5, None),
         ];
-        let sorted =
-            sort_candidates(candidates, "kumquat", &RankingContext::default(), &no_boost());
+        let sorted = sort_candidates(
+            candidates,
+            "kumquat",
+            &RankingContext::default(),
+            &no_boost(),
+        );
         let ids: Vec<&str> = sorted.iter().map(|c| c.document_id.as_str()).collect();
         assert_eq!(ids, vec!["first", "second", "third"]);
     }

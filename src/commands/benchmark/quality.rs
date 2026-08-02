@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +134,10 @@ pub struct ModeRun {
 
 impl ModeRun {
     fn best_ranks(&self) -> Vec<Option<usize>> {
-        self.query_results.iter().map(|o| o.score.best_rank).collect()
+        self.query_results
+            .iter()
+            .map(|o| o.score.best_rank)
+            .collect()
     }
 }
 
@@ -225,7 +228,9 @@ fn record_runs(runs: &[ModeRun], args: &QualityArgs) -> Result<()> {
     let binary = format!("grans {}", env!("GRANS_VERSION"));
     let db = match args.db {
         Some(path) => path.display().to_string(),
-        None => crate::db::connection::default_db_path()?.display().to_string(),
+        None => crate::db::connection::default_db_path()?
+            .display()
+            .to_string(),
     };
 
     let note = ranking_note(&args.ranking, args.note);
@@ -275,7 +280,11 @@ fn parse_benchmark(content: &str) -> Result<Vec<BenchmarkQuery>> {
             bail!("Benchmark query {} has an empty query string", i + 1);
         }
         if q.relevant_meetings.is_empty() && q.relevant_meeting_ids.is_empty() {
-            bail!("Benchmark query {} ({:?}) has no relevance labels", i + 1, q.query);
+            bail!(
+                "Benchmark query {} ({:?}) has no relevance labels",
+                i + 1,
+                q.query
+            );
         }
     }
 
@@ -301,7 +310,15 @@ where
 
         let matcher = bq.matcher(title_map);
         let score = metrics::score_query(&ranked, &matcher, k);
-        outcomes.push(build_outcome(bq, &ranked, matcher.method(), score, latency_ms, title_map, k));
+        outcomes.push(build_outcome(
+            bq,
+            &ranked,
+            matcher.method(),
+            score,
+            latency_ms,
+            title_map,
+            k,
+        ));
     }
 
     let overall = metrics::aggregate(outcomes.iter().map(|o| &o.score));
@@ -488,7 +505,10 @@ mod tests {
         assert_eq!(ranking_note(&default, None), None);
         assert_eq!(ranking_note(&default, Some("phase5")), None);
 
-        let overridden = RankingConfig { title_boost_weight: 0.5, ..Default::default() };
+        let overridden = RankingConfig {
+            title_boost_weight: 0.5,
+            ..Default::default()
+        };
         assert_eq!(
             ranking_note(&overridden, None).as_deref(),
             Some("title-boost-weight=0.5")
@@ -581,11 +601,8 @@ mod tests {
 
     #[test]
     fn resolve_modes_rejects_duplicate_compare_modes() {
-        let err = resolve_modes(
-            QualityMode::Semantic,
-            &[QualityMode::Fts, QualityMode::Fts],
-        )
-        .unwrap_err();
+        let err = resolve_modes(QualityMode::Semantic, &[QualityMode::Fts, QualityMode::Fts])
+            .unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
 
@@ -710,14 +727,7 @@ mod tests {
     fn single_run_has_no_comparisons() {
         let queries = parse_benchmark(V1_JSON).unwrap();
         let title_map = HashMap::new();
-        let run = run_queries(
-            |_| Ok(vec![]),
-            &queries,
-            &title_map,
-            QualityMode::Fts,
-            10,
-        )
-        .unwrap();
+        let run = run_queries(|_| Ok(vec![]), &queries, &title_map, QualityMode::Fts, 10).unwrap();
 
         assert!(pairwise_comparisons(&[run]).is_empty());
     }

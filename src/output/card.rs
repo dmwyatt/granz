@@ -9,7 +9,7 @@ use chrono::FixedOffset;
 use colored::Colorize;
 
 use crate::query::shape::{ContextUnit, EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting};
-use crate::query::speaker::{label as speaker_label, SpeakerLabel};
+use crate::query::speaker::{SpeakerLabel, label as speaker_label};
 
 /// Card body indent, sized to clear the rank gutter.
 const INDENT: &str = "    ";
@@ -78,8 +78,10 @@ fn source_line(evidence: &MatchEvidence, tz: &FixedOffset) -> String {
     if let Some(ts) = evidence.timestamp.as_deref() {
         details.push(super::table::format_time_only(ts, tz).dimmed().to_string());
     }
-    if let Some(label) = speaker_label(evidence.speaker.as_deref(), evidence.speaker_name.as_deref())
-    {
+    if let Some(label) = speaker_label(
+        evidence.speaker.as_deref(),
+        evidence.speaker_name.as_deref(),
+    ) {
         details.push(match label {
             SpeakerLabel::You => label.as_str().cyan().to_string(),
             _ => label.as_str().dimmed().to_string(),
@@ -230,7 +232,11 @@ mod tests {
             title: Some("Weekly Infra Sync".to_string()),
             created_at: Some("2026-05-12T14:30:00Z".to_string()),
             score: Some(0.63),
-            signals: Signals { keyword: true, semantic: true, title: false },
+            signals: Signals {
+                keyword: true,
+                semantic: true,
+                title: false,
+            },
             total_matches: 1,
             matches: vec![MatchEvidence {
                 source: EvidenceSource::Panel,
@@ -293,7 +299,10 @@ mod tests {
         let mut m = base_meeting();
         m.matches = vec![MatchEvidence {
             source: EvidenceSource::Transcript,
-            excerpt: Excerpt { text: "say the migration runs".to_string(), highlights: vec![] },
+            excerpt: Excerpt {
+                text: "say the migration runs".to_string(),
+                highlights: vec![],
+            },
             speaker: Some("microphone".to_string()),
             speaker_name: None,
             timestamp: Some("2026-05-12T14:31:07Z".to_string()),
@@ -310,7 +319,10 @@ mod tests {
         let mut m = base_meeting();
         m.matches = vec![MatchEvidence {
             source: EvidenceSource::Transcript,
-            excerpt: Excerpt { text: "the migration runs tonight".to_string(), highlights: vec![] },
+            excerpt: Excerpt {
+                text: "the migration runs tonight".to_string(),
+                highlights: vec![],
+            },
             speaker: Some("system".to_string()),
             speaker_name: Some("Jane Doe".to_string()),
             timestamp: Some("2026-07-22T14:31:07Z".to_string()),
@@ -319,8 +331,14 @@ mod tests {
             context_after: Vec::new(),
         }];
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
-        assert!(out.contains("    transcript › 14:31:07 Jane Doe"), "got:\n{out}");
-        assert!(!out.contains("Other"), "name should replace the channel label:\n{out}");
+        assert!(
+            out.contains("    transcript › 14:31:07 Jane Doe"),
+            "got:\n{out}"
+        );
+        assert!(
+            !out.contains("Other"),
+            "name should replace the channel label:\n{out}"
+        );
     }
 
     #[test]
@@ -329,7 +347,10 @@ mod tests {
         let mut m = base_meeting();
         m.matches = vec![MatchEvidence {
             source: EvidenceSource::Transcript,
-            excerpt: Excerpt { text: "the migration runs tonight".to_string(), highlights: vec![] },
+            excerpt: Excerpt {
+                text: "the migration runs tonight".to_string(),
+                highlights: vec![],
+            },
             speaker: Some("system".to_string()),
             speaker_name: None,
             timestamp: Some("2026-05-12T14:31:07Z".to_string()),
@@ -338,7 +359,10 @@ mod tests {
             context_after: Vec::new(),
         }];
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
-        assert!(out.contains("    transcript › 14:31:07 Other"), "got:\n{out}");
+        assert!(
+            out.contains("    transcript › 14:31:07 Other"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
@@ -346,7 +370,10 @@ mod tests {
         let mut m = base_meeting();
         m.matches = vec![MatchEvidence {
             source: EvidenceSource::Transcript,
-            excerpt: Excerpt { text: "run it tonight".to_string(), highlights: vec![] },
+            excerpt: Excerpt {
+                text: "run it tonight".to_string(),
+                highlights: vec![],
+            },
             speaker: Some("microphone".to_string()),
             speaker_name: None,
             timestamp: Some("2026-07-22T14:31:07Z".to_string()),
@@ -486,14 +513,16 @@ mod tests {
             highlights: vec![],
         };
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
-        let snippet_lines: Vec<&str> =
-            out.lines().filter(|l| l.contains("alpha")).collect();
+        let snippet_lines: Vec<&str> = out.lines().filter(|l| l.contains("alpha")).collect();
         assert!(snippet_lines.len() > 1, "expected wrapping:\n{out}");
         assert!(snippet_lines[0].starts_with("    \""));
         assert!(snippet_lines[1].starts_with("     "));
         assert!(out.trim_end().ends_with('"'));
         for line in &snippet_lines {
-            assert!(line.chars().count() <= 4 + 1 + SNIPPET_WRAP + 1, "overlong: {line}");
+            assert!(
+                line.chars().count() <= 4 + 1 + SNIPPET_WRAP + 1,
+                "overlong: {line}"
+            );
         }
     }
 
@@ -505,8 +534,10 @@ mod tests {
         let text = format!("{} {}", "x".repeat(SNIPPET_WRAP - 4), word);
         let start = text.chars().count() - word.len();
         let mut m = base_meeting();
-        m.matches[0].excerpt =
-            Excerpt { text: text.clone(), highlights: vec![(start, start + word.len())] };
+        m.matches[0].excerpt = Excerpt {
+            text: text.clone(),
+            highlights: vec![(start, start + word.len())],
+        };
         let out = strip(&format_shaped_meeting(&m, 1, &utc()));
         assert!(out.contains(word), "highlighted word lost:\n{out}");
     }
