@@ -6,6 +6,7 @@
 //! the top fused candidates (see [`crate::query::rerank`]).
 
 use std::cell::RefCell;
+use std::thread::JoinHandle;
 
 use anyhow::Result;
 
@@ -74,6 +75,43 @@ impl FastEmbedReranker {
     }
 }
 
+/// A reranker loading on a background thread.
+///
+/// The load depends on nothing the search pipeline produces, so it can run
+/// while the query is embedded and retrieval fuses its candidates.
+/// [`join`](Self::join) then waits only for whatever load time did not fit
+/// behind that work, which on a warm model cache is none of it.
+pub struct PendingReranker {
+    handle: JoinHandle<Result<FastEmbedReranker>>,
+}
+
+impl PendingReranker {
+    /// Begin loading `choice`.
+    pub fn spawn(choice: RerankModel) -> Result<Self> {
+        // Model init reads the process environment; `set_hf_cache_dir`
+        // writes it. Do the write here, while this thread is still the
+        // only one, so the loader can never read it mid-write.
+        super::model::set_hf_cache_dir()?;
+        Ok(Self {
+            handle: std::thread::spawn(move || FastEmbedReranker::new(choice)),
+        })
+    }
+
+    /// Wait for the model, or for whatever went wrong loading it.
+    pub fn join(self) -> Result<FastEmbedReranker> {
+        join_loader(self.handle)
+    }
+}
+
+/// Wait for a loader thread, re-raising a panic on the joining thread so
+/// moving the load off-thread does not turn a crash into a caught error.
+fn join_loader<T>(handle: JoinHandle<Result<T>>) -> Result<T> {
+    match handle.join() {
+        Ok(loaded) => loaded,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 impl Reranker for FastEmbedReranker {
     fn rerank(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
         if documents.is_empty() {
@@ -137,6 +175,35 @@ mod tests {
         let opts = init_options(RerankModel::JinaTurbo).unwrap();
         let expected = crate::platform::data_dir().unwrap().join("fastembed_cache");
         assert_eq!(opts.cache_dir, expected);
+    }
+
+    #[test]
+    fn reranker_can_be_loaded_off_thread() {
+        // PendingReranker moves a loaded model back to the caller. If a
+        // fastembed upgrade makes TextRerank thread-bound, this stops
+        // compiling rather than failing at runtime.
+        fn assert_send<T: Send>() {}
+        assert_send::<FastEmbedReranker>();
+    }
+
+    #[test]
+    fn join_loader_returns_the_loaded_value() {
+        let handle = std::thread::spawn(|| Ok(7_u32));
+        assert_eq!(join_loader(handle).unwrap(), 7);
+    }
+
+    #[test]
+    fn join_loader_propagates_a_loader_error() {
+        let handle = std::thread::spawn(|| Err::<u32, _>(anyhow::anyhow!("model download failed")));
+        let err = join_loader(handle).unwrap_err();
+        assert_eq!(err.to_string(), "model download failed");
+    }
+
+    #[test]
+    #[should_panic(expected = "ort blew up")]
+    fn join_loader_repanics_when_the_loader_panics() {
+        let handle = std::thread::spawn(|| -> Result<u32> { panic!("ort blew up") });
+        let _ = join_loader(handle);
     }
 
     #[test]

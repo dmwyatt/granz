@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::env;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 
@@ -34,15 +35,26 @@ pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
 }
 
 /// Set HF_HOME so fastembed's hf-hub downloads land in [`hf_cache_dir`].
+///
+/// The write happens at most once per process. Model init reads the
+/// environment, and since a reranker can load on its own thread (see
+/// [`crate::embed::rerank::PendingReranker`]) two models can be reading it
+/// at once; a single ordered write is what keeps that sound.
 pub(crate) fn set_hf_cache_dir() -> Result<()> {
-    let cache_dir = hf_cache_dir()?;
+    static HF_HOME: OnceLock<Result<(), String>> = OnceLock::new();
 
-    // SAFETY: called during model initialization (single-threaded context),
-    // before any threads the model wrappers spawn.
-    unsafe {
-        env::set_var("HF_HOME", cache_dir);
-    }
-    Ok(())
+    HF_HOME
+        .get_or_init(|| {
+            let cache_dir = hf_cache_dir().map_err(|e| e.to_string())?;
+            // SAFETY: the process's only environment write, and OnceLock
+            // orders it before every read that follows on any thread.
+            unsafe {
+                env::set_var("HF_HOME", cache_dir);
+            }
+            Ok(())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
 }
 
 /// Hardware execution providers enabled by cargo features. CPU is always

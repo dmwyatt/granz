@@ -109,6 +109,18 @@ pub fn search(
     }
 
     let embedder = crate::embed::model::FastEmbedModel::new()?;
+
+    // The reranker's model load needs nothing retrieval produces, so start
+    // it here and let embedding and retrieval run in front of it. Starting
+    // it any earlier makes the two loads race for the one-time ONNX runtime
+    // init and costs the embedder more than it saves.
+    let pending_reranker = opts
+        .rerank
+        .then(|| {
+            crate::embed::rerank::PendingReranker::spawn(crate::embed::rerank::DEFAULT_RERANK_MODEL)
+        })
+        .transpose()?;
+
     let spec =
         crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
     let index =
@@ -125,36 +137,18 @@ pub fn search(
         include_deleted,
     )?;
 
-    // Ranked (id, score) pairs; ordering is the pipeline's and is not
-    // touched again below.
-    let ordered: Vec<(String, Option<f32>)> = if opts.rerank {
-        let reranker = crate::embed::rerank::FastEmbedReranker::new(
-            crate::embed::rerank::DEFAULT_RERANK_MODEL,
-        )?;
-        let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
-        let cfg = crate::query::adjust::RankingConfig::default();
-        let mut reranked = crate::query::rerank::rerank_hybrid(
-            conn,
-            &reranker,
-            query,
-            &ranking,
-            &ranking_ctx,
-            &cfg,
-        )?;
-        if let Some(min) = opts.min_score {
-            reranked.retain(|d| d.score >= min);
-        }
-        reranked
-            .into_iter()
-            .map(|d| (d.document_id, Some(d.score)))
-            .collect()
-    } else {
-        ranking
-            .fused
-            .iter()
-            .map(|d| (d.document_id.clone(), None))
-            .collect()
-    };
+    let reranker = pending_reranker
+        .map(crate::embed::rerank::PendingReranker::join)
+        .transpose()?;
+    let ordered = order_candidates(
+        conn,
+        query,
+        &ranking,
+        reranker
+            .as_ref()
+            .map(|r| r as &dyn crate::embed::rerank::Reranker),
+        opts.min_score,
+    )?;
 
     let ids: Vec<String> = ordered.iter().map(|(id, _)| id.clone()).collect();
     let docs = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;
@@ -191,6 +185,38 @@ pub fn search(
 
     render_ranked_meeting_list(&shaped, query, ranking.keyword_total, &opts, ctx);
     Ok(())
+}
+
+/// Ranked (id, score) pairs for the fused candidates. With a reranker the
+/// cross-encoder decides the order and supplies the score; without one the
+/// fusion order stands and no score is shown, since RRF ranks are not
+/// comparable across queries. `min_score` applies to rerank scores only.
+fn order_candidates(
+    conn: &Connection,
+    query: &str,
+    ranking: &crate::query::hybrid::HybridRanking,
+    reranker: Option<&dyn crate::embed::rerank::Reranker>,
+    min_score: Option<f32>,
+) -> Result<Vec<(String, Option<f32>)>> {
+    let Some(reranker) = reranker else {
+        return Ok(ranking
+            .fused
+            .iter()
+            .map(|d| (d.document_id.clone(), None))
+            .collect());
+    };
+
+    let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
+    let cfg = crate::query::adjust::RankingConfig::default();
+    let mut reranked =
+        crate::query::rerank::rerank_hybrid(conn, reranker, query, ranking, &ranking_ctx, &cfg)?;
+    if let Some(min) = min_score {
+        reranked.retain(|d| d.score >= min);
+    }
+    Ok(reranked
+        .into_iter()
+        .map(|d| (d.document_id, Some(d.score)))
+        .collect())
 }
 
 /// Header for ranked results: claims only what is shown, never a total.
