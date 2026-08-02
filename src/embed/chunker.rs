@@ -482,6 +482,23 @@ fn overlap_carryover(
     }
 }
 
+/// Split `text` into fragments of at most `budget` bytes, preferring
+/// sentence boundaries. Fragments are non-empty; the caller applies its
+/// own minimum-length policy.
+fn split_to_cap(text: &str, budget: usize) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    loop {
+        let (fits, remainder) = split_text_at_limit(rest, budget);
+        parts.push(fits);
+        if remainder.is_empty() {
+            break;
+        }
+        rest = remainder;
+    }
+    parts
+}
+
 /// Shrink an all-carryover buffer to at most `allowed` bytes so that
 /// carryover + incoming content stays within the hard cap. Overlap is a
 /// soft budget; the model cap is not. Chars mode keeps the trailing
@@ -623,21 +640,36 @@ pub fn panel_section_chunker(
             }
 
             let header = headers.and_then(|h| h.get(panel.document_id.as_str()));
-            let content_hash = hash_embed_input(header.map(String::as_str), &text);
+            // Sections longer than the model cap are split; header + text
+            // must stay within the cap (#123). The first part keeps the
+            // unsuffixed id so within-cap sections keep their identity.
+            let budget = config
+                .max_chars()
+                .saturating_sub(header.map_or(0, |h| h.len()));
 
-            chunks.push(Chunk {
-                source_type: ChunkSourceType::PanelSection,
-                source_id: format!("{}:s{}", panel.id, section_idx),
-                document_id: panel.document_id.clone(),
-                text,
-                content_hash,
-                header: header.cloned(),
-                metadata: Some(serde_json::json!({
-                    "panel_id": panel.id,
-                    "section_heading": heading,
-                    "section_idx": section_idx,
-                })),
-            });
+            for (part, fragment) in split_to_cap(&text, budget).into_iter().enumerate() {
+                if fragment.len() < config.min_chars {
+                    continue;
+                }
+                let source_id = if part == 0 {
+                    format!("{}:s{}", panel.id, section_idx)
+                } else {
+                    format!("{}:s{}p{}", panel.id, section_idx, part)
+                };
+                chunks.push(Chunk {
+                    source_type: ChunkSourceType::PanelSection,
+                    source_id,
+                    document_id: panel.document_id.clone(),
+                    text: fragment.to_string(),
+                    content_hash: hash_embed_input(header.map(String::as_str), fragment),
+                    header: header.cloned(),
+                    metadata: Some(serde_json::json!({
+                        "panel_id": panel.id,
+                        "section_heading": heading,
+                        "section_idx": section_idx,
+                    })),
+                });
+            }
         }
     }
 
@@ -647,7 +679,7 @@ pub fn panel_section_chunker(
 /// Generate chunks from document notes paragraphs.
 pub fn notes_paragraph_chunker(
     conn: &Connection,
-    min_chars: usize,
+    config: &ChunkingConfig,
     headers: Option<&HashMap<String, String>>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
@@ -678,25 +710,38 @@ pub fn notes_paragraph_chunker(
             .notes_plain
             .split("\n\n")
             .map(|p| p.trim())
-            .filter(|p| p.len() >= min_chars)
+            .filter(|p| p.len() >= config.min_chars)
             .collect();
 
         let header = headers.and_then(|h| h.get(doc.id.as_str()));
-        for (para_idx, para) in paragraphs.iter().enumerate() {
-            let text = para.to_string();
-            let content_hash = hash_embed_input(header.map(String::as_str), &text);
-
-            chunks.push(Chunk {
-                source_type: ChunkSourceType::NotesParagraph,
-                source_id: format!("{}:n{}", doc.id, para_idx),
-                document_id: doc.id.clone(),
-                text,
-                content_hash,
-                header: header.cloned(),
-                metadata: Some(serde_json::json!({
-                    "paragraph_idx": para_idx,
-                })),
-            });
+        // Paragraphs longer than the model cap are split; header + text
+        // must stay within the cap (#123). The first part keeps the
+        // unsuffixed id so within-cap paragraphs keep their identity.
+        let budget = config
+            .max_chars()
+            .saturating_sub(header.map_or(0, |h| h.len()));
+        for (para_idx, para) in paragraphs.into_iter().enumerate() {
+            for (part, fragment) in split_to_cap(para, budget).into_iter().enumerate() {
+                if fragment.len() < config.min_chars {
+                    continue;
+                }
+                let source_id = if part == 0 {
+                    format!("{}:n{}", doc.id, para_idx)
+                } else {
+                    format!("{}:n{}p{}", doc.id, para_idx, part)
+                };
+                chunks.push(Chunk {
+                    source_type: ChunkSourceType::NotesParagraph,
+                    source_id,
+                    document_id: doc.id.clone(),
+                    text: fragment.to_string(),
+                    content_hash: hash_embed_input(header.map(String::as_str), fragment),
+                    header: header.cloned(),
+                    metadata: Some(serde_json::json!({
+                        "paragraph_idx": para_idx,
+                    })),
+                });
+            }
         }
     }
 
@@ -1401,10 +1446,18 @@ mod tests {
     }
 
     // Tests for notes_paragraph_chunker
+
+    /// The production notes config: 20-char minimum on the default spec.
+    fn notes_test_config() -> ChunkingConfig {
+        ChunkingConfig {
+            min_chars: 20,
+            ..ChunkingConfig::default()
+        }
+    }
     #[test]
     fn test_notes_paragraph_chunker_empty_db() {
         let conn = setup_panel_test_db();
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -1416,7 +1469,7 @@ mod tests {
             ["First paragraph with enough content.\n\nSecond paragraph also with enough content."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].source_type, ChunkSourceType::NotesParagraph);
@@ -1432,7 +1485,7 @@ mod tests {
             ["ok\n\nThis paragraph is long enough to be included in the embedding."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
 
         // "ok" is too short
         assert_eq!(chunks.len(), 1);
@@ -1447,7 +1500,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -1459,10 +1512,109 @@ mod tests {
             ["A paragraph that is long enough to be embedded."],
         ).unwrap();
 
-        let chunks = notes_paragraph_chunker(&conn, 20, None).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), None).unwrap();
 
         let meta = chunks[0].metadata.as_ref().unwrap();
         assert_eq!(meta["paragraph_idx"], 0);
+    }
+
+    #[test]
+    fn test_panel_section_chunker_splits_oversized_section() {
+        // #123 defect 4: a section longer than the model cap became one
+        // chunk of whatever length, and the embedder truncated its tail
+        // (the live outlier was a 2,843-char panel section).
+        let conn = setup_panel_test_db();
+        let body = "This sentence pads the section out to a useful length. ".repeat(60);
+        let markdown = format!("### Big Section\n\n{}", body);
+        insert_test_panel(&conn, "panel1", "doc1", &markdown);
+
+        let config = ChunkingConfig::default();
+        let chunks = panel_section_chunker(&conn, &config, None).unwrap();
+
+        assert!(
+            chunks.len() >= 2,
+            "oversized section not split: {} chunk(s)",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.text.len() <= config.max_chars(),
+                "chunk {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.text.len(),
+                config.max_chars()
+            );
+            let meta = chunk.metadata.as_ref().unwrap();
+            assert_eq!(meta["section_idx"], 0);
+        }
+        // Parts get distinct source ids (UNIQUE constraint), and the first
+        // part keeps the unsuffixed id so within-cap sections keep their
+        // identity and never re-embed.
+        let ids: std::collections::HashSet<_> = chunks.iter().map(|c| &c.source_id).collect();
+        assert_eq!(ids.len(), chunks.len());
+        assert_eq!(chunks[0].source_id, "panel1:s0");
+    }
+
+    #[test]
+    fn test_notes_paragraph_chunker_splits_oversized_paragraph() {
+        // #123 defect 4, notes flavor: one huge paragraph became one huge
+        // chunk. Same cap, same split.
+        let conn = setup_panel_test_db();
+        let para = "Another sentence keeps this paragraph growing longer. ".repeat(60);
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at, notes_plain) VALUES ('doc1', 'Test', '2025-01-01T00:00:00Z', ?1)",
+            [para.trim()],
+        )
+        .unwrap();
+
+        let config = notes_test_config();
+        let chunks = notes_paragraph_chunker(&conn, &config, None).unwrap();
+
+        assert!(
+            chunks.len() >= 2,
+            "oversized paragraph not split: {} chunk(s)",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.text.len() <= config.max_chars(),
+                "chunk {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.text.len(),
+                config.max_chars()
+            );
+        }
+        let ids: std::collections::HashSet<_> = chunks.iter().map(|c| &c.source_id).collect();
+        assert_eq!(ids.len(), chunks.len());
+        assert_eq!(chunks[0].source_id, "doc1:n0");
+    }
+
+    #[test]
+    fn test_panel_header_counts_against_cap() {
+        // Header + section must stay within the model cap, matching the
+        // budget the transcript chunker already applies.
+        let conn = setup_panel_test_db();
+        let body = "This sentence pads the section out to a useful length. ".repeat(35);
+        let markdown = format!("### Big Section\n\n{}", body);
+        insert_test_panel(&conn, "panel1", "doc1", &markdown);
+
+        let header = format!("Meeting: {}\n\n", "x".repeat(300));
+        let mut headers = HashMap::new();
+        headers.insert("doc1".to_string(), header);
+
+        let config = ChunkingConfig::default();
+        let chunks = panel_section_chunker(&conn, &config, Some(&headers)).unwrap();
+
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(
+                chunk.embed_input().len() <= config.max_chars(),
+                "embed input for {} is {} chars, max is {}",
+                chunk.source_id,
+                chunk.embed_input().len(),
+                config.max_chars()
+            );
+        }
     }
 
     #[test]
@@ -1711,7 +1863,7 @@ mod tests {
         ).unwrap();
         let headers = headers_for("doc1", "Meeting: Sync\n\n");
 
-        let chunks = notes_paragraph_chunker(&conn, 20, Some(&headers)).unwrap();
+        let chunks = notes_paragraph_chunker(&conn, &notes_test_config(), Some(&headers)).unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].header.as_deref(), Some("Meeting: Sync\n\n"));

@@ -299,7 +299,17 @@ fn desired_chunks_for_spec(conn: &Connection, spec: &config::EmbedSpec) -> Resul
         &spec.chunking,
         doc_headers,
     )?);
-    chunks.extend(chunker::notes_paragraph_chunker(conn, 20, doc_headers)?);
+    // Notes keep their historical 20-char minimum; cap and header budget
+    // come from the shared chunking spec.
+    let notes_config = chunker::ChunkingConfig {
+        min_chars: 20,
+        ..spec.chunking.clone()
+    };
+    chunks.extend(chunker::notes_paragraph_chunker(
+        conn,
+        &notes_config,
+        doc_headers,
+    )?);
     Ok(chunks)
 }
 
