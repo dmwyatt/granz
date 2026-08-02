@@ -48,7 +48,7 @@ mod sys;
 use std::ffi::c_void;
 use std::ptr;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
@@ -62,10 +62,10 @@ use security_framework_sys::base::{
 };
 
 use sys::{
-    SecACLCopyContents, SecACLRef, SecACLSetContents, SecAccessCopyACLList, SecAccessCreate,
+    ACCOUNT_ATTR, GENERIC_PASSWORD_CLASS, ITEM_NOT_FOUND, SERVICE_ATTR, SecACLCopyContents,
+    SecACLRef, SecACLSetContents, SecAccessCopyACLList, SecAccessCreate,
     SecKeychainFindGenericPassword, SecKeychainItemCopyAccess, SecKeychainItemCreateFromContent,
-    SecKeychainItemDelete, SecKeychainPromptSelector, ACCOUNT_ATTR, GENERIC_PASSWORD_CLASS,
-    ITEM_NOT_FOUND, SERVICE_ATTR,
+    SecKeychainItemDelete, SecKeychainPromptSelector,
 };
 
 /// Store `secret` under `service`/`account` so any application can read it back
@@ -110,7 +110,12 @@ fn open_up(
 
 /// The same, against a specific keychain. Tests pass a throwaway one rather
 /// than touching the login keychain.
-fn store(keychain: Option<&SecKeychain>, service: &str, account: &str, secret: &[u8]) -> Result<()> {
+fn store(
+    keychain: Option<&SecKeychain>,
+    service: &str,
+    account: &str,
+    secret: &[u8],
+) -> Result<()> {
     if let Some(existing) = find_item(keychain, service, account)? {
         check(
             unsafe { SecKeychainItemDelete(existing.as_concrete_TypeRef()) },
@@ -196,7 +201,9 @@ fn find_item(
     }
     check(status, "look for grans's entry in the keychain")?;
 
-    Ok(Some(unsafe { SecKeychainItem::wrap_under_create_rule(item) }))
+    Ok(Some(unsafe {
+        SecKeychainItem::wrap_under_create_rule(item)
+    }))
 }
 
 /// Build an access object that challenges nobody.
@@ -352,7 +359,9 @@ mod tests {
     /// Whether the stored item would challenge a build of grans other than the
     /// one that wrote it.
     fn is_pinned(keychain: &SecKeychain) -> bool {
-        let item = find_item(Some(keychain), SERVICE, ACCOUNT).unwrap().unwrap();
+        let item = find_item(Some(keychain), SERVICE, ACCOUNT)
+            .unwrap()
+            .unwrap();
 
         names_applications(&item).unwrap()
     }
@@ -424,9 +433,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let keychain = keychain(&dir);
 
-        assert!(find_item(Some(&keychain), SERVICE, "nobody")
-            .unwrap()
-            .is_none());
+        assert!(
+            find_item(Some(&keychain), SERVICE, "nobody")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // --- opening up what an older grans left behind ---

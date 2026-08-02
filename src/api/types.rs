@@ -251,7 +251,10 @@ mod tests {
         let doc: Document = serde_json::from_str(json).unwrap();
         assert_eq!(doc.id, Some("doc-1".to_string()));
         let people = doc.people.unwrap();
-        assert_eq!(people.creator.as_ref().unwrap().name, Some("Alice".to_string()));
+        assert_eq!(
+            people.creator.as_ref().unwrap().name,
+            Some("Alice".to_string())
+        );
         assert_eq!(people.attendees.as_ref().unwrap().len(), 1);
     }
 
@@ -338,7 +341,13 @@ mod tests {
         }"#;
 
         let response: GetSelectedCalendarsResponse = serde_json::from_str(json).unwrap();
-        assert!(response.calendars_selected.as_ref().unwrap().contains_key("user@example.com"));
+        assert!(
+            response
+                .calendars_selected
+                .as_ref()
+                .unwrap()
+                .contains_key("user@example.com")
+        );
         assert_eq!(response.enabled_calendars.as_ref().unwrap()[0], "google");
     }
 
@@ -399,7 +408,10 @@ mod tests {
         let recipe: Recipe = serde_json::from_str(json).unwrap();
         assert_eq!(recipe.id, Some("recipe-1".to_string()));
         assert_eq!(recipe.slug, Some("test-recipe".to_string()));
-        assert_eq!(recipe.config.as_ref().unwrap().model, Some("gpt-4o".to_string()));
+        assert_eq!(
+            recipe.config.as_ref().unwrap().model,
+            Some("gpt-4o".to_string())
+        );
     }
 
     #[test]
@@ -416,7 +428,10 @@ mod tests {
         let response: GetRecipesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.default_recipes.len(), 0);
         assert_eq!(response.public_recipes.len(), 1);
-        assert_eq!(response.public_recipes[0].slug, Some("public-recipe".to_string()));
+        assert_eq!(
+            response.public_recipes[0].slug,
+            Some("public-recipe".to_string())
+        );
         assert_eq!(response.user_recipes.len(), 1);
         assert_eq!(response.user_recipes[0].slug, Some("my-recipe".to_string()));
         assert_eq!(response.shared_recipes.len(), 0);

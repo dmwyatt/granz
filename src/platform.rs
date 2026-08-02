@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 fn dirs_home() -> Option<PathBuf> {
     env::var("HOME")
@@ -17,7 +17,9 @@ pub fn data_dir() -> Result<PathBuf> {
         PathBuf::from(xdg).join("grans")
     } else if let Some(home) = dirs_home() {
         if cfg!(target_os = "macos") {
-            home.join("Library").join("Application Support").join("grans")
+            home.join("Library")
+                .join("Application Support")
+                .join("grans")
         } else {
             // Linux (including WSL)
             home.join(".local").join("share").join("grans")

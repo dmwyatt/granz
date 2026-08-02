@@ -91,7 +91,10 @@ pub fn rerank_hybrid_detailed(
                 fused_score: fused.score,
                 passage: build_passage(
                     title.as_deref(),
-                    ranking.best_chunks.get(&fused.document_id).map(|c| c.text.as_str()),
+                    ranking
+                        .best_chunks
+                        .get(&fused.document_id)
+                        .map(|c| c.text.as_str()),
                 ),
                 title: title.clone(),
                 created_at: created_at.clone(),
@@ -118,10 +121,15 @@ pub fn rerank_hybrid(
     ctx: &RankingContext,
     cfg: &RankingConfig,
 ) -> Result<Vec<RerankedDoc>> {
-    Ok(rerank_hybrid_detailed(conn, reranker, query, ranking, ctx, cfg)?
-        .into_iter()
-        .map(|c| RerankedDoc { document_id: c.document_id, score: c.rerank_score })
-        .collect())
+    Ok(
+        rerank_hybrid_detailed(conn, reranker, query, ranking, ctx, cfg)?
+            .into_iter()
+            .map(|c| RerankedDoc {
+                document_id: c.document_id,
+                score: c.rerank_score,
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -137,12 +145,18 @@ mod tests {
     /// Explicitly boost-free config: these tests pin the fusion-blend
     /// behavior on its own, independent of the adopted default weights.
     fn no_boost() -> RankingConfig {
-        RankingConfig { title_boost_weight: 0.0, ..Default::default() }
+        RankingConfig {
+            title_boost_weight: 0.0,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn passage_combines_title_and_chunk() {
-        assert_eq!(build_passage(Some("Title"), Some("chunk text")), "Title\n\nchunk text");
+        assert_eq!(
+            build_passage(Some("Title"), Some("chunk text")),
+            "Title\n\nchunk text"
+        );
         assert_eq!(build_passage(Some("Title"), None), "Title");
         assert_eq!(build_passage(None, Some("chunk text")), "chunk text");
         assert_eq!(build_passage(None, None), "");
@@ -150,7 +164,10 @@ mod tests {
 
     fn fused(ids: &[&str]) -> Vec<FusedDoc> {
         ids.iter()
-            .map(|id| FusedDoc { document_id: id.to_string(), score: 0.0 })
+            .map(|id| FusedDoc {
+                document_id: id.to_string(),
+                score: 0.0,
+            })
             .collect()
     }
 
@@ -162,7 +179,10 @@ mod tests {
         }
     }
 
-    fn make_ranking(fused: Vec<FusedDoc>, best_chunks: HashMap<String, BestChunk>) -> HybridRanking {
+    fn make_ranking(
+        fused: Vec<FusedDoc>,
+        best_chunks: HashMap<String, BestChunk>,
+    ) -> HybridRanking {
         HybridRanking {
             fused,
             best_chunks,
@@ -188,7 +208,15 @@ mod tests {
             HashMap::from([("doc-chunk".to_string(), chunk("kumquat kumquat"))]),
         );
 
-        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let reranked = rerank_hybrid(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         let ids: Vec<&str> = reranked.iter().map(|d| d.document_id.as_str()).collect();
         assert_eq!(ids, vec!["doc-chunk", "doc-title", "doc-none"]);
@@ -208,15 +236,31 @@ mod tests {
         }));
         let ranking = make_ranking(
             vec![
-                FusedDoc { document_id: "doc-none".to_string(), score: 0.03 },
-                FusedDoc { document_id: "doc-title".to_string(), score: 0.02 },
-                FusedDoc { document_id: "doc-chunk".to_string(), score: 0.01 },
+                FusedDoc {
+                    document_id: "doc-none".to_string(),
+                    score: 0.03,
+                },
+                FusedDoc {
+                    document_id: "doc-title".to_string(),
+                    score: 0.02,
+                },
+                FusedDoc {
+                    document_id: "doc-chunk".to_string(),
+                    score: 0.01,
+                },
             ],
             HashMap::from([("doc-chunk".to_string(), chunk("kumquat kumquat"))]),
         );
 
-        let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let detailed = rerank_hybrid_detailed(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         assert_eq!(detailed.len(), 3);
         assert_eq!(detailed[0].document_id, "doc-chunk");
@@ -246,14 +290,27 @@ mod tests {
         }));
         let ranking = make_ranking(
             vec![
-                FusedDoc { document_id: "doc-fused".to_string(), score: 0.1 },
-                FusedDoc { document_id: "doc-deep".to_string(), score: 0.0 },
+                FusedDoc {
+                    document_id: "doc-fused".to_string(),
+                    score: 0.1,
+                },
+                FusedDoc {
+                    document_id: "doc-deep".to_string(),
+                    score: 0.0,
+                },
             ],
             HashMap::from([("doc-deep".to_string(), chunk("kumquat kumquat"))]),
         );
 
-        let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let detailed = rerank_hybrid_detailed(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         // Blends: doc-fused 1 + 30 * 0.1 = 4, doc-deep 2 + 30 * 0 = 2.
         assert_eq!(detailed[0].document_id, "doc-fused");
@@ -273,11 +330,21 @@ mod tests {
         }));
         let ranking = make_ranking(fused(&["doc-1"]), HashMap::new());
 
-        let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let detailed = rerank_hybrid_detailed(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         assert_eq!(detailed[0].title.as_deref(), Some("Kumquat sync"));
-        assert_eq!(detailed[0].created_at.as_deref(), Some("2026-01-02T10:00:00Z"));
+        assert_eq!(
+            detailed[0].created_at.as_deref(),
+            Some("2026-01-02T10:00:00Z")
+        );
     }
 
     #[test]
@@ -296,8 +363,14 @@ mod tests {
         }));
         let ranking = make_ranking(
             vec![
-                FusedDoc { document_id: "doc-plain".to_string(), score: 0.05 },
-                FusedDoc { document_id: "doc-titled".to_string(), score: 0.01 },
+                FusedDoc {
+                    document_id: "doc-plain".to_string(),
+                    score: 0.05,
+                },
+                FusedDoc {
+                    document_id: "doc-titled".to_string(),
+                    score: 0.01,
+                },
             ],
             HashMap::from([
                 ("doc-plain".to_string(), chunk("kumquat")),
@@ -306,17 +379,18 @@ mod tests {
         );
         let ctx = RankingContext::default();
 
-        let without = rerank_hybrid_detailed(
-            &conn, &MockReranker, "kumquat", &ranking, &ctx, &no_boost(),
-        )
-        .unwrap();
+        let without =
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &ctx, &no_boost())
+                .unwrap();
         assert_eq!(without[0].document_id, "doc-plain");
 
-        let boosted = RankingConfig { title_boost_weight: 0.25, ..Default::default() };
-        let with = rerank_hybrid_detailed(
-            &conn, &MockReranker, "kumquat", &ranking, &ctx, &boosted,
-        )
-        .unwrap();
+        let boosted = RankingConfig {
+            title_boost_weight: 0.25,
+            ..Default::default()
+        };
+        let with =
+            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &ctx, &boosted)
+                .unwrap();
         assert_eq!(with[0].document_id, "doc-titled");
         assert_eq!(with[0].rerank_score, 2.0);
         assert_eq!(with[1].rerank_score, 1.0);
@@ -334,8 +408,15 @@ mod tests {
         }));
         let ranking = make_ranking(fused(&["doc-first", "doc-second"]), HashMap::new());
 
-        let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let detailed = rerank_hybrid_detailed(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         let ids: Vec<&str> = detailed.iter().map(|d| d.document_id.as_str()).collect();
         assert_eq!(ids, vec!["doc-first", "doc-second"]);
@@ -348,8 +429,15 @@ mod tests {
         let conn = build_test_db(&json!({ "documents": {} }));
         let ranking = make_ranking(Vec::new(), HashMap::new());
 
-        let detailed =
-            rerank_hybrid_detailed(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let detailed = rerank_hybrid_detailed(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         assert!(detailed.is_empty());
     }
@@ -375,7 +463,15 @@ mod tests {
             HashMap::from([("doc-59".to_string(), chunk("kumquat"))]),
         );
 
-        let reranked = rerank_hybrid(&conn, &MockReranker, "kumquat", &ranking, &RankingContext::default(), &no_boost()).unwrap();
+        let reranked = rerank_hybrid(
+            &conn,
+            &MockReranker,
+            "kumquat",
+            &ranking,
+            &RankingContext::default(),
+            &no_boost(),
+        )
+        .unwrap();
 
         assert_eq!(reranked.len(), RERANK_POOL);
         assert!(reranked.iter().all(|d| d.document_id != "doc-59"));

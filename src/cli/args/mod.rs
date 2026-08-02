@@ -4,8 +4,9 @@ use crate::query::filter::SearchTarget;
 use crate::query::speaker::SpeakerSelector;
 
 fn parse_speaker_selector(s: &str) -> Result<SpeakerSelector, String> {
-    SpeakerSelector::parse(s)
-        .ok_or_else(|| "empty speaker filter: expected 'me', 'other', or a speaker's name".to_string())
+    SpeakerSelector::parse(s).ok_or_else(|| {
+        "empty speaker filter: expected 'me', 'other', or a speaker's name".to_string()
+    })
 }
 
 #[derive(Parser, Debug)]
@@ -397,7 +398,12 @@ pub enum BenchmarkAction {
         k: usize,
 
         /// Search mode to benchmark
-        #[arg(long, value_enum, default_value = "semantic", conflicts_with = "compare")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "semantic",
+            conflicts_with = "compare"
+        )]
         mode: QualityMode,
 
         /// Compare modes, e.g. fts,semantic: per-query rank table plus

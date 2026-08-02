@@ -1,7 +1,7 @@
 //! PKCE challenge generation (RFC 7636), shared by the OAuth flows.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::{rngs::OsRng, RngCore};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 
 /// PKCE verifier/challenge pair for an OAuth flow.
@@ -29,7 +29,10 @@ impl PkceChallenge {
         hasher.update(verifier.as_bytes());
         let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-        Self { verifier, challenge }
+        Self {
+            verifier,
+            challenge,
+        }
     }
 }
 
@@ -48,9 +51,11 @@ mod tests {
     fn test_verifier_is_unreserved_charset() {
         // RFC 7636 restricts the verifier to [A-Za-z0-9-._~]
         let verifier = PkceChallenge::generate(32).verifier;
-        assert!(verifier
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~')));
+        assert!(
+            verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
+        );
     }
 
     #[test]

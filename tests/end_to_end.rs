@@ -20,11 +20,7 @@ fn meetings_list_shows_all_meetings() {
 #[test]
 fn meetings_list_json_returns_array() {
     let env = TestEnv::with_fixture();
-    let output = env
-        .cmd_json()
-        .args(["list"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["list"]).output().unwrap();
 
     assert!(output.status.success());
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
@@ -56,11 +52,7 @@ fn meetings_show_by_id() {
 #[test]
 fn meetings_show_json_has_fields() {
     let env = TestEnv::with_fixture();
-    let output = env
-        .cmd_json()
-        .args(["show", "doc-alpha"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["show", "doc-alpha"]).output().unwrap();
 
     assert!(output.status.success());
     let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -145,14 +137,18 @@ fn meetings_show_notes_json() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     // Should have both notes formats
-    assert!(json["notes_plain"]
-        .as_str()
-        .unwrap()
-        .contains("Discussed the project timeline"));
-    assert!(json["notes_markdown"]
-        .as_str()
-        .unwrap()
-        .contains("**project timeline**"));
+    assert!(
+        json["notes_plain"]
+            .as_str()
+            .unwrap()
+            .contains("Discussed the project timeline")
+    );
+    assert!(
+        json["notes_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("**project timeline**")
+    );
     // Should NOT have transcript
     assert!(json.get("transcript").is_none());
 }
@@ -467,11 +463,7 @@ fn recipes_show_json_has_config() {
 #[test]
 fn meetings_show_displays_chat_url() {
     let env = TestEnv::with_fixture();
-    let output = env
-        .cmd()
-        .args(["show", "Alpha"])
-        .output()
-        .unwrap();
+    let output = env.cmd().args(["show", "Alpha"]).output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -484,11 +476,7 @@ fn meetings_show_displays_chat_url() {
 #[test]
 fn meetings_show_json_includes_chat_url() {
     let env = TestEnv::with_fixture();
-    let output = env
-        .cmd_json()
-        .args(["show", "doc-alpha"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["show", "doc-alpha"]).output().unwrap();
 
     assert!(output.status.success());
     let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -503,11 +491,7 @@ fn meetings_show_json_includes_chat_url() {
 #[test]
 fn meetings_show_json_chat_url_null_when_absent() {
     let env = TestEnv::with_fixture();
-    let output = env
-        .cmd_json()
-        .args(["show", "doc-beta"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["show", "doc-beta"]).output().unwrap();
 
     assert!(output.status.success());
     let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

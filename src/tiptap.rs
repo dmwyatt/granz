@@ -375,10 +375,7 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(
-            tiptap_to_markdown(&doc),
-            "[**link**](https://example.com)"
-        );
+        assert_eq!(tiptap_to_markdown(&doc), "[**link**](https://example.com)");
     }
 
     #[test]

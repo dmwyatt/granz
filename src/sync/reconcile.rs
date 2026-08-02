@@ -90,7 +90,10 @@ mod tests {
         let after_push = A;
 
         // Local and remote both hold what the first push stored.
-        assert_eq!(decide(after_push, Some(after_push), Some(after_push)), UpToDate);
+        assert_eq!(
+            decide(after_push, Some(after_push), Some(after_push)),
+            UpToDate
+        );
     }
 
     /// The same in the other direction: pulling twice must not claim the local
@@ -99,7 +102,10 @@ mod tests {
     fn pulling_twice_with_no_remote_change_is_up_to_date() {
         let after_pull = A;
 
-        assert_eq!(decide(after_pull, Some(after_pull), Some(after_pull)), UpToDate);
+        assert_eq!(
+            decide(after_pull, Some(after_pull), Some(after_pull)),
+            UpToDate
+        );
     }
 
     /// A machine that pushed, then synced new data locally, may push again.
@@ -108,7 +114,10 @@ mod tests {
         let synced = A;
         let local_after_new_data = B;
 
-        assert_eq!(decide(local_after_new_data, Some(synced), Some(synced)), Proceed);
+        assert_eq!(
+            decide(local_after_new_data, Some(synced), Some(synced)),
+            Proceed
+        );
     }
 
     /// A second machine pushed since we last synced, so our push would discard

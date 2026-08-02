@@ -16,7 +16,7 @@ use crate::commands::search_common::{print_shaped_cards, shape_and_page};
 use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::{targets_to_flag_value, SearchTarget, DEFAULT_SEARCH_TARGETS};
+use crate::query::filter::{DEFAULT_SEARCH_TARGETS, SearchTarget, targets_to_flag_value};
 
 /// Threshold for prompting before embedding during a search.
 const EMBED_WARN_THRESHOLD: usize = 200;
@@ -109,7 +109,8 @@ pub fn search(
     }
 
     let embedder = crate::embed::model::FastEmbedModel::new()?;
-    let spec = crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
+    let spec =
+        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
     let index =
         crate::embed::ensure_embeddings(conn, &embedder, crate::embed::DEFAULT_BATCH_SIZE, &spec)?;
 
@@ -127,8 +128,9 @@ pub fn search(
     // Ranked (id, score) pairs; ordering is the pipeline's and is not
     // touched again below.
     let ordered: Vec<(String, Option<f32>)> = if opts.rerank {
-        let reranker =
-            crate::embed::rerank::FastEmbedReranker::new(crate::embed::rerank::DEFAULT_RERANK_MODEL)?;
+        let reranker = crate::embed::rerank::FastEmbedReranker::new(
+            crate::embed::rerank::DEFAULT_RERANK_MODEL,
+        )?;
         let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
         let cfg = crate::query::adjust::RankingConfig::default();
         let mut reranked = crate::query::rerank::rerank_hybrid(
@@ -142,15 +144,24 @@ pub fn search(
         if let Some(min) = opts.min_score {
             reranked.retain(|d| d.score >= min);
         }
-        reranked.into_iter().map(|d| (d.document_id, Some(d.score))).collect()
+        reranked
+            .into_iter()
+            .map(|d| (d.document_id, Some(d.score)))
+            .collect()
     } else {
-        ranking.fused.iter().map(|d| (d.document_id.clone(), None)).collect()
+        ranking
+            .fused
+            .iter()
+            .map(|d| (d.document_id.clone(), None))
+            .collect()
     };
 
     let ids: Vec<String> = ordered.iter().map(|(id, _)| id.clone()).collect();
     let docs = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;
-    let mut doc_by_id: std::collections::HashMap<String, Document> =
-        docs.into_iter().filter_map(|d| d.id.clone().map(|id| (id, d))).collect();
+    let mut doc_by_id: std::collections::HashMap<String, Document> = docs
+        .into_iter()
+        .filter_map(|d| d.id.clone().map(|id| (id, d)))
+        .collect();
     let ordered_docs: Vec<(Document, Option<f32>)> = ordered
         .into_iter()
         .filter_map(|(id, score)| doc_by_id.remove(&id).map(|doc| (doc, score)))
@@ -244,7 +255,12 @@ fn render_ranked_meeting_list(
         OutputMode::Json => {
             println!(
                 "{}",
-                crate::output::json::format_search_meetings(shaped, query, keyword_total, opts.limit)
+                crate::output::json::format_search_meetings(
+                    shaped,
+                    query,
+                    keyword_total,
+                    opts.limit
+                )
             );
         }
         OutputMode::Tty => {
@@ -267,7 +283,8 @@ fn render_ranked_meeting_list(
 fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Result<bool> {
     // Resolve via the model constant: this path must not load the ONNX
     // model just to count pending chunks.
-    let spec = crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
+    let spec =
+        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
     let status = crate::embed::get_embedding_status(conn, crate::embed::model::MODEL_NAME, &spec)?;
     let needs_full_reembed = status.orphaned_chunks > 0
         || status.legacy_max_length_warning
@@ -287,12 +304,11 @@ fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Res
                     eprintln!("  - Existing embeddings use an outdated chunking strategy");
                 }
                 if status.model_changed_warning {
-                    eprintln!("  - Existing embeddings were created by a different embedding model");
+                    eprintln!(
+                        "  - Existing embeddings were created by a different embedding model"
+                    );
                 }
-                eprintln!(
-                    "  - {} new chunks need embedding",
-                    status.pending_chunks
-                );
+                eprintln!("  - {} new chunks need embedding", status.pending_chunks);
                 eprintln!();
                 eprintln!("Existing embeddings cannot be used. Run `grans embed` to rebuild.");
             } else {
@@ -300,7 +316,9 @@ fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Res
                     "\nWarning: {} chunks need embedding.",
                     status.pending_chunks
                 );
-                eprintln!("This may take a while. Run `grans embed` separately to control when this happens.");
+                eprintln!(
+                    "This may take a while. Run `grans embed` separately to control when this happens."
+                );
             }
             eprint!("Proceed anyway? [y/N] ");
             io::stderr().flush()?;
@@ -352,22 +370,14 @@ mod tests {
 
     #[test]
     fn from_cli_args_fast_skips_rerank() {
-        let opts =
-            SearchOptions::from_cli_args(true, None, 0, false, 10, 1, FilterEcho::default());
+        let opts = SearchOptions::from_cli_args(true, None, 0, false, 10, 1, FilterEcho::default());
         assert!(!opts.rerank);
     }
 
     #[test]
     fn from_cli_args_min_score_threads() {
-        let opts = SearchOptions::from_cli_args(
-            false,
-            Some(0.4),
-            0,
-            false,
-            10,
-            1,
-            FilterEcho::default(),
-        );
+        let opts =
+            SearchOptions::from_cli_args(false, Some(0.4), 0, false, 10, 1, FilterEcho::default());
         assert_eq!(opts.min_score, Some(0.4));
     }
 
@@ -395,7 +405,10 @@ mod tests {
 
     #[test]
     fn ranked_header_claims_only_the_shown_count() {
-        assert_eq!(ranked_header(7, "budget"), "Top 7 match(es) for \"budget\":");
+        assert_eq!(
+            ranked_header(7, "budget"),
+            "Top 7 match(es) for \"budget\":"
+        );
     }
 
     #[test]

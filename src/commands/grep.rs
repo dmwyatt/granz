@@ -4,16 +4,16 @@
 //! words is counted, and `--limit` only trims how many are shown. This path
 //! never loads an embedding model and never prompts.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
 use crate::commands::search_common::{print_shaped_cards, shape_and_page};
 use crate::models::Document;
-use crate::query::speaker::SpeakerFilter;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
-use crate::query::filter::{filter_by_meeting, SearchTarget};
+use crate::query::filter::{SearchTarget, filter_by_meeting};
+use crate::query::speaker::SpeakerFilter;
 
 /// Options for a grep lookup.
 pub struct GrepOptions {
@@ -42,10 +42,15 @@ pub fn grep(
 ) -> Result<()> {
     check_speaker_targets(opts.speaker.is_some(), &opts.targets)?;
 
-    let results = fts_meetings(conn, query, &opts.targets, date_range.as_ref(), include_deleted)?;
+    let results = fts_meetings(
+        conn,
+        query,
+        &opts.targets,
+        date_range.as_ref(),
+        include_deleted,
+    )?;
     let results = filter_by_meeting(results, opts.meeting_filter.as_deref());
-    let docs: Vec<(Document, Option<f32>)> =
-        results.into_iter().map(|doc| (doc, None)).collect();
+    let docs: Vec<(Document, Option<f32>)> = results.into_iter().map(|doc| (doc, None)).collect();
 
     let tokens = crate::query::fts::parse_query(query);
     let evidence_opts = crate::query::evidence::EvidenceOptions {
@@ -120,7 +125,11 @@ fn render_grep_meeting_list(
                     shaped.len()
                 );
             } else {
-                println!("Found {} meeting(s) matching \"{}\":\n", shaped.len(), query);
+                println!(
+                    "Found {} meeting(s) matching \"{}\":\n",
+                    shaped.len(),
+                    query
+                );
             }
             print_shaped_cards(shaped, ctx);
             if total > shaped.len() {

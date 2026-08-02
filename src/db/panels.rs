@@ -80,7 +80,10 @@ fn redact_panel_snapshot(panel: &ApiPanel) -> Option<String> {
     for &key in PANEL_REDACT_KEYS {
         if let Some(v) = obj.get(key) {
             if !v.is_null() {
-                obj.insert(key.to_string(), serde_json::Value::String("[stored]".to_string()));
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String("[stored]".to_string()),
+                );
             }
         }
     }
@@ -184,9 +187,7 @@ pub fn find_documents_without_panels(
     );
 
     if skip_logged_failures {
-        sql.push_str(
-            " AND NOT EXISTS (SELECT 1 FROM panel_sync_log l WHERE l.document_id = d.id)",
-        );
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM panel_sync_log l WHERE l.document_id = d.id)");
     }
 
     if since.is_some() {
@@ -251,10 +252,7 @@ pub fn insert_panels_from_api(
         .context("Failed to begin panel replacement")?;
 
     // Delete existing panels for this document
-    tx.execute(
-        "DELETE FROM panels WHERE document_id = ?1",
-        [document_id],
-    )?;
+    tx.execute("DELETE FROM panels WHERE document_id = ?1", [document_id])?;
 
     let mut stmt = tx.prepare(
         "INSERT INTO panels (id, document_id, title, content_json, content_markdown,
@@ -290,18 +288,13 @@ pub fn insert_panels_from_api(
     }
 
     drop(stmt);
-    tx.commit()
-        .context("Failed to commit panel replacement")?;
+    tx.commit().context("Failed to commit panel replacement")?;
 
     Ok(inserted)
 }
 
 /// Record a panel sync failure for a document.
-pub fn log_panel_sync_failure(
-    conn: &Connection,
-    document_id: &str,
-    status: &str,
-) -> Result<()> {
+pub fn log_panel_sync_failure(conn: &Connection, document_id: &str, status: &str) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO panel_sync_log (document_id, status, last_attempted_at, attempts)
@@ -391,16 +384,14 @@ mod tests {
     fn test_find_documents_without_panels_with_since() {
         let conn = build_test_db(&panels_state());
         // doc-2 is at 2026-01-21, filter since 2026-01-21
-        let docs =
-            find_documents_without_panels(&conn, Some("2026-01-21T00:00:00Z"), None, false)
-                .unwrap();
+        let docs = find_documents_without_panels(&conn, Some("2026-01-21T00:00:00Z"), None, false)
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].id, "doc-2");
 
         // Filter since 2026-01-22, should find nothing
-        let docs =
-            find_documents_without_panels(&conn, Some("2026-01-22T00:00:00Z"), None, false)
-                .unwrap();
+        let docs = find_documents_without_panels(&conn, Some("2026-01-22T00:00:00Z"), None, false)
+            .unwrap();
         assert!(docs.is_empty());
     }
 
@@ -455,22 +446,20 @@ mod tests {
         let old_panels = load_panels(&conn, "doc-1").unwrap();
         assert_eq!(old_panels.len(), 1);
 
-        let api_panels = vec![
-            crate::api::ApiPanel {
-                id: Some("panel-replaced-1".to_string()),
-                document_id: Some("doc-1".to_string()),
-                title: Some("New Panel".to_string()),
-                content: Some(json!({"type": "doc", "content": [
-                    {"type": "paragraph", "content": [{"type": "text", "text": "Replaced content"}]}
-                ]})),
-                original_content: None,
-                template_slug: None,
-                created_at: None,
-                updated_at: None,
-                deleted_at: None,
-                extra: Default::default(),
-            },
-        ];
+        let api_panels = vec![crate::api::ApiPanel {
+            id: Some("panel-replaced-1".to_string()),
+            document_id: Some("doc-1".to_string()),
+            title: Some("New Panel".to_string()),
+            content: Some(json!({"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Replaced content"}]}
+            ]})),
+            original_content: None,
+            template_slug: None,
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            extra: Default::default(),
+        }];
 
         let inserted = insert_panels_from_api(&conn, "doc-1", &api_panels).unwrap();
         assert_eq!(inserted, 1);
@@ -552,11 +541,19 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(hits("photosynthesis"), 1, "the insert alone should index it");
+        assert_eq!(
+            hits("photosynthesis"),
+            1,
+            "the insert alone should index it"
+        );
 
         conn.execute("DELETE FROM panels WHERE id = 'panel-bare'", [])
             .unwrap();
-        assert_eq!(hits("photosynthesis"), 0, "the delete alone should unindex it");
+        assert_eq!(
+            hits("photosynthesis"),
+            0,
+            "the delete alone should unindex it"
+        );
 
         for report in crate::db::integrity::check_fts_indexes(&conn).unwrap() {
             assert_eq!(
@@ -800,7 +797,10 @@ mod tests {
         assert_eq!(panel.title.as_deref(), Some("Summary"));
         assert!(panel.content_markdown.unwrap().contains("Key Points"));
         assert_eq!(panel.template_slug.as_deref(), Some("summary"));
-        assert_eq!(panel.chat_url.as_deref(), Some("https://notes.granola.ai/t/abc123"));
+        assert_eq!(
+            panel.chat_url.as_deref(),
+            Some("https://notes.granola.ai/t/abc123")
+        );
         assert!(panel.deleted_at.is_none());
         assert!(panel.extra.is_empty());
     }
@@ -827,7 +827,10 @@ mod tests {
         let write_row = api_panel_to_write_row(&panel).unwrap();
         assert_eq!(write_row.id.as_deref(), Some("panel-1"));
         assert_eq!(write_row.title.as_deref(), Some("Action Items"));
-        assert_eq!(write_row.content_markdown.as_deref(), Some("Review the proposal"));
+        assert_eq!(
+            write_row.content_markdown.as_deref(),
+            Some("Review the proposal")
+        );
         assert!(write_row.content_json.is_some());
         assert!(write_row.original_content_json.is_some());
         assert!(write_row.chat_url.is_none());
@@ -877,7 +880,10 @@ mod tests {
             extra: Default::default(),
         };
         let write_row = api_panel_to_write_row(&panel).unwrap();
-        assert_eq!(write_row.chat_url.as_deref(), Some("https://notes.granola.ai/t/abc123"));
+        assert_eq!(
+            write_row.chat_url.as_deref(),
+            Some("https://notes.granola.ai/t/abc123")
+        );
         let md = write_row.content_markdown.unwrap();
         assert!(!md.contains("notes.granola.ai"));
         assert!(md.contains("Key decisions."));
@@ -902,7 +908,8 @@ mod tests {
         };
         let write_row = api_panel_to_write_row(&panel).unwrap();
         assert!(write_row.extra_json.is_some());
-        let parsed: serde_json::Value = serde_json::from_str(&write_row.extra_json.unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&write_row.extra_json.unwrap()).unwrap();
         assert_eq!(parsed["custom"], "value");
     }
 

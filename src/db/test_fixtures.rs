@@ -6,7 +6,7 @@
 #[cfg(test)]
 use rusqlite::Connection;
 #[cfg(test)]
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Creates a comprehensive test state with data for all collections
 #[cfg(test)]
@@ -304,7 +304,8 @@ pub fn build_test_db(state: &Value) -> Connection {
                     person.get("job_title").and_then(|v| v.as_str()),
                     extra_json,
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -443,7 +444,8 @@ pub fn build_test_db(state: &Value) -> Connection {
     // hide a broken trigger behind a fixture, which is how #85 went unnoticed.
     //
     // notes_fts has no write path at all yet (#85), so it still needs this.
-    conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", []).unwrap();
+    conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", [])
+        .unwrap();
 
     conn
 }

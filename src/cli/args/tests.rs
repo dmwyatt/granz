@@ -65,8 +65,7 @@ fn search_context_composes_with_other_flags() {
 
 #[test]
 fn search_min_score_parses() {
-    let cli =
-        Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4"]).unwrap();
+    let cli = Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4"]).unwrap();
     let Commands::Search { min_score, .. } = &cli.command else {
         panic!("expected search subcommand");
     };
@@ -77,17 +76,33 @@ fn search_min_score_parses() {
 fn search_min_score_conflicts_with_fast() {
     // Only the rerank stage produces the relevance score --min-score
     // thresholds, and --fast skips that stage.
-    let result =
-        Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4", "--fast"]);
+    let result = Cli::try_parse_from(["grans", "search", "q", "--min-score", "0.4", "--fast"]);
     assert!(result.is_err(), "--min-score --fast should conflict");
 }
 
 #[test]
 fn grep_parses_with_lookup_flags() {
     let cli = Cli::try_parse_from([
-        "grans", "grep", "kumquat", "--speaker", "me", "--in", "titles,transcripts",
-        "--meeting", "standup", "--context", "2", "--matches", "3", "--limit", "5",
-        "--from", "2026-01-01", "--to", "2026-02-01", "--include-deleted",
+        "grans",
+        "grep",
+        "kumquat",
+        "--speaker",
+        "me",
+        "--in",
+        "titles,transcripts",
+        "--meeting",
+        "standup",
+        "--context",
+        "2",
+        "--matches",
+        "3",
+        "--limit",
+        "5",
+        "--from",
+        "2026-01-01",
+        "--to",
+        "2026-02-01",
+        "--include-deleted",
     ])
     .unwrap();
     let Commands::Grep {
@@ -149,12 +164,16 @@ fn grep_in_rejects_an_unknown_target() {
     // `transcript` (singular typo) must fail loudly instead of collapsing to
     // an empty target set that greps nothing (#74). The error names the bad
     // value and lists the valid ones.
-    let err = Cli::try_parse_from(["grans", "grep", "budget", "--in", "transcript"])
-        .unwrap_err();
+    let err = Cli::try_parse_from(["grans", "grep", "budget", "--in", "transcript"]).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("transcript"), "error should name the bad value: {msg}");
     assert!(
-        msg.contains("titles") && msg.contains("transcripts") && msg.contains("notes")
+        msg.contains("transcript"),
+        "error should name the bad value: {msg}"
+    );
+    assert!(
+        msg.contains("titles")
+            && msg.contains("transcripts")
+            && msg.contains("notes")
             && msg.contains("panels"),
         "error should list the valid targets: {msg}"
     );
@@ -165,7 +184,10 @@ fn grep_in_rejects_an_unknown_target_inside_a_valid_list() {
     // `titles,transcript` must not silently search titles only (#74); one
     // bad token fails the whole list.
     let result = Cli::try_parse_from(["grans", "grep", "budget", "--in", "titles,transcript"]);
-    assert!(result.is_err(), "an unknown token anywhere must fail the list");
+    assert!(
+        result.is_err(),
+        "an unknown token anywhere must fail the list"
+    );
 }
 
 #[test]
@@ -202,7 +224,9 @@ fn quality_compare(cli: &Cli) -> &[QualityMode] {
     }
 }
 
-fn embed_experiment_flags(cli: &Cli) -> (Option<usize>, Option<usize>, Option<String>, Option<bool>) {
+fn embed_experiment_flags(
+    cli: &Cli,
+) -> (Option<usize>, Option<usize>, Option<String>, Option<bool>) {
     match &cli.command {
         Commands::Embed {
             chunk_target_tokens,
@@ -242,14 +266,18 @@ fn embed_experiment_flags_parse() {
     .unwrap();
     assert_eq!(
         embed_experiment_flags(&cli),
-        (Some(192), Some(48), Some("utterances".to_string()), Some(true))
+        (
+            Some(192),
+            Some(48),
+            Some("utterances".to_string()),
+            Some(true)
+        )
     );
 }
 
 #[test]
 fn embed_contextual_headers_can_be_forced_off() {
-    let cli =
-        Cli::try_parse_from(["grans", "embed", "--contextual-headers=false"]).unwrap();
+    let cli = Cli::try_parse_from(["grans", "embed", "--contextual-headers=false"]).unwrap();
     assert_eq!(embed_experiment_flags(&cli).3, Some(false));
 }
 
@@ -261,24 +289,33 @@ fn embed_overlap_mode_rejects_unknown_value() {
 
 #[test]
 fn benchmark_quality_title_boost_weight_parses_and_defaults_to_none() {
-    let cli = Cli::try_parse_from([
-        "grans", "benchmark", "quality", "--file", "golden.json",
-    ])
-    .unwrap();
-    let Commands::Benchmark { action: BenchmarkAction::Quality { title_boost_weight, .. } } =
-        &cli.command
+    let cli =
+        Cli::try_parse_from(["grans", "benchmark", "quality", "--file", "golden.json"]).unwrap();
+    let Commands::Benchmark {
+        action: BenchmarkAction::Quality {
+            title_boost_weight, ..
+        },
+    } = &cli.command
     else {
         panic!("expected benchmark quality subcommand");
     };
     assert_eq!(*title_boost_weight, None);
 
     let cli = Cli::try_parse_from([
-        "grans", "benchmark", "quality", "--file", "golden.json",
-        "--title-boost-weight", "0.3",
+        "grans",
+        "benchmark",
+        "quality",
+        "--file",
+        "golden.json",
+        "--title-boost-weight",
+        "0.3",
     ])
     .unwrap();
-    let Commands::Benchmark { action: BenchmarkAction::Quality { title_boost_weight, .. } } =
-        &cli.command
+    let Commands::Benchmark {
+        action: BenchmarkAction::Quality {
+            title_boost_weight, ..
+        },
+    } = &cli.command
     else {
         panic!("expected benchmark quality subcommand");
     };
@@ -351,7 +388,10 @@ fn benchmark_quality_note_requires_record() {
 
 fn transcripts_action(cli: &Cli) -> &SyncAction {
     match &cli.command {
-        Commands::Sync { action: Some(action), .. } => action,
+        Commands::Sync {
+            action: Some(action),
+            ..
+        } => action,
         _ => panic!("expected sync subcommand"),
     }
 }
@@ -375,10 +415,11 @@ fn sync_transcripts_positional_conflicts_with_limit() {
 
 #[test]
 fn sync_transcripts_positional_allows_embed() {
-    let cli =
-        Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--embed"]).unwrap();
+    let cli = Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--embed"]).unwrap();
     match transcripts_action(&cli) {
-        SyncAction::Transcripts { document_id, embed, .. } => {
+        SyncAction::Transcripts {
+            document_id, embed, ..
+        } => {
             assert_eq!(document_id.as_deref(), Some("doc-1"));
             assert!(*embed);
         }
@@ -388,8 +429,7 @@ fn sync_transcripts_positional_allows_embed() {
 
 #[test]
 fn sync_transcripts_positional_allows_dry_run() {
-    let cli =
-        Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--dry-run"]).unwrap();
+    let cli = Cli::try_parse_from(["grans", "sync", "transcripts", "doc-1", "--dry-run"]).unwrap();
     match &cli.command {
         Commands::Sync { dry_run, .. } => assert!(*dry_run),
         _ => panic!("expected sync subcommand"),

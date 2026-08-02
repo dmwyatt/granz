@@ -9,12 +9,12 @@ use anyhow::Result;
 use chrono::FixedOffset;
 use serde::Serialize;
 
-use crate::output::format::{format_size, OutputMode};
+use crate::output::format::{OutputMode, format_size};
 use crate::sync::config::SyncConfig;
-use crate::sync::dropbox::{format_timestamp, parse_dropbox_time, DropboxClient, FileMetadata};
+use crate::sync::dropbox::{DropboxClient, FileMetadata, format_timestamp, parse_dropbox_time};
 use crate::sync::metadata::SyncMetadata;
 
-use super::sync::{get_access_token, get_file_mtime, REMOTE_DB_PATH, REMOTE_METADATA_PATH};
+use super::sync::{REMOTE_DB_PATH, REMOTE_METADATA_PATH, get_access_token, get_file_mtime};
 
 /// File information for status display
 #[derive(Debug, Clone, Serialize)]
@@ -77,39 +77,26 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     let db_path = crate::db::connection::default_db_path()?;
 
     // Collect local metadata
-    let local_metadata = SyncMetadata::from_local_db(
-        db_path.exists().then_some(&db_path),
-    )
-    .ok();
+    let local_metadata = SyncMetadata::from_local_db(db_path.exists().then_some(&db_path)).ok();
 
     // Local file info
     let local_db_info = FileInfo::from_local(&db_path);
 
     // Remote info (only if authenticated)
-    let (remote_metadata, remote_db_info) =
-        if config.is_authenticated() {
-            match get_access_token(&config) {
-                Ok(access_token) => {
-                    let client = DropboxClient::new(access_token)?;
-                    let remote_meta = fetch_remote_metadata(&client);
-                    let db_meta = client.get_metadata(REMOTE_DB_PATH).ok().flatten();
+    let (remote_metadata, remote_db_info) = if config.is_authenticated() {
+        match get_access_token(&config) {
+            Ok(access_token) => {
+                let client = DropboxClient::new(access_token)?;
+                let remote_meta = fetch_remote_metadata(&client);
+                let db_meta = client.get_metadata(REMOTE_DB_PATH).ok().flatten();
 
-                    (
-                        remote_meta,
-                        FileInfo::from_remote(db_meta.as_ref()),
-                    )
-                }
-                Err(_) => (
-                    None,
-                    FileInfo::from_remote(None),
-                ),
+                (remote_meta, FileInfo::from_remote(db_meta.as_ref()))
             }
-        } else {
-            (
-                None,
-                FileInfo::from_remote(None),
-            )
-        };
+            Err(_) => (None, FileInfo::from_remote(None)),
+        }
+    } else {
+        (None, FileInfo::from_remote(None))
+    };
 
     let status_data = SyncStatusData {
         authenticated: config.is_authenticated(),
@@ -230,7 +217,8 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
     );
 
     // Date range
-    let local_range = local_idx.map(|i| format_date_range(&i.earliest_document, &i.latest_document));
+    let local_range =
+        local_idx.map(|i| format_date_range(&i.earliest_document, &i.latest_document));
     let remote_range =
         remote_idx.map(|i| format_date_range(&i.earliest_document, &i.latest_document));
     print_comparison_row("Date range:", local_range, remote_range);
@@ -257,14 +245,24 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
     // Database modified
     print_comparison_row(
         "Database modified:",
-        data.local_db.modified_time.map(|ts| format_short_time(ts, tz)),
-        data.remote_db.modified_time.map(|ts| format_short_time(ts, tz)),
+        data.local_db
+            .modified_time
+            .map(|ts| format_short_time(ts, tz)),
+        data.remote_db
+            .modified_time
+            .map(|ts| format_short_time(ts, tz)),
     );
 
     // Embeddings
     let local_emb_count = local_idx.map(|i| i.embedding_count).unwrap_or(0);
-    let remote_emb_count = remote_idx.map(|i| i.embedding_count)
-        .or_else(|| data.remote.as_ref().and_then(|m| m.embeddings_db.as_ref()).map(|e| e.embedding_count))
+    let remote_emb_count = remote_idx
+        .map(|i| i.embedding_count)
+        .or_else(|| {
+            data.remote
+                .as_ref()
+                .and_then(|m| m.embeddings_db.as_ref())
+                .map(|e| e.embedding_count)
+        })
         .unwrap_or(0);
     print_comparison_row(
         "Embeddings:",
@@ -274,13 +272,15 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
 
     // Embedding model
     let local_model = local_idx.and_then(|i| i.embedding_model.clone());
-    let remote_model = remote_idx.and_then(|i| i.embedding_model.clone())
-        .or_else(|| data.remote.as_ref().and_then(|m| m.embeddings_db.as_ref()).and_then(|e| e.model.clone()));
-    print_comparison_row(
-        "Embedding model:",
-        local_model,
-        remote_model,
-    );
+    let remote_model = remote_idx
+        .and_then(|i| i.embedding_model.clone())
+        .or_else(|| {
+            data.remote
+                .as_ref()
+                .and_then(|m| m.embeddings_db.as_ref())
+                .and_then(|e| e.model.clone())
+        });
+    print_comparison_row("Embedding model:", local_model, remote_model);
 
     if schema_mismatch {
         println!();

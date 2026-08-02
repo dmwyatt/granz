@@ -393,7 +393,8 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
                     person.get("company_name").and_then(|v| v.as_str()),
                     person.get("job_title").and_then(|v| v.as_str()),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -437,7 +438,8 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
                     end_time,
                     event.get("calendarId").and_then(|v| v.as_str()),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -528,7 +530,8 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
     // notes_fts still needs the explicit rebuild, because nothing populates it
     // anywhere -- that is the bug in #85, and until it is fixed this is what
     // makes `--in notes` return anything in tests.
-    conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", []).unwrap();
+    conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')", [])
+        .unwrap();
 }
 
 /// Build a fixture state with known, deterministic data.

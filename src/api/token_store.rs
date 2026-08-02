@@ -21,7 +21,7 @@
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use log::debug;
 use std::path::Path;
@@ -65,8 +65,8 @@ pub fn decrypt_token_json(granola_dir: &Path) -> Result<String> {
 #[cfg(windows)]
 fn unseal_dek(granola_dir: &Path) -> Result<Vec<u8>> {
     let master = master_key(granola_dir)?;
-    let dek_blob = std::fs::read(granola_dir.join("storage.dek"))
-        .context("Failed to read storage.dek")?;
+    let dek_blob =
+        std::fs::read(granola_dir.join("storage.dek")).context("Failed to read storage.dek")?;
     // storage.dek is a "v10"-prefixed os_crypt GCM blob.
     gcm_open(&master, &dek_blob, 3).context("Failed to decrypt storage.dek")
 }
@@ -127,7 +127,7 @@ fn gcm_open(key: &[u8], blob: &[u8], prefix_len: usize) -> Result<Vec<u8>> {
 #[cfg(windows)]
 fn os_unwrap(blob: &[u8]) -> Result<Vec<u8>> {
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+    use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
 
     let mut input = CRYPT_INTEGER_BLOB {
         cbData: blob.len() as u32,
@@ -156,9 +156,7 @@ fn os_unwrap(blob: &[u8]) -> Result<Vec<u8>> {
     }
 
     // SAFETY: on success `output.pbData` is valid for `output.cbData` bytes.
-    let key = unsafe {
-        std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
-    };
+    let key = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
     // SAFETY: freeing the buffer Windows allocated for us.
     unsafe { LocalFree(output.pbData as _) };
     Ok(key)
@@ -218,5 +216,4 @@ mod tests {
         let blob = seal(&[9u8; 32], &[1u8; NONCE_LEN], b"x", b"");
         assert!(gcm_open(&[0u8; 16], &blob, 0).is_err());
     }
-
 }

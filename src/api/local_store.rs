@@ -9,7 +9,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use log::debug;
 use serde::Deserialize;
 
@@ -75,7 +75,10 @@ fn read_token_json(dir: &Path) -> Result<String> {
     if encrypted.exists() {
         debug!("Reading encrypted token store at {}", encrypted.display());
         return token_store::decrypt_token_json(dir).with_context(|| {
-            format!("Failed to read encrypted Granola token store in {}", dir.display())
+            format!(
+                "Failed to read encrypted Granola token store in {}",
+                dir.display()
+            )
         });
     }
 
@@ -99,7 +102,10 @@ fn extract_access_token(json: &str, dir: &Path) -> Result<String> {
         ))?;
 
     if token.is_empty() {
-        bail!("Access token is empty in Granola config at {}. Please re-login to Granola.", dir.display());
+        bail!(
+            "Access token is empty in Granola config at {}. Please re-login to Granola.",
+            dir.display()
+        );
     }
 
     debug!("Loaded auth token ({} chars)", token.len());
@@ -110,12 +116,14 @@ fn extract_access_token(json: &str, dir: &Path) -> Result<String> {
 /// directory qualifies if it contains either token store file.
 fn find_granola_dir() -> Result<PathBuf> {
     let candidates = granola_dir_candidates();
-    debug!("Searching for Granola config in {} locations", candidates.len());
+    debug!(
+        "Searching for Granola config in {} locations",
+        candidates.len()
+    );
 
     for candidate in &candidates {
         debug!("  checking: {}", candidate.display());
-        if candidate.join("supabase.json.enc").exists()
-            || candidate.join("supabase.json").exists()
+        if candidate.join("supabase.json.enc").exists() || candidate.join("supabase.json").exists()
         {
             debug!("  found: {}", candidate.display());
             return Ok(candidate.clone());
@@ -263,7 +271,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("supabase.json");
 
-        std::fs::write(&config_path, r#"{"workos_tokens": {"access_token": "my-secret-token"}}"#).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{"workos_tokens": {"access_token": "my-secret-token"}}"#,
+        )
+        .unwrap();
 
         // We can't easily test get_auth_token() directly since it uses platform paths,
         // but we can test the parsing logic
@@ -287,9 +299,7 @@ mod tests {
         if let Some(candidates) = wsl_windows_granola_dirs() {
             for path in &candidates {
                 let path_str = path.to_string_lossy();
-                assert!(
-                    path_str.contains("/mnt/c/Users/") && path_str.ends_with("Granola")
-                );
+                assert!(path_str.contains("/mnt/c/Users/") && path_str.ends_with("Granola"));
             }
         }
     }

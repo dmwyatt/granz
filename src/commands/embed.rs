@@ -123,10 +123,7 @@ fn print_status_tty(status: &EmbeddingStatus, spec: &EmbedSpec) {
     );
     println!();
 
-    println!(
-        "Total:     {} chunks",
-        format_number(status.total_chunks)
-    );
+    println!("Total:     {} chunks", format_number(status.total_chunks));
     if status.total_chunks > 0 {
         println!(
             "  Transcripts:  {} chunks ({}%)",
@@ -166,10 +163,7 @@ fn print_status_tty(status: &EmbeddingStatus, spec: &EmbedSpec) {
     }
     println!();
 
-    println!(
-        "Pending:   {} chunks",
-        format_number(status.pending_chunks)
-    );
+    println!("Pending:   {} chunks", format_number(status.pending_chunks));
     if status.pending_chunks > 0 {
         println!(
             "  Transcripts:  {} chunks",
@@ -251,24 +245,16 @@ fn print_status_tty(status: &EmbeddingStatus, spec: &EmbedSpec) {
         println!();
         println!("\x1b[1;33mWarning\x1b[0m");
         println!("\x1b[2m───────\x1b[0m");
-        println!(
-            "  \x1b[33m⚠\x1b[0m Embeddings were created with unknown max_length settings."
-        );
-        println!(
-            "    Run `grans embed` to re-embed with current settings."
-        );
+        println!("  \x1b[33m⚠\x1b[0m Embeddings were created with unknown max_length settings.");
+        println!("    Run `grans embed` to re-embed with current settings.");
     }
 
     if status.model_changed_warning {
         println!();
         println!("\x1b[1;33mWarning\x1b[0m");
         println!("\x1b[2m───────\x1b[0m");
-        println!(
-            "  \x1b[33m⚠\x1b[0m Embeddings were created by a different embedding model."
-        );
-        println!(
-            "    Run `grans embed` to rebuild them."
-        );
+        println!("  \x1b[33m⚠\x1b[0m Embeddings were created by a different embedding model.");
+        println!("    Run `grans embed` to rebuild them.");
     }
 
     if status.pending_chunks > 0 {
@@ -318,10 +304,7 @@ fn clear_embeddings(
             );
         } else {
             let total = status.embedded_chunks + status.orphaned_chunks;
-            eprintln!(
-                "\nThis will clear all {} embeddings.",
-                format_number(total)
-            );
+            eprintln!("\nThis will clear all {} embeddings.", format_number(total));
         }
         eprint!("Proceed? [y/N] ");
         io::stderr().flush()?;
@@ -412,7 +395,8 @@ fn embed_with_prompt(
     }
 
     // Prompt unless --yes or non-TTY
-    if !yes && mode == OutputMode::Tty && (status.pending_chunks > 0 || status.orphaned_chunks > 0) {
+    if !yes && mode == OutputMode::Tty && (status.pending_chunks > 0 || status.orphaned_chunks > 0)
+    {
         let needs_full_reembed = status.orphaned_chunks > 0
             || status.legacy_max_length_warning
             || status.model_changed_warning
@@ -460,7 +444,12 @@ fn embed_with_prompt(
 }
 
 /// Actually perform the embedding.
-fn do_embed(conn: &Connection, batch_size: usize, mode: OutputMode, spec: &EmbedSpec) -> Result<()> {
+fn do_embed(
+    conn: &Connection,
+    batch_size: usize,
+    mode: OutputMode,
+    spec: &EmbedSpec,
+) -> Result<()> {
     let embedder = embed::model::FastEmbedModel::new()?;
     let index = embed::ensure_embeddings(conn, &embedder, batch_size, spec)?;
 
@@ -537,9 +526,5 @@ fn format_number(n: usize) -> String {
 }
 
 fn percentage(part: usize, total: usize) -> usize {
-    if total == 0 {
-        0
-    } else {
-        (100 * part) / total
-    }
+    if total == 0 { 0 } else { (100 * part) / total }
 }

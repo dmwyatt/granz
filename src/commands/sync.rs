@@ -10,27 +10,29 @@ use indicatif::{ProgressBar, ProgressStyle};
 use chrono::FixedOffset;
 
 use crate::cli::args::DropboxAction;
-use crate::output::format::{format_size, OutputMode};
-use crate::sync::config::{config_path, SyncConfig};
+use crate::db::integrity::check_pulled_database;
+use crate::output::format::{OutputMode, format_size};
+use crate::output::progress::create_spinner;
+use crate::pkce::PkceChallenge;
+use crate::sync::SyncError;
+use crate::sync::config::{SyncConfig, config_path};
+use crate::sync::content_hash::{HashingWriter, hash_file};
 use crate::sync::dropbox::DropboxClient;
 use crate::sync::metadata::SyncMetadata;
-use crate::pkce::PkceChallenge;
-use crate::sync::oauth::{
-    build_auth_url, exchange_code, refresh_access_token, PKCE_ENTROPY_BYTES,
-};
-use crate::db::integrity::check_pulled_database;
-use crate::output::progress::create_spinner;
-use crate::sync::content_hash::{hash_file, HashingWriter};
-use crate::sync::reconcile::{decide, TransferDecision};
-use crate::sync::transfer::{no_progress, verify_content_hash, verify_transfer_size, ProgressFn};
-use crate::sync::SyncError;
+use crate::sync::oauth::{PKCE_ENTROPY_BYTES, build_auth_url, exchange_code, refresh_access_token};
+use crate::sync::reconcile::{TransferDecision, decide};
+use crate::sync::transfer::{ProgressFn, no_progress, verify_content_hash, verify_transfer_size};
 
 /// Remote paths on Dropbox (within app folder)
 pub(super) const REMOTE_DB_PATH: &str = "/grans.db";
 pub(super) const REMOTE_METADATA_PATH: &str = "/sync_metadata.json";
 
 /// Run Dropbox commands (init, push, pull, status, logout)
-pub fn run_dropbox(action: &DropboxAction, output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
+pub fn run_dropbox(
+    action: &DropboxAction,
+    output_mode: OutputMode,
+    tz: &FixedOffset,
+) -> Result<()> {
     match action {
         DropboxAction::Init => init()?,
         DropboxAction::Push { force } => push(*force)?,
@@ -260,12 +262,13 @@ fn pull_file(
 
     // Verification needs the hash before the transfer starts; refusing early
     // beats discovering it after moving hundreds of megabytes.
-    let expected_hash = remote
-        .content_hash
-        .as_deref()
-        .ok_or_else(|| SyncError::MissingContentHash {
-            path: remote_path.to_string(),
-        })?;
+    let expected_hash =
+        remote
+            .content_hash
+            .as_deref()
+            .ok_or_else(|| SyncError::MissingContentHash {
+                path: remote_path.to_string(),
+            })?;
 
     let local_hash = local_path
         .exists()
@@ -274,7 +277,10 @@ fn pull_file(
 
     match decide(expected_hash, local_hash.as_deref(), last_synced) {
         TransferDecision::UpToDate => {
-            println!("The local {} already matches Dropbox; nothing to download.", name);
+            println!(
+                "The local {} already matches Dropbox; nothing to download.",
+                name
+            );
             return Ok(expected_hash.to_string());
         }
         TransferDecision::Diverged if !force => {

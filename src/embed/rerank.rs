@@ -68,7 +68,9 @@ fn init_options(choice: RerankModel) -> Result<fastembed::RerankInitOptions> {
 impl FastEmbedReranker {
     pub fn new(choice: RerankModel) -> Result<Self> {
         let model = fastembed::TextRerank::try_new(init_options(choice)?)?;
-        Ok(Self { model: RefCell::new(model) })
+        Ok(Self {
+            model: RefCell::new(model),
+        })
     }
 }
 
@@ -79,7 +81,10 @@ impl Reranker for FastEmbedReranker {
         }
         // fastembed returns results sorted by score; `index` maps each back
         // to its input position.
-        let results = self.model.borrow_mut().rerank(query, documents, false, None)?;
+        let results = self
+            .model
+            .borrow_mut()
+            .rerank(query, documents, false, None)?;
         let mut scores = vec![0.0_f32; documents.len()];
         for r in results {
             scores[r.index] = sigmoid(r.score);
@@ -144,7 +149,9 @@ mod tests {
 
     #[test]
     fn mock_reranker_is_case_insensitive() {
-        let scores = MockReranker.rerank("Budget", &["the BUDGET meeting"]).unwrap();
+        let scores = MockReranker
+            .rerank("Budget", &["the BUDGET meeting"])
+            .unwrap();
         assert_eq!(scores, vec![1.0]);
     }
 

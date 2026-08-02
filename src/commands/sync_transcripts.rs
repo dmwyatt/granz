@@ -118,10 +118,7 @@ pub(super) fn sync_transcripts(
                 );
             }
             OutputMode::Tty => {
-                println!(
-                    "[dry-run] Would sync {} document(s):\n",
-                    documents.len()
-                );
+                println!("[dry-run] Would sync {} document(s):\n", documents.len());
                 for doc in &documents {
                     let title = doc.title.as_deref().unwrap_or("(untitled)");
                     let date = doc.created_at.as_deref().unwrap_or("unknown");
@@ -289,7 +286,10 @@ pub(super) fn sync_single_transcript(
     let resolved_token = crate::api::resolve_token(token)?;
 
     if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        eprintln!("[grans] Fetching transcript for: {} ({})", title_display, doc_id);
+        eprintln!(
+            "[grans] Fetching transcript for: {} ({})",
+            title_display, doc_id
+        );
     }
 
     let outcome = match crate::api::fetch_transcript(&resolved_token, &doc_id) {
@@ -322,12 +322,7 @@ pub(super) fn sync_single_transcript(
     Ok(())
 }
 
-fn print_single_result(
-    doc_id: &str,
-    title: Option<&str>,
-    outcome: FetchOutcome,
-    mode: OutputMode,
-) {
+fn print_single_result(doc_id: &str, title: Option<&str>, outcome: FetchOutcome, mode: OutputMode) {
     match mode {
         OutputMode::Json => {
             let (result, utterances) = match outcome {

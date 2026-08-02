@@ -1,8 +1,6 @@
 use serde::Serialize;
 
-use crate::models::{
-    Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe,
-};
+use crate::models::{Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe};
 
 /// Serialize any serializable value to pretty JSON string.
 pub fn to_json<T: Serialize>(value: &T) -> String {
@@ -160,8 +158,16 @@ impl ShapedMeetingJson {
                     section: ev.section.clone(),
                     snippet: ev.excerpt.text.clone(),
                     highlights: ev.excerpt.highlights.clone(),
-                    context_before: ev.context_before.iter().map(ContextUnitJson::from_unit).collect(),
-                    context_after: ev.context_after.iter().map(ContextUnitJson::from_unit).collect(),
+                    context_before: ev
+                        .context_before
+                        .iter()
+                        .map(ContextUnitJson::from_unit)
+                        .collect(),
+                    context_after: ev
+                        .context_after
+                        .iter()
+                        .map(ContextUnitJson::from_unit)
+                        .collect(),
                 })
                 .collect(),
         }
@@ -234,9 +240,7 @@ pub fn format_recipes(recipes: &[&Recipe]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::shape::{
-        EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting, Signals,
-    };
+    use crate::query::shape::{EvidenceSource, Excerpt, MatchEvidence, ShapedMeeting, Signals};
 
     fn shaped() -> ShapedMeeting {
         ShapedMeeting {
@@ -244,7 +248,11 @@ mod tests {
             title: Some("Infra Sync".to_string()),
             created_at: Some("2026-05-12T14:30:00Z".to_string()),
             score: Some(0.63),
-            signals: Signals { keyword: true, semantic: false, title: true },
+            signals: Signals {
+                keyword: true,
+                semantic: false,
+                title: true,
+            },
             total_matches: 3,
             matches: vec![MatchEvidence {
                 source: EvidenceSource::Transcript,

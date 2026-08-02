@@ -24,12 +24,20 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("migrations/v004_make_title_not_null.sql"))?;
     conn.execute_batch(include_str!("migrations/v005_transcript_sync_log.sql"))?;
     conn.execute_batch(include_str!("migrations/v006_panels.sql"))?;
-    conn.execute_batch(include_str!("migrations/v007_transcript_utterance_index.sql"))?;
+    conn.execute_batch(include_str!(
+        "migrations/v007_transcript_utterance_index.sql"
+    ))?;
     conn.execute_batch(include_str!("migrations/v008_panel_chat_url.sql"))?;
     conn.execute_batch(include_str!("migrations/v009_document_raw_json.sql"))?;
-    conn.execute_batch(include_str!("migrations/v010_rename_audio_source_to_source.sql"))?;
-    conn.execute_batch(include_str!("migrations/v011_raw_json_templates_recipes_events.sql"))?;
-    conn.execute_batch(include_str!("migrations/v012_rename_is_primary_to_primary.sql"))?;
+    conn.execute_batch(include_str!(
+        "migrations/v010_rename_audio_source_to_source.sql"
+    ))?;
+    conn.execute_batch(include_str!(
+        "migrations/v011_raw_json_templates_recipes_events.sql"
+    ))?;
+    conn.execute_batch(include_str!(
+        "migrations/v012_rename_is_primary_to_primary.sql"
+    ))?;
     conn.execute_batch(include_str!("migrations/v013_api_snapshot.sql"))?;
     conn.execute_batch(include_str!("migrations/v014_utterance_speaker_name.sql"))?;
     conn.execute_batch(include_str!("migrations/v015_fts_triggers.sql"))?;

@@ -57,25 +57,40 @@ impl SearchTarget {
 /// Re-join parsed targets into an `--in` flag value, so a suggested command
 /// can echo the active filter as the user could re-type it.
 pub fn targets_to_flag_value(targets: &[SearchTarget]) -> String {
-    targets.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(",")
+    targets
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Compute a source type filter for semantic search from search targets.
 /// Returns `None` when all embeddable sources are included (= search everything).
 /// Returns `Some(empty vec)` if only non-embeddable targets (titles) are selected.
 pub fn semantic_source_filter(targets: &[SearchTarget]) -> Option<Vec<&'static str>> {
-    let all_embeddable = [SearchTarget::Transcripts, SearchTarget::Notes, SearchTarget::Panels];
+    let all_embeddable = [
+        SearchTarget::Transcripts,
+        SearchTarget::Notes,
+        SearchTarget::Panels,
+    ];
     if all_embeddable.iter().all(|t| targets.contains(t)) {
         return None; // default = no filter
     }
-    let types: Vec<&str> = targets.iter().filter_map(|t| t.to_chunk_source_type()).collect();
+    let types: Vec<&str> = targets
+        .iter()
+        .filter_map(|t| t.to_chunk_source_type())
+        .collect();
     Some(types)
 }
 
 /// True when the title or id contains the lowercased filter.
 pub fn meeting_filter_matches(filter_lower: &str, title: Option<&str>, id: Option<&str>) -> bool {
-    title.map(|t| t.to_lowercase().contains(filter_lower)).unwrap_or(false)
-        || id.map(|i| i.to_lowercase().contains(filter_lower)).unwrap_or(false)
+    title
+        .map(|t| t.to_lowercase().contains(filter_lower))
+        .unwrap_or(false)
+        || id
+            .map(|i| i.to_lowercase().contains(filter_lower))
+            .unwrap_or(false)
 }
 
 /// Keep only documents whose title or id contains `filter` (case-insensitive).
@@ -87,7 +102,9 @@ pub fn filter_by_meeting(results: Vec<Document>, meeting_filter: Option<&str>) -
     let filter_lower = filter.to_lowercase();
     results
         .into_iter()
-        .filter(|doc| meeting_filter_matches(&filter_lower, doc.title.as_deref(), doc.id.as_deref()))
+        .filter(|doc| {
+            meeting_filter_matches(&filter_lower, doc.title.as_deref(), doc.id.as_deref())
+        })
         .collect()
 }
 
@@ -99,7 +116,10 @@ mod tests {
     fn test_all_matches_the_default_target_string() {
         // `all()` and DEFAULT_SEARCH_TARGETS must stay in lockstep so the
         // clap default and the footer's "is this the default?" check agree.
-        assert_eq!(targets_to_flag_value(&SearchTarget::all()), DEFAULT_SEARCH_TARGETS);
+        assert_eq!(
+            targets_to_flag_value(&SearchTarget::all()),
+            DEFAULT_SEARCH_TARGETS
+        );
     }
 
     #[test]
@@ -120,28 +140,49 @@ mod tests {
     #[test]
     fn test_to_chunk_source_type() {
         assert_eq!(SearchTarget::Titles.to_chunk_source_type(), None);
-        assert_eq!(SearchTarget::Transcripts.to_chunk_source_type(), Some("transcript_window"));
-        assert_eq!(SearchTarget::Notes.to_chunk_source_type(), Some("notes_paragraph"));
-        assert_eq!(SearchTarget::Panels.to_chunk_source_type(), Some("panel_section"));
+        assert_eq!(
+            SearchTarget::Transcripts.to_chunk_source_type(),
+            Some("transcript_window")
+        );
+        assert_eq!(
+            SearchTarget::Notes.to_chunk_source_type(),
+            Some("notes_paragraph")
+        );
+        assert_eq!(
+            SearchTarget::Panels.to_chunk_source_type(),
+            Some("panel_section")
+        );
     }
 
     #[test]
     fn test_semantic_source_filter_all_embeddable() {
-        let targets = vec![SearchTarget::Transcripts, SearchTarget::Notes, SearchTarget::Panels];
+        let targets = vec![
+            SearchTarget::Transcripts,
+            SearchTarget::Notes,
+            SearchTarget::Panels,
+        ];
         assert_eq!(semantic_source_filter(&targets), None);
     }
 
     #[test]
     fn test_semantic_source_filter_all_with_titles() {
         // All embeddable + titles = still None (search everything)
-        let targets = vec![SearchTarget::Titles, SearchTarget::Transcripts, SearchTarget::Notes, SearchTarget::Panels];
+        let targets = vec![
+            SearchTarget::Titles,
+            SearchTarget::Transcripts,
+            SearchTarget::Notes,
+            SearchTarget::Panels,
+        ];
         assert_eq!(semantic_source_filter(&targets), None);
     }
 
     #[test]
     fn test_semantic_source_filter_subset() {
         let targets = vec![SearchTarget::Panels];
-        assert_eq!(semantic_source_filter(&targets), Some(vec!["panel_section"]));
+        assert_eq!(
+            semantic_source_filter(&targets),
+            Some(vec!["panel_section"])
+        );
     }
 
     #[test]

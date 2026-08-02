@@ -145,7 +145,8 @@ mod tests {
     const ONE_FULL_BLOCK: &str = "907a506cf5e706bda5c7a29b43c9c65d8344bd2fa2f22339b359c214812af5a1";
     const ONE_BLOCK_PLUS_ONE: &str =
         "c53f160bb0f52f97d686989961c455b5bba18dbca70d2cdc402eb63cdddf7b4d";
-    const TWO_FULL_BLOCKS: &str = "caa2b7a097746dcd56cbddd09bb9e5b5ab1c3a9a518a63453f07fb799e7839ec";
+    const TWO_FULL_BLOCKS: &str =
+        "caa2b7a097746dcd56cbddd09bb9e5b5ab1c3a9a518a63453f07fb799e7839ec";
 
     fn hash_all(data: &[u8]) -> String {
         let mut hasher = ContentHasher::new();

@@ -73,7 +73,10 @@ pub fn split_markdown_sections(content: &str) -> Vec<(Option<&str>, &str)> {
         let heading = after_marker[..line_end].trim();
 
         let body_start = start + marker_len + line_end;
-        let body_end = heading_starts.get(idx + 1).copied().unwrap_or(content.len());
+        let body_end = heading_starts
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(content.len());
 
         if body_start <= body_end {
             let body = content[body_start..body_end].trim();
@@ -112,9 +115,7 @@ fn detect_section_header_level(content: &str) -> Option<usize> {
     }
 
     // Among levels with max count, pick the deepest (highest number)
-    (1..=6)
-        .rev()
-        .find(|&level| counts[level] == max_count)
+    (1..=6).rev().find(|&level| counts[level] == max_count)
 }
 
 /// Split text into paragraphs (on `\n\n`), trimming whitespace and filtering empties.
@@ -260,7 +261,8 @@ mod tests {
 
     #[test]
     fn test_split_markdown_sections_multiple() {
-        let content = "### Action Items\n\n- Do thing 1\n\n### Key Decisions\n\nWe decided to ship.";
+        let content =
+            "### Action Items\n\n- Do thing 1\n\n### Key Decisions\n\nWe decided to ship.";
         let sections = split_markdown_sections(content);
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].0, Some("Action Items"));
@@ -323,7 +325,8 @@ mod tests {
     #[test]
     fn test_split_markdown_sections_h1_title_h3_sections() {
         // h1 title + h3 sections → should split on h3 (more frequent)
-        let content = "# Meeting Title\n\n### Action Items\n\n- Do thing\n\n### Decisions\n\nWe decided.";
+        let content =
+            "# Meeting Title\n\n### Action Items\n\n- Do thing\n\n### Decisions\n\nWe decided.";
         let sections = split_markdown_sections(content);
         assert_eq!(sections.len(), 3);
         assert_eq!(sections[0].0, None); // "# Meeting Title" is preamble

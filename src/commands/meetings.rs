@@ -1,11 +1,11 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
-use crate::query::speaker::SpeakerFilter;
 use crate::output::format::OutputMode;
 use crate::query::dates::build_date_range;
+use crate::query::speaker::SpeakerFilter;
 
 pub fn list(
     conn: &Connection,
@@ -17,7 +17,8 @@ pub fn list(
     ctx: &RunContext,
 ) -> Result<()> {
     let date_range = build_date_range(from, to, date, Utc::now(), &ctx.tz);
-    let docs = crate::db::meetings::list_meetings(conn, person, date_range.as_ref(), include_deleted)?;
+    let docs =
+        crate::db::meetings::list_meetings(conn, person, date_range.as_ref(), include_deleted)?;
 
     let refs: Vec<_> = docs.iter().collect();
 
@@ -92,10 +93,7 @@ pub fn show(
                         // Build JSON with requested fields
                         let mut obj = serde_json::Map::new();
                         if notes_only {
-                            obj.insert(
-                                "notes_plain".into(),
-                                serde_json::json!(doc.notes_plain),
-                            );
+                            obj.insert("notes_plain".into(), serde_json::json!(doc.notes_plain));
                             obj.insert(
                                 "notes_markdown".into(),
                                 serde_json::json!(doc.notes_markdown),
@@ -132,7 +130,10 @@ pub fn show(
                     println!("{}", serde_json::to_string_pretty(&detail).unwrap());
                 }
                 OutputMode::Tty => {
-                    println!("{}", crate::output::table::format_meeting_detail(&doc, &ctx.tz));
+                    println!(
+                        "{}",
+                        crate::output::table::format_meeting_detail(&doc, &ctx.tz)
+                    );
 
                     let transcript = filter_by_speaker(
                         crate::db::meetings::get_transcript(conn, doc_id)?,
@@ -141,7 +142,10 @@ pub fn show(
                     if !transcript.is_empty() {
                         println!("\n{}", "Transcript:");
                         for utt in transcript.iter().take(10) {
-                            println!("{}", crate::output::table::format_utterance(utt, false, &ctx.tz));
+                            println!(
+                                "{}",
+                                crate::output::table::format_utterance(utt, false, &ctx.tz)
+                            );
                         }
                         if transcript.len() > 10 {
                             println!("  ... ({} more utterances)", transcript.len() - 10);

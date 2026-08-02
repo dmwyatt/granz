@@ -83,7 +83,9 @@ pub fn list_events(
     calendar: Option<&str>,
     date_range: Option<&DateRange>,
 ) -> Result<Vec<CalendarEvent>> {
-    let mut sql = String::from("SELECT id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json FROM events WHERE 1=1");
+    let mut sql = String::from(
+        "SELECT id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json FROM events WHERE 1=1",
+    );
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(cal) = calendar {
@@ -121,7 +123,10 @@ pub fn list_events(
         })
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).map(row_to_calendar_event).collect())
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .map(row_to_calendar_event)
+        .collect())
 }
 
 #[cfg(test)]
@@ -173,7 +178,9 @@ mod tests {
             end_time: Some("2026-01-20T11:00:00Z".to_string()),
             calendar_id: Some("cal-1".to_string()),
             attendees_json: Some(r#"[{"email":"alice@example.com"}]"#.to_string()),
-            conference_data_json: Some(r#"{"entryPointUri":"https://meet.google.com/abc"}"#.to_string()),
+            conference_data_json: Some(
+                r#"{"entryPointUri":"https://meet.google.com/abc"}"#.to_string(),
+            ),
             description: Some("Discuss project".to_string()),
             extra_json: Some(r#"{"custom":"value"}"#.to_string()),
         };

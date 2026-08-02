@@ -12,11 +12,11 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::models::Document;
-use crate::query::fts::{matches_all_tokens, FtsToken};
+use crate::query::fts::{FtsToken, matches_all_tokens};
 use crate::query::hybrid::BestChunk;
 use crate::query::shape::{
-    excerpt_around_match, title_matches, ContextUnit, EvidenceSource, MatchEvidence,
-    ShapedMeeting, Signals,
+    ContextUnit, EvidenceSource, MatchEvidence, ShapedMeeting, Signals, excerpt_around_match,
+    title_matches,
 };
 use crate::query::speaker::SpeakerFilter;
 use crate::query::text::{split_into_paragraphs, split_markdown_sections, strip_panel_footer};
@@ -40,7 +40,12 @@ pub struct EvidenceOptions {
 
 impl Default for EvidenceOptions {
     fn default() -> Self {
-        Self { max_matches: 1, max_chars: 160, speaker: None, context: 0 }
+        Self {
+            max_matches: 1,
+            max_chars: 160,
+            speaker: None,
+            context: 0,
+        }
     }
 }
 
@@ -102,7 +107,11 @@ pub fn collect_document_evidence(
 
     // Context expansion shows the matched unit whole; the window cap only
     // applies to the compact snippet view.
-    let width = if opts.context > 0 { usize::MAX } else { opts.max_chars };
+    let width = if opts.context > 0 {
+        usize::MAX
+    } else {
+        opts.max_chars
+    };
 
     let total = sites.len();
     let mut matches = Vec::new();
@@ -124,7 +133,11 @@ pub fn collect_document_evidence(
         }
     }
 
-    Ok(DocumentEvidence { matches, total, remaining_sources })
+    Ok(DocumentEvidence {
+        matches,
+        total,
+        remaining_sources,
+    })
 }
 
 /// Ranking facts about one document from the hybrid pipeline.
@@ -154,7 +167,11 @@ pub fn shape_meeting(
     let signals = Signals {
         keyword: facts.keyword,
         semantic: facts.best_chunk.is_some(),
-        title: doc.title.as_deref().map(|t| title_matches(t, tokens)).unwrap_or(false),
+        title: doc
+            .title
+            .as_deref()
+            .map(|t| title_matches(t, tokens))
+            .unwrap_or(false),
     };
 
     // Tier on whether lexical evidence exists, not on whether any was
@@ -330,7 +347,9 @@ fn collect_transcript_sites(
         if matches_all_tokens(text, tokens) {
             let (context_before, context_after) =
                 neighbors_of(&utterances, i, opts.context, |u| ContextUnit {
-                    text: crate::query::shape::normalize_whitespace(u.text.as_deref().unwrap_or_default()),
+                    text: crate::query::shape::normalize_whitespace(
+                        u.text.as_deref().unwrap_or_default(),
+                    ),
                     speaker: u.source.clone(),
                     speaker_name: u.detected_speaker_name.clone(),
                     timestamp: u.start_timestamp.clone(),
@@ -403,7 +422,10 @@ mod tests {
         query: &str,
         max_matches: usize,
     ) -> DocumentEvidence {
-        let limits = EvidenceOptions { max_matches, ..Default::default() };
+        let limits = EvidenceOptions {
+            max_matches,
+            ..Default::default()
+        };
         collect_document_evidence(conn, doc, &parse_query(query), &limits).unwrap()
     }
 
@@ -459,7 +481,10 @@ mod tests {
             .filter(|m| m.source == EvidenceSource::Transcript)
             .collect();
         assert_eq!(transcript[0].speaker.as_deref(), Some("microphone"));
-        assert_eq!(transcript[0].timestamp.as_deref(), Some("2026-01-20T10:01:00Z"));
+        assert_eq!(
+            transcript[0].timestamp.as_deref(),
+            Some("2026-01-20T10:01:00Z")
+        );
         assert_eq!(transcript[1].speaker.as_deref(), Some("system"));
     }
 
@@ -492,7 +517,10 @@ mod tests {
         let ev = collect(&conn, &doc, "kumquat question", 5);
         assert_eq!(ev.total, 1);
         assert_eq!(ev.matches[0].source, EvidenceSource::Transcript);
-        assert_eq!(ev.matches[0].timestamp.as_deref(), Some("2026-01-20T10:03:00Z"));
+        assert_eq!(
+            ev.matches[0].timestamp.as_deref(),
+            Some("2026-01-20T10:03:00Z")
+        );
     }
 
     #[test]
@@ -523,7 +551,14 @@ mod tests {
         query: &str,
         facts: &RankingFacts,
     ) -> ShapedMeeting {
-        shape_meeting(conn, doc, &parse_query(query), facts, &EvidenceOptions::default()).unwrap()
+        shape_meeting(
+            conn,
+            doc,
+            &parse_query(query),
+            facts,
+            &EvidenceOptions::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -531,8 +566,11 @@ mod tests {
         let conn = build_test_db(&evidence_state());
         let doc = load_doc(&conn, "doc-1");
         let chunk = best_chunk("some semantic chunk", "transcript_window", None);
-        let facts =
-            RankingFacts { keyword: true, best_chunk: Some(&chunk), score: Some(0.9) };
+        let facts = RankingFacts {
+            keyword: true,
+            best_chunk: Some(&chunk),
+            score: Some(0.9),
+        };
 
         let shaped = shape(&conn, &doc, "kumquat", &facts);
 
@@ -554,14 +592,21 @@ mod tests {
             "panel_section",
             Some("Decisions"),
         );
-        let facts = RankingFacts { keyword: false, best_chunk: Some(&chunk), score: Some(0.4) };
+        let facts = RankingFacts {
+            keyword: false,
+            best_chunk: Some(&chunk),
+            score: Some(0.4),
+        };
 
         let shaped = shape(&conn, &doc, "zyzzyva", &facts);
 
         assert_eq!(shaped.matches.len(), 1);
         assert_eq!(shaped.matches[0].source, EvidenceSource::Panel);
         assert_eq!(shaped.matches[0].section.as_deref(), Some("Decisions"));
-        assert_eq!(shaped.matches[0].excerpt.text, "discussion of adjacent topics");
+        assert_eq!(
+            shaped.matches[0].excerpt.text,
+            "discussion of adjacent topics"
+        );
         assert!(shaped.matches[0].excerpt.highlights.is_empty());
         assert_eq!(shaped.total_matches, 1);
         assert!(!shaped.signals.keyword);
@@ -576,7 +621,11 @@ mod tests {
             }
         }));
         let doc = load_doc(&conn, "doc-t");
-        let facts = RankingFacts { keyword: true, best_chunk: None, score: None };
+        let facts = RankingFacts {
+            keyword: true,
+            best_chunk: None,
+            score: None,
+        };
 
         let shaped = shape(&conn, &doc, "kumquat", &facts);
 
@@ -593,11 +642,17 @@ mod tests {
         let conn = build_test_db(&evidence_state());
         let doc = load_doc(&conn, "doc-1");
         let chunk = best_chunk("some semantic chunk", "transcript_window", None);
-        let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
-        let limits = EvidenceOptions { max_matches: 0, ..Default::default() };
+        let facts = RankingFacts {
+            keyword: true,
+            best_chunk: Some(&chunk),
+            score: None,
+        };
+        let limits = EvidenceOptions {
+            max_matches: 0,
+            ..Default::default()
+        };
 
-        let shaped =
-            shape_meeting(&conn, &doc, &parse_query("kumquat"), &facts, &limits).unwrap();
+        let shaped = shape_meeting(&conn, &doc, &parse_query("kumquat"), &facts, &limits).unwrap();
 
         // Headers-only: no snippets, but the real lexical count and its
         // sources survive for the collapse line, and the semantic chunk
@@ -634,8 +689,11 @@ mod tests {
         query: &str,
         context: usize,
     ) -> DocumentEvidence {
-        let opts =
-            EvidenceOptions { max_matches: 10, context, ..Default::default() };
+        let opts = EvidenceOptions {
+            max_matches: 10,
+            context,
+            ..Default::default()
+        };
         collect_document_evidence(conn, doc, &parse_query(query), &opts).unwrap()
     }
 
@@ -644,8 +702,11 @@ mod tests {
         let conn = build_test_db(&evidence_state());
         let doc = load_doc(&conn, "doc-1");
         let ev = collect(&conn, &doc, "kumquat", 5);
-        assert!(ev.matches.iter().all(|m| m.context_before.is_empty()
-            && m.context_after.is_empty()));
+        assert!(
+            ev.matches
+                .iter()
+                .all(|m| m.context_before.is_empty() && m.context_after.is_empty())
+        );
     }
 
     #[test]
@@ -711,7 +772,14 @@ mod tests {
 
         let full = collect_with_context(&conn, &doc, "kumquat", 2);
         assert!(!full.matches[0].excerpt.text.contains('…'));
-        assert_eq!(full.matches[0].excerpt.text, long_para.trim().split_whitespace().collect::<Vec<_>>().join(" "));
+        assert_eq!(
+            full.matches[0].excerpt.text,
+            long_para
+                .trim()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 
     #[test]
@@ -726,13 +794,15 @@ mod tests {
             speaker: Some(crate::query::speaker::SpeakerFilter::Me),
             ..Default::default()
         };
-        let ev =
-            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        let ev = collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
         // Only u1 (microphone) matches; its neighbor u2 is by the other
         // speaker and still appears as context.
         assert_eq!(ev.total, 1);
         assert_eq!(ev.matches[0].context_after.len(), 1);
-        assert_eq!(ev.matches[0].context_after[0].speaker.as_deref(), Some("system"));
+        assert_eq!(
+            ev.matches[0].context_after[0].speaker.as_deref(),
+            Some("system")
+        );
     }
 
     // --- speaker filter ---
@@ -747,8 +817,7 @@ mod tests {
             speaker: Some(crate::query::speaker::SpeakerFilter::Me),
             ..Default::default()
         };
-        let ev =
-            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        let ev = collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
         assert_eq!(ev.total, 1);
         assert_eq!(ev.matches[0].source, EvidenceSource::Transcript);
         assert_eq!(ev.matches[0].speaker.as_deref(), Some("microphone"));
@@ -763,8 +832,7 @@ mod tests {
             speaker: Some(SpeakerFilter::Names(vec!["Jane Doe".to_string()])),
             ..Default::default()
         };
-        let ev =
-            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        let ev = collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
         assert_eq!(ev.total, 1);
         assert_eq!(ev.matches[0].speaker_name.as_deref(), Some("Jane Doe"));
         assert!(ev.matches[0].excerpt.text.contains("rollout"));
@@ -781,8 +849,7 @@ mod tests {
             speaker: Some(SpeakerFilter::Names(vec!["Marcus Webb".to_string()])),
             ..Default::default()
         };
-        let ev =
-            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        let ev = collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
         assert_eq!(ev.total, 1);
         assert_eq!(ev.matches[0].speaker_name.as_deref(), Some("Marcus Webb"));
     }
@@ -834,8 +901,7 @@ mod tests {
             speaker: Some(crate::query::speaker::SpeakerFilter::Other),
             ..Default::default()
         };
-        let ev =
-            collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
+        let ev = collect_document_evidence(&conn, &doc, &parse_query("kumquat"), &opts).unwrap();
         // Only u3 ("Back to the kumquat question.", system); the panel and
         // notes sites have no speaker to attribute and do not count.
         assert_eq!(ev.total, 1);
@@ -851,14 +917,17 @@ mod tests {
         // leaves no attributable evidence, and neither the semantic chunk
         // nor the title may stand in.
         let chunk = best_chunk("some semantic chunk", "transcript_window", None);
-        let facts = RankingFacts { keyword: true, best_chunk: Some(&chunk), score: None };
+        let facts = RankingFacts {
+            keyword: true,
+            best_chunk: Some(&chunk),
+            score: None,
+        };
         let opts = EvidenceOptions {
             speaker: Some(crate::query::speaker::SpeakerFilter::Other),
             ..Default::default()
         };
 
-        let shaped =
-            shape_meeting(&conn, &doc, &parse_query("rollout"), &facts, &opts).unwrap();
+        let shaped = shape_meeting(&conn, &doc, &parse_query("rollout"), &facts, &opts).unwrap();
 
         assert_eq!(shaped.total_matches, 0);
         assert!(shaped.matches.is_empty());
@@ -868,7 +937,11 @@ mod tests {
     fn shaped_meeting_carries_identity_fields() {
         let conn = build_test_db(&evidence_state());
         let doc = load_doc(&conn, "doc-1");
-        let facts = RankingFacts { keyword: true, best_chunk: None, score: Some(0.7) };
+        let facts = RankingFacts {
+            keyword: true,
+            best_chunk: None,
+            score: Some(0.7),
+        };
 
         let shaped = shape(&conn, &doc, "kumquat", &facts);
 

@@ -229,7 +229,10 @@ fn redact_utterance_snapshot(utt: &crate::models::TranscriptUtterance) -> Option
     let obj = value.as_object_mut()?;
     if let Some(v) = obj.get("text") {
         if !v.is_null() {
-            obj.insert("text".to_string(), serde_json::Value::String("[stored]".to_string()));
+            obj.insert(
+                "text".to_string(),
+                serde_json::Value::String("[stored]".to_string()),
+            );
         }
     }
     serde_json::to_string(&value).ok()
@@ -342,7 +345,9 @@ mod tests {
             [],
         ).unwrap();
 
-        let docs = find_documents_without_transcripts(&conn, Some("2026-01-20T00:00:00Z"), None, false).unwrap();
+        let docs =
+            find_documents_without_transcripts(&conn, Some("2026-01-20T00:00:00Z"), None, false)
+                .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].id, "doc-new");
     }
@@ -402,19 +407,23 @@ mod tests {
         assert_eq!(inserted, 2);
 
         // Verify insertion
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM transcript_utterances WHERE document_id = 'doc-api'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_utterances WHERE document_id = 'doc-api'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 2);
 
         // Verify source is 'api'
-        let source: String = conn.query_row(
-            "SELECT transcript_source FROM transcript_utterances WHERE id = 'api-u1'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let source: String = conn
+            .query_row(
+                "SELECT transcript_source FROM transcript_utterances WHERE id = 'api-u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(source, "api");
     }
 
@@ -423,36 +432,38 @@ mod tests {
         let conn = build_test_db(&transcripts_state());
 
         // doc-1 already has transcripts from transcripts_state
-        let old_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM transcript_utterances WHERE document_id = 'doc-1'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_utterances WHERE document_id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(old_count > 0);
 
-        let utterances = vec![
-            crate::models::TranscriptUtterance {
-                id: Some("new-u1".to_string()),
-                document_id: Some("doc-1".to_string()),
-                start_timestamp: None,
-                end_timestamp: None,
-                text: Some("Replaced transcript".to_string()),
-                source: None,
-                is_final: None,
-                detected_speaker_name: None,
-                extra: Default::default(),
-            },
-        ];
+        let utterances = vec![crate::models::TranscriptUtterance {
+            id: Some("new-u1".to_string()),
+            document_id: Some("doc-1".to_string()),
+            start_timestamp: None,
+            end_timestamp: None,
+            text: Some("Replaced transcript".to_string()),
+            source: None,
+            is_final: None,
+            detected_speaker_name: None,
+            extra: Default::default(),
+        }];
 
         let inserted = insert_transcript_from_api(&conn, "doc-1", &utterances).unwrap();
         assert_eq!(inserted, 1);
 
         // Verify only the new transcript exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM transcript_utterances WHERE document_id = 'doc-1'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_utterances WHERE document_id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -470,22 +481,24 @@ mod tests {
         };
 
         // transcripts_state has doc-1 with text "neural networks" - verify it's searchable
-        assert_eq!(fts_count("neural networks"), 1, "Should find 'neural networks' before replacement");
+        assert_eq!(
+            fts_count("neural networks"),
+            1,
+            "Should find 'neural networks' before replacement"
+        );
 
         // Replace with completely different text
-        let utterances = vec![
-            crate::models::TranscriptUtterance {
-                id: Some("new-u1".to_string()),
-                document_id: Some("doc-1".to_string()),
-                start_timestamp: None,
-                end_timestamp: None,
-                text: Some("quantum computing breakthroughs".to_string()),
-                source: None,
-                is_final: None,
-                detected_speaker_name: None,
-                extra: Default::default(),
-            },
-        ];
+        let utterances = vec![crate::models::TranscriptUtterance {
+            id: Some("new-u1".to_string()),
+            document_id: Some("doc-1".to_string()),
+            start_timestamp: None,
+            end_timestamp: None,
+            text: Some("quantum computing breakthroughs".to_string()),
+            source: None,
+            is_final: None,
+            detected_speaker_name: None,
+            extra: Default::default(),
+        }];
 
         insert_transcript_from_api(&conn, "doc-1", &utterances).unwrap();
 
@@ -497,7 +510,11 @@ mod tests {
         );
 
         // NEW text SHOULD be searchable
-        assert_eq!(fts_count("quantum computing"), 1, "Should find 'quantum computing' after replacement");
+        assert_eq!(
+            fts_count("quantum computing"),
+            1,
+            "Should find 'quantum computing' after replacement"
+        );
 
         // And the index agrees with the source, which the old hand-maintained
         // path could not promise.
@@ -536,15 +553,27 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(hits("photosynthesis"), 1, "the insert alone should index it");
+        assert_eq!(
+            hits("photosynthesis"),
+            1,
+            "the insert alone should index it"
+        );
 
         conn.execute(
             "UPDATE transcript_utterances SET text = 'respiration' WHERE id = 'u-bare'",
             [],
         )
         .unwrap();
-        assert_eq!(hits("photosynthesis"), 0, "the update should unindex the old text");
-        assert_eq!(hits("respiration"), 1, "the update should index the new text");
+        assert_eq!(
+            hits("photosynthesis"),
+            0,
+            "the update should unindex the old text"
+        );
+        assert_eq!(
+            hits("respiration"),
+            1,
+            "the update should index the new text"
+        );
 
         conn.execute("DELETE FROM transcript_utterances WHERE id = 'u-bare'", [])
             .unwrap();
@@ -564,19 +593,17 @@ mod tests {
     fn test_insert_transcript_from_api_nonexistent_document() {
         let conn = build_test_db(&transcripts_state());
 
-        let utterances = vec![
-            crate::models::TranscriptUtterance {
-                id: Some("u1".to_string()),
-                document_id: Some("nonexistent".to_string()),
-                start_timestamp: None,
-                end_timestamp: None,
-                text: Some("test".to_string()),
-                source: None,
-                is_final: None,
-                detected_speaker_name: None,
-                extra: Default::default(),
-            },
-        ];
+        let utterances = vec![crate::models::TranscriptUtterance {
+            id: Some("u1".to_string()),
+            document_id: Some("nonexistent".to_string()),
+            start_timestamp: None,
+            end_timestamp: None,
+            text: Some("test".to_string()),
+            source: None,
+            is_final: None,
+            detected_speaker_name: None,
+            extra: Default::default(),
+        }];
 
         let result = insert_transcript_from_api(&conn, "nonexistent", &utterances);
         assert!(result.is_err());
@@ -621,19 +648,23 @@ mod tests {
         assert_eq!(inserted, 2);
 
         // Verify the metadata was stored correctly
-        let (source1, is_final1): (Option<String>, Option<bool>) = conn.query_row(
-            "SELECT source, is_final FROM transcript_utterances WHERE id = 'meta-u1'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (source1, is_final1): (Option<String>, Option<bool>) = conn
+            .query_row(
+                "SELECT source, is_final FROM transcript_utterances WHERE id = 'meta-u1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(source1, Some("microphone".to_string()));
         assert_eq!(is_final1, Some(true));
 
-        let (source2, is_final2): (Option<String>, Option<bool>) = conn.query_row(
-            "SELECT source, is_final FROM transcript_utterances WHERE id = 'meta-u2'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (source2, is_final2): (Option<String>, Option<bool>) = conn
+            .query_row(
+                "SELECT source, is_final FROM transcript_utterances WHERE id = 'meta-u2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(source2, Some("system".to_string()));
         assert_eq!(is_final2, Some(false));
     }
@@ -683,11 +714,13 @@ mod tests {
 
         log_transcript_sync_failure(&conn, "doc-3", "not_found").unwrap();
 
-        let (status, attempts): (String, i64) = conn.query_row(
-            "SELECT status, attempts FROM transcript_sync_log WHERE document_id = 'doc-3'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (status, attempts): (String, i64) = conn
+            .query_row(
+                "SELECT status, attempts FROM transcript_sync_log WHERE document_id = 'doc-3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
 
         assert_eq!(status, "not_found");
         assert_eq!(attempts, 1);
@@ -705,11 +738,13 @@ mod tests {
         log_transcript_sync_failure(&conn, "doc-3", "not_found").unwrap();
         log_transcript_sync_failure(&conn, "doc-3", "error").unwrap();
 
-        let (status, attempts): (String, i64) = conn.query_row(
-            "SELECT status, attempts FROM transcript_sync_log WHERE document_id = 'doc-3'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (status, attempts): (String, i64) = conn
+            .query_row(
+                "SELECT status, attempts FROM transcript_sync_log WHERE document_id = 'doc-3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
 
         assert_eq!(status, "error");
         assert_eq!(attempts, 2);
@@ -727,21 +762,25 @@ mod tests {
         log_transcript_sync_failure(&conn, "doc-3", "not_found").unwrap();
 
         // Verify it exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM transcript_sync_log WHERE document_id = 'doc-3'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_sync_log WHERE document_id = 'doc-3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
 
         clear_transcript_sync_log_entry(&conn, "doc-3").unwrap();
 
         // Verify it's gone
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM transcript_sync_log WHERE document_id = 'doc-3'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_sync_log WHERE document_id = 'doc-3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -827,7 +866,10 @@ mod tests {
         }
 
         // Only count failures for documents created since 2026-01-24
-        assert_eq!(count_transcript_sync_failures(&conn, Some("2026-01-24T00:00:00Z")).unwrap(), 2);
+        assert_eq!(
+            count_transcript_sync_failures(&conn, Some("2026-01-24T00:00:00Z")).unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -923,27 +965,27 @@ mod tests {
             [],
         ).unwrap();
 
-        let utterances = vec![
-            crate::models::TranscriptUtterance {
-                id: Some("snap-u1".to_string()),
-                document_id: Some("doc-snap".to_string()),
-                start_timestamp: Some("2026-01-25T10:00:00Z".to_string()),
-                end_timestamp: Some("2026-01-25T10:00:30Z".to_string()),
-                text: Some("Hello from snapshot test".to_string()),
-                source: Some("microphone".to_string()),
-                is_final: Some(true),
-                detected_speaker_name: None,
-                extra: Default::default(),
-            },
-        ];
+        let utterances = vec![crate::models::TranscriptUtterance {
+            id: Some("snap-u1".to_string()),
+            document_id: Some("doc-snap".to_string()),
+            start_timestamp: Some("2026-01-25T10:00:00Z".to_string()),
+            end_timestamp: Some("2026-01-25T10:00:30Z".to_string()),
+            text: Some("Hello from snapshot test".to_string()),
+            source: Some("microphone".to_string()),
+            is_final: Some(true),
+            detected_speaker_name: None,
+            extra: Default::default(),
+        }];
 
         insert_transcript_from_api(&conn, "doc-snap", &utterances).unwrap();
 
-        let snapshot: Option<String> = conn.query_row(
-            "SELECT api_snapshot FROM transcript_utterances WHERE id = 'snap-u1'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let snapshot: Option<String> = conn
+            .query_row(
+                "SELECT api_snapshot FROM transcript_utterances WHERE id = 'snap-u1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(snapshot.is_some());
 
         let parsed: serde_json::Value = serde_json::from_str(&snapshot.unwrap()).unwrap();
@@ -998,7 +1040,10 @@ mod tests {
         ).unwrap();
 
         let utterances = load_transcript(&conn, "doc-attr").unwrap();
-        assert_eq!(utterances[0].detected_speaker_name.as_deref(), Some("Jane Doe"));
+        assert_eq!(
+            utterances[0].detected_speaker_name.as_deref(),
+            Some("Jane Doe")
+        );
         // The microphone channel is the local user and is never attributed.
         assert!(utterances[1].detected_speaker_name.is_none());
     }
@@ -1023,11 +1068,13 @@ mod tests {
 
         insert_transcript_from_api(&conn, "doc-attr", &utterances).unwrap();
 
-        let name: Option<String> = conn.query_row(
-            "SELECT speaker_name FROM transcript_utterances WHERE id = 'attr-u1'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let name: Option<String> = conn
+            .query_row(
+                "SELECT speaker_name FROM transcript_utterances WHERE id = 'attr-u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(name, Some("Jane Doe".to_string()));
     }
 
@@ -1085,11 +1132,15 @@ mod tests {
                 "INSERT INTO transcript_utterances (id, document_id, text, source, speaker_name)
                  VALUES (?1, 'doc-attr', 'x', 'system', ?2)",
                 rusqlite::params![id, name],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let names = distinct_speaker_names(&conn).unwrap();
-        assert_eq!(names, vec!["Jane Doe".to_string(), "Marcus Webb".to_string()]);
+        assert_eq!(
+            names,
+            vec!["Jane Doe".to_string(), "Marcus Webb".to_string()]
+        );
     }
 
     #[test]

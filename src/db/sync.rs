@@ -7,9 +7,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::api::types::GetRecipesResponse;
-use crate::models::{
-    CalendarEvent, Document, DocumentPeople, PanelTemplate, Person, Recipe,
-};
+use crate::models::{CalendarEvent, Document, DocumentPeople, PanelTemplate, Person, Recipe};
 
 // ============================================================================
 // Sync Statistics
@@ -37,9 +35,19 @@ struct DocumentJsonFields {
 
 fn serialize_document_json(doc: &Document) -> DocumentJsonFields {
     DocumentJsonFields {
-        people_json: doc.people.as_ref().and_then(|p| serde_json::to_string(p).ok()),
-        event_json: doc.google_calendar_event.as_ref().and_then(|e| serde_json::to_string(e).ok()),
-        extra_json: if doc.extra.is_empty() { None } else { serde_json::to_string(&doc.extra).ok() },
+        people_json: doc
+            .people
+            .as_ref()
+            .and_then(|p| serde_json::to_string(p).ok()),
+        event_json: doc
+            .google_calendar_event
+            .as_ref()
+            .and_then(|e| serde_json::to_string(e).ok()),
+        extra_json: if doc.extra.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&doc.extra).ok()
+        },
         raw_json: serde_json::to_string(doc).ok(),
     }
 }
@@ -57,9 +65,19 @@ fn serialize_event_json(event: &CalendarEvent) -> EventJsonFields {
     EventJsonFields {
         start_time: event.start.as_ref().and_then(|s| s.date_time.clone()),
         end_time: event.end.as_ref().and_then(|e| e.date_time.clone()),
-        attendees_json: event.attendees.as_ref().and_then(|a| serde_json::to_string(a).ok()),
-        conference_data_json: event.conference_data.as_ref().and_then(|c| serde_json::to_string(c).ok()),
-        extra_json: if event.extra.is_empty() { None } else { serde_json::to_string(&event.extra).ok() },
+        attendees_json: event
+            .attendees
+            .as_ref()
+            .and_then(|a| serde_json::to_string(a).ok()),
+        conference_data_json: event
+            .conference_data
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok()),
+        extra_json: if event.extra.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&event.extra).ok()
+        },
         raw_json: serde_json::to_string(event).ok(),
     }
 }
@@ -73,9 +91,19 @@ struct TemplateJsonFields {
 
 fn serialize_template_json(template: &PanelTemplate) -> TemplateJsonFields {
     TemplateJsonFields {
-        sections_json: template.sections.as_ref().and_then(|s| serde_json::to_string(s).ok()),
-        chat_suggestions_json: template.chat_suggestions.as_ref().and_then(|c| serde_json::to_string(c).ok()),
-        extra_json: if template.extra.is_empty() { None } else { serde_json::to_string(&template.extra).ok() },
+        sections_json: template
+            .sections
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok()),
+        chat_suggestions_json: template
+            .chat_suggestions
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok()),
+        extra_json: if template.extra.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&template.extra).ok()
+        },
         raw_json: serde_json::to_string(template).ok(),
     }
 }
@@ -88,8 +116,15 @@ struct RecipeJsonFields {
 
 fn serialize_recipe_json(recipe: &Recipe) -> RecipeJsonFields {
     RecipeJsonFields {
-        config_json: recipe.config.as_ref().and_then(|c| serde_json::to_string(c).ok()),
-        extra_json: if recipe.extra.is_empty() { None } else { serde_json::to_string(&recipe.extra).ok() },
+        config_json: recipe
+            .config
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok()),
+        extra_json: if recipe.extra.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&recipe.extra).ok()
+        },
         raw_json: serde_json::to_string(recipe).ok(),
     }
 }
@@ -103,9 +138,7 @@ fn serialize_recipe_json(recipe: &Recipe) -> RecipeJsonFields {
 pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let initial_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM documents", [], |r| r.get(0),
-    )?;
+    let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
         "INSERT INTO documents (id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json, extra_json, raw_json)
@@ -153,7 +186,10 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
             // Upsert document_people on insert or update
             if let Some(people) = &doc.people {
                 if let Err(e) = upsert_document_people(conn, doc_id, people) {
-                    eprintln!("[grans] Warning: Failed to upsert people for {}: {}", doc_id, e);
+                    eprintln!(
+                        "[grans] Warning: Failed to upsert people for {}: {}",
+                        doc_id, e
+                    );
                 }
             }
         } else {
@@ -161,19 +197,22 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
         }
     }
 
-    let final_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM documents", [], |r| r.get(0),
-    )?;
+    let final_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
     stats.inserted = (final_count - initial_count) as usize;
-    stats.updated = documents.len() - stats.unchanged - stats.inserted
+    stats.updated = documents.len()
+        - stats.unchanged
+        - stats.inserted
         - documents.iter().filter(|d| d.id.is_none()).count();
-
 
     Ok(stats)
 }
 
 /// Upsert document_people entries for a document
-fn upsert_document_people(conn: &Connection, document_id: &str, people: &DocumentPeople) -> Result<()> {
+fn upsert_document_people(
+    conn: &Connection,
+    document_id: &str,
+    people: &DocumentPeople,
+) -> Result<()> {
     // Delete existing entries for this document
     conn.execute(
         "DELETE FROM document_people WHERE document_id = ?1",
@@ -220,9 +259,7 @@ fn upsert_document_people(conn: &Connection, document_id: &str, people: &Documen
 pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let initial_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM people", [], |r| r.get(0),
-    )?;
+    let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM people", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
         "INSERT INTO people (id, name, email, company_name, job_title, extra_json)
@@ -240,7 +277,11 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
             eprintln!("Warning: skipping person without ID");
             continue;
         };
-        let extra_json = if person.extra.is_empty() { None } else { serde_json::to_string(&person.extra).ok() };
+        let extra_json = if person.extra.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&person.extra).ok()
+        };
 
         upsert_stmt.execute(rusqlite::params![
             person_id,
@@ -252,12 +293,10 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
         ])?;
     }
 
-    let final_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM people", [], |r| r.get(0),
-    )?;
+    let final_count: i64 = conn.query_row("SELECT COUNT(*) FROM people", [], |r| r.get(0))?;
     stats.inserted = (final_count - initial_count) as usize;
-    stats.updated = people.len() - stats.inserted
-        - people.iter().filter(|p| p.id.is_none()).count();
+    stats.updated =
+        people.len() - stats.inserted - people.iter().filter(|p| p.id.is_none()).count();
 
     Ok(stats)
 }
@@ -270,9 +309,7 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
 pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let initial_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events", [], |r| r.get(0),
-    )?;
+    let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
         "INSERT INTO events (id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json, raw_json)
@@ -310,12 +347,10 @@ pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Re
         ])?;
     }
 
-    let final_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events", [], |r| r.get(0),
-    )?;
+    let final_count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
     stats.inserted = (final_count - initial_count) as usize;
-    stats.updated = events.len() - stats.inserted
-        - events.iter().filter(|e| e.id.is_none()).count();
+    stats.updated =
+        events.len() - stats.inserted - events.iter().filter(|e| e.id.is_none()).count();
 
     Ok(stats)
 }
@@ -334,9 +369,7 @@ pub fn upsert_calendars_from_selection(
 ) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let initial_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM calendars", [], |r| r.get(0),
-    )?;
+    let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM calendars", [], |r| r.get(0))?;
 
     // For calendars, we store the selection state. The full calendar info comes from events.
     for (calendar_id, selected) in calendars_selected {
@@ -364,9 +397,7 @@ pub fn upsert_calendars_from_selection(
         }
     }
 
-    let final_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM calendars", [], |r| r.get(0),
-    )?;
+    let final_count: i64 = conn.query_row("SELECT COUNT(*) FROM calendars", [], |r| r.get(0))?;
     stats.inserted = (final_count - initial_count) as usize;
     stats.updated = calendars_selected.len() - stats.inserted;
 
@@ -381,9 +412,7 @@ pub fn upsert_calendars_from_selection(
 pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let initial_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM templates", [], |r| r.get(0),
-    )?;
+    let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM templates", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
         "INSERT INTO templates (id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json, raw_json)
@@ -437,11 +466,11 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
         }
     }
 
-    let final_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM templates", [], |r| r.get(0),
-    )?;
+    let final_count: i64 = conn.query_row("SELECT COUNT(*) FROM templates", [], |r| r.get(0))?;
     stats.inserted = (final_count - initial_count) as usize;
-    stats.updated = templates.len() - stats.unchanged - stats.inserted
+    stats.updated = templates.len()
+        - stats.unchanged
+        - stats.inserted
         - templates.iter().filter(|t| t.id.is_none()).count();
 
     Ok(stats)
@@ -455,9 +484,7 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
 pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
-    let initial_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM recipes", [], |r| r.get(0),
-    )?;
+    let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM recipes", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
         "INSERT INTO recipes (id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id, extra_json, raw_json)
@@ -481,7 +508,11 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
     let mut skipped = 0usize;
 
     // Process all recipes from the response
-    let mut process_recipes = |recipes: &[Recipe], visibility: &str, stats: &mut SyncStats, skipped: &mut usize| -> Result<()> {
+    let mut process_recipes = |recipes: &[Recipe],
+                               visibility: &str,
+                               stats: &mut SyncStats,
+                               skipped: &mut usize|
+     -> Result<()> {
         for recipe in recipes {
             let Some(recipe_id) = recipe.id.as_deref() else {
                 eprintln!("Warning: skipping recipe without ID");
@@ -516,15 +547,23 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
         Ok(())
     };
 
-    process_recipes(&response.default_recipes, "default", &mut stats, &mut skipped)?;
+    process_recipes(
+        &response.default_recipes,
+        "default",
+        &mut stats,
+        &mut skipped,
+    )?;
     process_recipes(&response.public_recipes, "public", &mut stats, &mut skipped)?;
     process_recipes(&response.user_recipes, "user", &mut stats, &mut skipped)?;
     process_recipes(&response.shared_recipes, "shared", &mut stats, &mut skipped)?;
-    process_recipes(&response.unlisted_recipes, "unlisted", &mut stats, &mut skipped)?;
-
-    let final_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM recipes", [], |r| r.get(0),
+    process_recipes(
+        &response.unlisted_recipes,
+        "unlisted",
+        &mut stats,
+        &mut skipped,
     )?;
+
+    let final_count: i64 = conn.query_row("SELECT COUNT(*) FROM recipes", [], |r| r.get(0))?;
     let total_recipes = response.default_recipes.len()
         + response.public_recipes.len()
         + response.user_recipes.len()
@@ -600,7 +639,9 @@ mod tests {
 
         // Verify insertion
         let title: String = conn
-            .query_row("SELECT title FROM documents WHERE id = 'doc-1'", [], |r| r.get(0))
+            .query_row("SELECT title FROM documents WHERE id = 'doc-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(title, "Test Meeting");
     }
@@ -663,7 +704,9 @@ mod tests {
         assert_eq!(stats.updated, 1);
 
         let title: String = conn
-            .query_row("SELECT title FROM documents WHERE id = 'doc-1'", [], |r| r.get(0))
+            .query_row("SELECT title FROM documents WHERE id = 'doc-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(title, "Updated Title");
     }
@@ -768,7 +811,9 @@ mod tests {
         assert_eq!(stats.inserted, 1);
 
         let summary: String = conn
-            .query_row("SELECT summary FROM events WHERE id = 'e-1'", [], |r| r.get(0))
+            .query_row("SELECT summary FROM events WHERE id = 'e-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(summary, "Team Meeting");
     }
@@ -801,7 +846,9 @@ mod tests {
         assert_eq!(stats.inserted, 1);
 
         let title: String = conn
-            .query_row("SELECT title FROM templates WHERE id = 't-1'", [], |r| r.get(0))
+            .query_row("SELECT title FROM templates WHERE id = 't-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(title, "Meeting Notes");
     }
@@ -840,7 +887,9 @@ mod tests {
         assert_eq!(stats.inserted, 1);
 
         let slug: String = conn
-            .query_row("SELECT slug FROM recipes WHERE id = 'r-1'", [], |r| r.get(0))
+            .query_row("SELECT slug FROM recipes WHERE id = 'r-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(slug, "test-recipe");
     }
@@ -920,7 +969,11 @@ mod tests {
         upsert_documents(&conn, &docs).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM documents WHERE id = 'doc-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT raw_json FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(raw_json.is_some());
 
@@ -984,7 +1037,11 @@ mod tests {
         upsert_documents(&conn, &updated_docs).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM documents WHERE id = 'doc-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT raw_json FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw_json.unwrap()).unwrap();
         assert_eq!(parsed["title"], "Updated Title");
@@ -1025,7 +1082,11 @@ mod tests {
 
         // Verify extra_json was persisted
         let extra_json: Option<String> = conn
-            .query_row("SELECT extra_json FROM documents WHERE id = 'doc-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT extra_json FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(extra_json.is_some());
         let parsed: serde_json::Value = serde_json::from_str(&extra_json.unwrap()).unwrap();
@@ -1050,16 +1111,14 @@ mod tests {
                 time_zone: None,
                 extra: Default::default(),
             }),
-            attendees: Some(vec![
-                crate::models::EventAttendee {
-                    email: Some("alice@example.com".to_string()),
-                    display_name: Some("Alice".to_string()),
-                    response_status: Some("accepted".to_string()),
-                    is_self: None,
-                    organizer: None,
-                    extra: Default::default(),
-                }
-            ]),
+            attendees: Some(vec![crate::models::EventAttendee {
+                email: Some("alice@example.com".to_string()),
+                display_name: Some("Alice".to_string()),
+                response_status: Some("accepted".to_string()),
+                is_self: None,
+                organizer: None,
+                extra: Default::default(),
+            }]),
             creator: None,
             organizer: None,
             conference_data: Some(json!({"entryPointUri": "https://meet.google.com/abc-def"})),
@@ -1085,12 +1144,17 @@ mod tests {
 
         assert_eq!(description.as_deref(), Some("Discuss project updates"));
 
-        let attendees: Vec<serde_json::Value> = serde_json::from_str(&attendees_json.unwrap()).unwrap();
+        let attendees: Vec<serde_json::Value> =
+            serde_json::from_str(&attendees_json.unwrap()).unwrap();
         assert_eq!(attendees.len(), 1);
         assert_eq!(attendees[0]["email"], "alice@example.com");
 
-        let conf_data: serde_json::Value = serde_json::from_str(&conference_data_json.unwrap()).unwrap();
-        assert_eq!(conf_data["entryPointUri"], "https://meet.google.com/abc-def");
+        let conf_data: serde_json::Value =
+            serde_json::from_str(&conference_data_json.unwrap()).unwrap();
+        assert_eq!(
+            conf_data["entryPointUri"],
+            "https://meet.google.com/abc-def"
+        );
     }
 
     #[test]
@@ -1112,12 +1176,10 @@ mod tests {
             deleted_at: None,
             shared_with: None,
             copied_from: None,
-            chat_suggestions: Some(vec![
-                crate::models::ChatSuggestion {
-                    label: Some("Summarize".to_string()),
-                    message: Some("Please summarize this meeting".to_string()),
-                }
-            ]),
+            chat_suggestions: Some(vec![crate::models::ChatSuggestion {
+                label: Some("Summarize".to_string()),
+                message: Some("Please summarize this meeting".to_string()),
+            }]),
             user_types: None,
             extra: Default::default(),
         }];
@@ -1127,10 +1189,15 @@ mod tests {
 
         // Verify chat_suggestions_json was persisted
         let chat_suggestions_json: Option<String> = conn
-            .query_row("SELECT chat_suggestions_json FROM templates WHERE id = 't-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT chat_suggestions_json FROM templates WHERE id = 't-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(chat_suggestions_json.is_some());
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&chat_suggestions_json.unwrap()).unwrap();
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&chat_suggestions_json.unwrap()).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["label"], "Summarize");
     }
@@ -1140,7 +1207,10 @@ mod tests {
         let conn = build_test_db(&empty_state());
 
         let mut extra = std::collections::HashMap::new();
-        extra.insert("linkedin_url".to_string(), json!("https://linkedin.com/in/alice"));
+        extra.insert(
+            "linkedin_url".to_string(),
+            json!("https://linkedin.com/in/alice"),
+        );
 
         let people = vec![Person {
             id: Some("p-1".to_string()),
@@ -1164,7 +1234,9 @@ mod tests {
 
         // Verify extra_json was persisted
         let extra_json: Option<String> = conn
-            .query_row("SELECT extra_json FROM people WHERE id = 'p-1'", [], |r| r.get(0))
+            .query_row("SELECT extra_json FROM people WHERE id = 'p-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(extra_json.is_some());
         let parsed: serde_json::Value = serde_json::from_str(&extra_json.unwrap()).unwrap();
@@ -1198,7 +1270,9 @@ mod tests {
         upsert_templates(&conn, &templates).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM templates WHERE id = 't-1'", [], |r| r.get(0))
+            .query_row("SELECT raw_json FROM templates WHERE id = 't-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(raw_json.is_some());
 
@@ -1230,7 +1304,9 @@ mod tests {
         upsert_templates(&conn, &updated_templates).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM templates WHERE id = 't-1'", [], |r| r.get(0))
+            .query_row("SELECT raw_json FROM templates WHERE id = 't-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw_json.unwrap()).unwrap();
         assert_eq!(parsed["title"], "Updated Title");
@@ -1269,7 +1345,9 @@ mod tests {
         upsert_calendar_events(&conn, &events).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM events WHERE id = 'e-1'", [], |r| r.get(0))
+            .query_row("SELECT raw_json FROM events WHERE id = 'e-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(raw_json.is_some());
 
@@ -1320,7 +1398,9 @@ mod tests {
         upsert_calendar_events(&conn, &updated_events).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM events WHERE id = 'e-1'", [], |r| r.get(0))
+            .query_row("SELECT raw_json FROM events WHERE id = 'e-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw_json.unwrap()).unwrap();
         assert_eq!(parsed["summary"], "Updated Meeting");
@@ -1359,7 +1439,9 @@ mod tests {
         upsert_recipes(&conn, &response).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM recipes WHERE id = 'r-1'", [], |r| r.get(0))
+            .query_row("SELECT raw_json FROM recipes WHERE id = 'r-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(raw_json.is_some());
 
@@ -1406,7 +1488,9 @@ mod tests {
         upsert_recipes(&conn, &updated_response).unwrap();
 
         let raw_json: Option<String> = conn
-            .query_row("SELECT raw_json FROM recipes WHERE id = 'r-1'", [], |r| r.get(0))
+            .query_row("SELECT raw_json FROM recipes WHERE id = 'r-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw_json.unwrap()).unwrap();
         assert_eq!(parsed["slug"], "updated-recipe");
@@ -1450,7 +1534,9 @@ mod tests {
 
         // Verify extra_json was persisted
         let extra_json: Option<String> = conn
-            .query_row("SELECT extra_json FROM recipes WHERE id = 'r-1'", [], |r| r.get(0))
+            .query_row("SELECT extra_json FROM recipes WHERE id = 'r-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(extra_json.is_some());
         let parsed: serde_json::Value = serde_json::from_str(&extra_json.unwrap()).unwrap();
@@ -1526,7 +1612,11 @@ mod tests {
         assert_eq!(json.start_time.as_deref(), Some("2026-01-20T10:00:00Z"));
         assert_eq!(json.end_time.as_deref(), Some("2026-01-20T11:00:00Z"));
         assert!(json.attendees_json.unwrap().contains("alice@example.com"));
-        assert!(json.conference_data_json.unwrap().contains("meet.google.com"));
+        assert!(
+            json.conference_data_json
+                .unwrap()
+                .contains("meet.google.com")
+        );
         assert!(json.extra_json.is_none());
     }
 

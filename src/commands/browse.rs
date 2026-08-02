@@ -3,7 +3,9 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::cli::args::{BrowseAction, CalendarsAction, PeopleAction, RecipesAction, TemplatesAction};
+use crate::cli::args::{
+    BrowseAction, CalendarsAction, PeopleAction, RecipesAction, TemplatesAction,
+};
 use crate::cli::context::RunContext;
 use crate::output::format::OutputMode;
 
@@ -18,7 +20,9 @@ pub fn run(conn: &Connection, action: &BrowseAction, ctx: &RunContext) -> Result
 
 fn run_people(conn: &Connection, action: &PeopleAction, mode: OutputMode) -> Result<()> {
     match action {
-        PeopleAction::List { company } => crate::commands::people::list(conn, company.as_deref(), mode),
+        PeopleAction::List { company } => {
+            crate::commands::people::list(conn, company.as_deref(), mode)
+        }
         PeopleAction::Show { query } => crate::commands::people::show(conn, query, mode),
     }
 }

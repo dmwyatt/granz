@@ -32,8 +32,9 @@ fn row_to_person(row: PersonRow) -> Person {
 }
 
 pub fn list_people(conn: &Connection, company: Option<&str>) -> Result<Vec<Person>> {
-    let mut sql =
-        String::from("SELECT id, name, email, company_name, job_title, extra_json FROM people WHERE 1=1");
+    let mut sql = String::from(
+        "SELECT id, name, email, company_name, job_title, extra_json FROM people WHERE 1=1",
+    );
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(company_q) = company {
@@ -87,7 +88,11 @@ pub fn find_meetings_by_person(
     include_deleted: bool,
 ) -> Result<Vec<Document>> {
     let pattern = format!("%{}%", query);
-    let deleted_filter = if include_deleted { "" } else { " AND d.deleted_at IS NULL" };
+    let deleted_filter = if include_deleted {
+        ""
+    } else {
+        " AND d.deleted_at IS NULL"
+    };
     let sql = format!(
         "SELECT DISTINCT d.id, d.title, d.created_at, d.updated_at, d.deleted_at, d.doc_type, d.notes_plain, d.notes_markdown, d.summary, d.people_json, d.google_calendar_event_json
          FROM documents d

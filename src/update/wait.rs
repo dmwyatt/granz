@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use super::github::{check_build_status, BuildStatus, WorkflowRun};
+use super::github::{BuildStatus, WorkflowRun, check_build_status};
 use super::{UpdateError, UpdateResult};
 
 /// Configuration for waiting on a build.
@@ -37,14 +37,8 @@ impl WaitConfig {
 /// Display information about an in-progress build.
 pub fn display_build_info(run: &WorkflowRun) {
     println!();
-    println!(
-        "{}: A release build is in progress",
-        "Note".yellow().bold()
-    );
-    println!(
-        "  Workflow: {}",
-        run.name.as_deref().unwrap_or("Unknown")
-    );
+    println!("{}: A release build is in progress", "Note".yellow().bold());
+    println!("  Workflow: {}", run.name.as_deref().unwrap_or("Unknown"));
     println!("  Started:  {}", format_timestamp(&run.created_at));
     println!("  URL:      {}", run.html_url);
 }

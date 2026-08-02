@@ -133,21 +133,24 @@ pub fn show_meeting(conn: &Connection, query: &str) -> Result<Option<Document>> 
     )?;
 
     let result = stmt
-        .query_row(rusqlite::params![query, prefix_pattern, title_pattern], |row| {
-            Ok(DocumentRow {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                deleted_at: row.get(4)?,
-                doc_type: row.get(5)?,
-                notes_plain: row.get(6)?,
-                notes_markdown: row.get(7)?,
-                summary: row.get(8)?,
-                people_json: row.get(9)?,
-                google_calendar_event_json: row.get(10)?,
-            })
-        })
+        .query_row(
+            rusqlite::params![query, prefix_pattern, title_pattern],
+            |row| {
+                Ok(DocumentRow {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                    doc_type: row.get(5)?,
+                    notes_plain: row.get(6)?,
+                    notes_markdown: row.get(7)?,
+                    summary: row.get(8)?,
+                    people_json: row.get(9)?,
+                    google_calendar_event_json: row.get(10)?,
+                })
+            },
+        )
         .ok();
 
     Ok(result.map(row_to_document))
@@ -319,8 +322,10 @@ pub fn get_meetings_by_ids(conn: &Connection, ids: &[String]) -> Result<Vec<Docu
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::types::ToSql> =
-        ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    let params: Vec<&dyn rusqlite::types::ToSql> = ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
     let rows = stmt.query_map(params.as_slice(), |row| {
         Ok(DocumentRow {
             id: row.get(0)?,
@@ -357,7 +362,9 @@ pub fn title_series_counts(conn: &Connection) -> Result<HashMap<String, u32>> {
          WHERE deleted_at IS NULL AND title IS NOT NULL AND trim(title) <> ''
          GROUP BY lower(trim(title))",
     )?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+    })?;
     Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
@@ -570,7 +577,10 @@ mod tests {
         )
         .unwrap();
         let transcript = get_transcript(&conn, "doc-1").unwrap();
-        let mic_utt = transcript.iter().find(|u| u.id.as_deref() == Some("u-mic")).unwrap();
+        let mic_utt = transcript
+            .iter()
+            .find(|u| u.id.as_deref() == Some("u-mic"))
+            .unwrap();
         assert_eq!(mic_utt.source.as_deref(), Some("microphone"));
         assert_eq!(mic_utt.is_final, Some(true));
     }
@@ -585,8 +595,7 @@ mod tests {
     #[test]
     fn test_search_meetings_by_title() {
         let conn = build_test_db(&meetings_state());
-        let results =
-            search_meetings(&conn, "AI", true, false, false, false, None, false).unwrap();
+        let results = search_meetings(&conn, "AI", true, false, false, false, None, false).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title.as_deref(), Some("AI Strategy Meeting"));
     }
@@ -609,8 +618,17 @@ mod tests {
         // Regression for #75: the old titles arm matched the whole query as
         // one substring, so "review budget" missed a "Budget review" title.
         let conn = build_test_db(&title_search_state());
-        let results =
-            search_meetings(&conn, "review budget", true, false, false, false, None, false).unwrap();
+        let results = search_meetings(
+            &conn,
+            "review budget",
+            true,
+            false,
+            false,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-budget"));
     }
@@ -620,9 +638,17 @@ mod tests {
         // Words separated by other words (and punctuation) in the title must
         // still match under implicit-AND word semantics.
         let conn = build_test_db(&title_search_state());
-        let results =
-            search_meetings(&conn, "integrations standup", true, false, false, false, None, false)
-                .unwrap();
+        let results = search_meetings(
+            &conn,
+            "integrations standup",
+            true,
+            false,
+            false,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-standup"));
     }
@@ -640,8 +666,17 @@ mod tests {
     #[test]
     fn test_search_meetings_by_transcript() {
         let conn = build_test_db(&meetings_state());
-        let results =
-            search_meetings(&conn, "neural networks", false, true, false, false, None, false).unwrap();
+        let results = search_meetings(
+            &conn,
+            "neural networks",
+            false,
+            true,
+            false,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-1"));
     }
@@ -733,9 +768,17 @@ mod tests {
         // Regression: the old sanitizer quoted the whole query as one FTS5
         // phrase, so reversed word order never matched.
         let conn = build_test_db(&meetings_state());
-        let results =
-            search_meetings(&conn, "networks neural", false, true, false, false, None, false)
-                .unwrap();
+        let results = search_meetings(
+            &conn,
+            "networks neural",
+            false,
+            true,
+            false,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-1"));
     }
@@ -760,8 +803,17 @@ mod tests {
     #[test]
     fn test_search_meetings_by_notes() {
         let conn = build_test_db(&meetings_state());
-        let results =
-            search_meetings(&conn, "machine learning", false, false, true, false, None, false).unwrap();
+        let results = search_meetings(
+            &conn,
+            "machine learning",
+            false,
+            false,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id.as_deref(), Some("doc-1"));
     }
@@ -769,8 +821,17 @@ mod tests {
     #[test]
     fn test_search_meetings_no_results() {
         let conn = build_test_db(&meetings_state());
-        let results =
-            search_meetings(&conn, "quantum computing", true, true, true, false, None, false).unwrap();
+        let results = search_meetings(
+            &conn,
+            "quantum computing",
+            true,
+            true,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(results.is_empty());
     }
 
@@ -781,8 +842,17 @@ mod tests {
             start: Some(Utc.with_ymd_and_hms(2026, 1, 22, 0, 0, 0).unwrap()),
             end: Some(Utc.with_ymd_and_hms(2026, 1, 23, 0, 0, 0).unwrap()),
         };
-        let results =
-            search_meetings(&conn, "Standup", true, false, false, false, Some(&range), false).unwrap();
+        let results = search_meetings(
+            &conn,
+            "Standup",
+            true,
+            false,
+            false,
+            false,
+            Some(&range),
+            false,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         // AI meeting is outside range even though title matches
@@ -813,16 +883,21 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO panels_fts(panels_fts) VALUES('rebuild')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO panels_fts(panels_fts) VALUES('rebuild')", [])
+            .unwrap();
 
         // Searching for the deleted panel's content via search_meetings should return nothing
-        let results =
-            search_meetings(&conn, "unique_deleted_content", false, false, false, true, None, false)
-                .unwrap();
+        let results = search_meetings(
+            &conn,
+            "unique_deleted_content",
+            false,
+            false,
+            false,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(
             results.is_empty(),
             "Soft-deleted panels should not appear in search_meetings results"

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rand::prelude::*;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -56,7 +56,9 @@ pub(super) fn run_semantic_search_benchmark(
     };
 
     if vectors.is_empty() {
-        bail!("No vectors available for benchmarking. Run `grans embed` first to generate embeddings, or use --synthetic mode.");
+        bail!(
+            "No vectors available for benchmarking. Run `grans embed` first to generate embeddings, or use --synthetic mode."
+        );
     }
 
     let actual_vector_count = vectors.len();

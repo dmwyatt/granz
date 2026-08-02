@@ -4,7 +4,7 @@ use colored::Colorize;
 use crate::models::{
     Calendar, CalendarEvent, Document, PanelTemplate, Person, Recipe, TranscriptUtterance,
 };
-use crate::query::speaker::{label as speaker_label, SpeakerLabel};
+use crate::query::speaker::{SpeakerLabel, label as speaker_label};
 
 /// Format a meeting list entry for TTY display.
 pub fn format_meeting_row(doc: &Document, tz: &FixedOffset) -> String {
@@ -43,7 +43,11 @@ pub fn format_meeting_detail(doc: &Document, tz: &FixedOffset) -> String {
     lines.push("─".repeat(title.len()));
 
     if let Some(date) = &doc.created_at {
-        lines.push(format!("{} {}", "Date:".dimmed(), format_date_short(date, tz)));
+        lines.push(format!(
+            "{} {}",
+            "Date:".dimmed(),
+            format_date_short(date, tz)
+        ));
     }
     if let Some(id) = &doc.id {
         lines.push(format!("{}   {}", "ID:".dimmed(), id));
@@ -101,13 +105,25 @@ pub fn format_utterance(utt: &TranscriptUtterance, highlight: bool, tz: &FixedOf
         };
 
     if highlight {
-        format!("  {} {} {}{}", "▶".green(), timestamp.dimmed(), speaker_prefix, text.bold())
+        format!(
+            "  {} {} {}{}",
+            "▶".green(),
+            timestamp.dimmed(),
+            speaker_prefix,
+            text.bold()
+        )
     } else {
         let styled_text = match utt.source.as_deref() {
             Some("microphone") => text.cyan().to_string(),
             _ => text.to_string(),
         };
-        format!("  {} {} {}{}", " ", timestamp.dimmed(), speaker_prefix, styled_text)
+        format!(
+            "  {} {} {}{}",
+            " ",
+            timestamp.dimmed(),
+            speaker_prefix,
+            styled_text
+        )
     }
 }
 
@@ -128,12 +144,7 @@ pub fn format_person_row(person: &Person) -> String {
         .unwrap_or("(unknown)")
         .bold()
         .to_string();
-    let email = person
-        .email
-        .as_deref()
-        .unwrap_or("")
-        .dimmed()
-        .to_string();
+    let email = person.email.as_deref().unwrap_or("").dimmed().to_string();
     let company = person
         .company_name
         .as_deref()
@@ -283,8 +294,16 @@ mod tests {
             ..Default::default()
         };
         let output = strip(&format_utterance(&utt, false, &utc()));
-        assert!(output.contains("You:"), "Expected 'You:' label, got: {}", output);
-        assert!(output.contains("Hello from me"), "Expected text, got: {}", output);
+        assert!(
+            output.contains("You:"),
+            "Expected 'You:' label, got: {}",
+            output
+        );
+        assert!(
+            output.contains("Hello from me"),
+            "Expected text, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -295,7 +314,11 @@ mod tests {
             ..Default::default()
         };
         let output = strip(&format_utterance(&utt, false, &utc()));
-        assert!(output.contains("Other:"), "Expected 'Other:' label, got: {}", output);
+        assert!(
+            output.contains("Other:"),
+            "Expected 'Other:' label, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -307,8 +330,16 @@ mod tests {
             ..Default::default()
         };
         let output = strip(&format_utterance(&utt, false, &utc()));
-        assert!(output.contains("Jane Doe:"), "Expected the name, got: {}", output);
-        assert!(!output.contains("Other:"), "Name should replace 'Other:', got: {}", output);
+        assert!(
+            output.contains("Jane Doe:"),
+            "Expected the name, got: {}",
+            output
+        );
+        assert!(
+            !output.contains("Other:"),
+            "Name should replace 'Other:', got: {}",
+            output
+        );
     }
 
     #[test]
@@ -331,7 +362,10 @@ mod tests {
         };
         let output = strip(&format_utterance(&utt, true, &utc()));
         assert!(output.contains("▶"), "Expected highlight marker");
-        assert!(output.contains("You:"), "Expected 'You:' label in highlighted");
+        assert!(
+            output.contains("You:"),
+            "Expected 'You:' label in highlighted"
+        );
     }
 
     // === Timezone-aware display tests ===

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use log::debug;
 use serde::Deserialize;
 use url::Url;
@@ -205,11 +205,7 @@ pub fn check_client_version_accepted(auth_url: &str) -> Result<()> {
 /// Unauthenticated, which is what makes bootstrapping a session possible.
 /// `started_with` is the click id grans sent when it built the auth URL, used
 /// only when the callback did not restate it.
-pub fn exchange_code(
-    callback: &Callback,
-    verifier: &str,
-    started_with: &str,
-) -> Result<TokenSet> {
+pub fn exchange_code(callback: &Callback, verifier: &str, started_with: &str) -> Result<TokenSet> {
     let body = serde_json::json!({
         "code": callback.code,
         "codeVerifier": verifier,
@@ -222,9 +218,8 @@ pub fn exchange_code(
     let response = post_json(AUTH_COMPLETE_URL, &body, None)
         .context("Failed to exchange the authorization code")?;
 
-    extract_token_set(&response).context(
-        "Granola's response to the code exchange did not contain the expected tokens",
-    )
+    extract_token_set(&response)
+        .context("Granola's response to the code exchange did not contain the expected tokens")
 }
 
 /// Exchange a refresh token for a new token set.
@@ -246,11 +241,7 @@ pub fn refresh_tokens(access_token: Option<&str>, refresh_token: &str) -> Result
 }
 
 /// POST JSON to a Granola auth endpoint and return the response body.
-fn post_json(
-    url: &str,
-    body: &serde_json::Value,
-    bearer: Option<&str>,
-) -> Result<String> {
+fn post_json(url: &str, body: &serde_json::Value, bearer: Option<&str>) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .build()
@@ -351,7 +342,11 @@ fn describe_json_shape(value: &serde_json::Value, depth: usize) -> String {
         }
         serde_json::Value::Array(items) => match items.first() {
             Some(_) if depth == 0 => format!("[{} items]", items.len()),
-            Some(first) => format!("[{}; {}]", describe_json_shape(first, depth - 1), items.len()),
+            Some(first) => format!(
+                "[{}; {}]",
+                describe_json_shape(first, depth - 1),
+                items.len()
+            ),
             None => "[]".to_string(),
         },
         serde_json::Value::String(_) => "string".to_string(),
@@ -503,8 +498,7 @@ mod tests {
     fn test_extract_token_set_from_double_encoded_string() {
         // Granola writes workos_tokens as encoded JSON in its own token store,
         // so the API is assumed capable of the same shape.
-        let body =
-            r#"{"workos_tokens": "{\"access_token\":\"at\",\"refresh_token\":\"rt\"}"}"#;
+        let body = r#"{"workos_tokens": "{\"access_token\":\"at\",\"refresh_token\":\"rt\"}"}"#;
 
         let tokens = extract_token_set(body).unwrap();
 

@@ -2,7 +2,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{FixedOffset, TimeZone, Utc};
 
 use crate::api::credential_store::CredentialStore;

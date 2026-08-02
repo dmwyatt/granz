@@ -66,9 +66,7 @@ pub fn exchange_code(code: &str, verifier: &str) -> SyncResult<TokenResponse> {
     if !status.is_success() {
         // Try to parse error response
         if let Ok(err) = serde_json::from_str::<TokenError>(&body) {
-            let msg = err
-                .error_description
-                .unwrap_or_else(|| err.error.clone());
+            let msg = err.error_description.unwrap_or_else(|| err.error.clone());
             return Err(SyncError::OAuth(msg));
         }
         return Err(SyncError::OAuth(format!("HTTP {}: {}", status, body)));
@@ -100,9 +98,7 @@ pub fn refresh_access_token(refresh_token: &str) -> SyncResult<TokenResponse> {
 
     if !status.is_success() {
         if let Ok(err) = serde_json::from_str::<TokenError>(&body) {
-            let msg = err
-                .error_description
-                .unwrap_or_else(|| err.error.clone());
+            let msg = err.error_description.unwrap_or_else(|| err.error.clone());
             return Err(SyncError::OAuth(msg));
         }
         return Err(SyncError::OAuth(format!("HTTP {}: {}", status, body)));

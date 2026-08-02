@@ -490,4 +490,3 @@ pub struct RecipeConfig {
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
-

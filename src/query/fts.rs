@@ -157,10 +157,10 @@ mod tests {
 
     #[test]
     fn parse_empty_phrase_dropped() {
-        assert_eq!(parse_query("foo \"\" bar"), vec![
-            FtsToken::Term("foo".into()),
-            FtsToken::Term("bar".into())
-        ]);
+        assert_eq!(
+            parse_query("foo \"\" bar"),
+            vec![FtsToken::Term("foo".into()), FtsToken::Term("bar".into())]
+        );
     }
 
     #[test]
@@ -211,7 +211,10 @@ mod tests {
 
     #[test]
     fn sanitize_neutralizes_fts_operators() {
-        assert_eq!(sanitize_fts_query("cats OR dogs"), "\"cats\" \"OR\" \"dogs\"");
+        assert_eq!(
+            sanitize_fts_query("cats OR dogs"),
+            "\"cats\" \"OR\" \"dogs\""
+        );
         assert_eq!(sanitize_fts_query("foo NOT bar"), "\"foo\" \"NOT\" \"bar\"");
         assert_eq!(sanitize_fts_query("col:value"), "\"col:value\"");
         assert_eq!(sanitize_fts_query("wild*"), "\"wild*\"");

@@ -28,7 +28,14 @@ fn context_search_phrase() {
     let env = TestEnv::with_fixture();
     let output = env
         .cmd_json()
-        .args(["grep", "resource allocation", "--context", "2", "--in", "transcripts"])
+        .args([
+            "grep",
+            "resource allocation",
+            "--context",
+            "2",
+            "--in",
+            "transcripts",
+        ])
         .output()
         .unwrap();
 
@@ -162,8 +169,12 @@ fn grep_json_is_shaped_with_evidence() {
     let m = &meetings[0];
     assert_eq!(m["id"], "doc-alpha");
     assert!(m["score"].is_null(), "grep results carry no rerank score");
-    let signals: Vec<&str> =
-        m["signals"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    let signals: Vec<&str> = m["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
     assert!(signals.contains(&"keyword"));
     assert!(!signals.contains(&"semantic"));
 
@@ -264,7 +275,9 @@ fn grep_tty_header_reports_complete_count_when_limited() {
         .stdout(predicate::str::contains(
             "Found 2 meeting(s) matching \"prototype\" (showing 1):",
         ))
-        .stdout(predicate::str::contains("Use --limit 0 to show all 2 meetings."));
+        .stdout(predicate::str::contains(
+            "Use --limit 0 to show all 2 meetings.",
+        ));
 }
 
 #[test]
@@ -274,7 +287,9 @@ fn grep_tty_header_without_truncation_omits_showing() {
         .args(["grep", "prototype", "--in", "transcripts"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Found 2 meeting(s) matching \"prototype\":"))
+        .stdout(predicate::str::contains(
+            "Found 2 meeting(s) matching \"prototype\":",
+        ))
         .stdout(predicate::str::contains("(showing").not());
 }
 
@@ -366,7 +381,11 @@ fn speaker_name_filter_matches_a_partial_name() {
 
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["meetings"].as_array().unwrap().len(), 1, "got: {result}");
+    assert_eq!(
+        result["meetings"].as_array().unwrap().len(),
+        1,
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -381,13 +400,19 @@ fn speaker_name_matching_several_speakers_notes_them_and_takes_the_union() {
 
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("matched 2 speakers"), "got stderr: {stderr}");
+    assert!(
+        stderr.contains("matched 2 speakers"),
+        "got stderr: {stderr}"
+    );
     assert!(stderr.contains("Priya Nair"), "got stderr: {stderr}");
     assert!(stderr.contains("Priya Raman"), "got stderr: {stderr}");
 
     // The note goes to stderr so JSON on stdout stays parseable.
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(result["meetings"].as_array().unwrap().len() >= 1, "got: {result}");
+    assert!(
+        result["meetings"].as_array().unwrap().len() >= 1,
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -398,7 +423,9 @@ fn unknown_speaker_name_errors_and_lists_known_speakers() {
         .args(["grep", "prototype", "--speaker", "Marcys Webb"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no speaker matches \"Marcys Webb\""))
+        .stderr(predicate::str::contains(
+            "no speaker matches \"Marcys Webb\"",
+        ))
         .stderr(predicate::str::contains("Marcus Webb"));
 }
 
@@ -417,7 +444,13 @@ fn show_transcript_names_the_detected_speaker() {
 fn show_transcript_filtered_to_a_speaker_keeps_only_their_utterances() {
     let env = TestEnv::with_fixture();
     env.cmd()
-        .args(["show", "doc-beta", "--transcript", "--speaker", "Marcus Webb"])
+        .args([
+            "show",
+            "doc-beta",
+            "--transcript",
+            "--speaker",
+            "Marcus Webb",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Marcus Webb:"))

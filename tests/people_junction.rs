@@ -7,20 +7,13 @@ use predicates::prelude::*;
 fn people_meetings_alice_has_alpha_and_gamma() {
     let env = TestEnv::with_fixture();
     // Alice is creator/attendee of doc-alpha and doc-gamma
-    let output = env
-        .cmd_json()
-        .args(["with", "Alice"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["with", "Alice"]).output().unwrap();
 
     assert!(output.status.success());
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(docs.len(), 2);
 
-    let titles: Vec<&str> = docs
-        .iter()
-        .map(|d| d["title"].as_str().unwrap())
-        .collect();
+    let titles: Vec<&str> = docs.iter().map(|d| d["title"].as_str().unwrap()).collect();
     assert!(titles.contains(&"Project Alpha Kickoff"));
     assert!(titles.contains(&"Gamma Sprint Planning"));
     assert!(!titles.contains(&"Beta Feature Review"));
@@ -30,20 +23,13 @@ fn people_meetings_alice_has_alpha_and_gamma() {
 fn people_meetings_bob_has_alpha_and_beta() {
     let env = TestEnv::with_fixture();
     // Bob is attendee of doc-alpha and creator of doc-beta
-    let output = env
-        .cmd_json()
-        .args(["with", "Bob"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["with", "Bob"]).output().unwrap();
 
     assert!(output.status.success());
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(docs.len(), 2);
 
-    let titles: Vec<&str> = docs
-        .iter()
-        .map(|d| d["title"].as_str().unwrap())
-        .collect();
+    let titles: Vec<&str> = docs.iter().map(|d| d["title"].as_str().unwrap()).collect();
     assert!(titles.contains(&"Project Alpha Kickoff"));
     assert!(titles.contains(&"Beta Feature Review"));
     assert!(!titles.contains(&"Gamma Sprint Planning"));
@@ -53,20 +39,13 @@ fn people_meetings_bob_has_alpha_and_beta() {
 fn people_meetings_carol_has_beta_and_gamma() {
     let env = TestEnv::with_fixture();
     // Carol is attendee of doc-beta and doc-gamma
-    let output = env
-        .cmd_json()
-        .args(["with", "Carol"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["with", "Carol"]).output().unwrap();
 
     assert!(output.status.success());
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(docs.len(), 2);
 
-    let titles: Vec<&str> = docs
-        .iter()
-        .map(|d| d["title"].as_str().unwrap())
-        .collect();
+    let titles: Vec<&str> = docs.iter().map(|d| d["title"].as_str().unwrap()).collect();
     assert!(titles.contains(&"Beta Feature Review"));
     assert!(titles.contains(&"Gamma Sprint Planning"));
     assert!(!titles.contains(&"Project Alpha Kickoff"));
@@ -97,11 +76,7 @@ fn people_meetings_nonexistent_person_errors() {
 #[test]
 fn people_meetings_json_structure() {
     let env = TestEnv::with_fixture();
-    let output = env
-        .cmd_json()
-        .args(["with", "Alice"])
-        .output()
-        .unwrap();
+    let output = env.cmd_json().args(["with", "Alice"]).output().unwrap();
 
     assert!(output.status.success());
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();

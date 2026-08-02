@@ -134,8 +134,8 @@ fn subtract_months(dt: DateTime<Utc>, months: u32, tz: &FixedOffset) -> Option<D
     let max_day = days_in_month(target_year, target_month);
     let target_day = local.day().min(max_day);
 
-    let naive = NaiveDate::from_ymd_opt(target_year, target_month, target_day)?
-        .and_hms_opt(0, 0, 0)?;
+    let naive =
+        NaiveDate::from_ymd_opt(target_year, target_month, target_day)?.and_hms_opt(0, 0, 0)?;
     let local_dt = tz.from_local_datetime(&naive).single()?;
     Some(local_dt.with_timezone(&Utc))
 }
@@ -235,8 +235,7 @@ fn next_month(dt: DateTime<Utc>, tz: &FixedOffset) -> DateTime<Utc> {
     } else {
         (local.year(), local.month() + 1)
     };
-    let naive = NaiveDate::from_ymd_opt(year, month, 1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0));
+    let naive = NaiveDate::from_ymd_opt(year, month, 1).and_then(|d| d.and_hms_opt(0, 0, 0));
     match naive {
         Some(nm) => tz
             .from_local_datetime(&nm)
@@ -255,8 +254,7 @@ fn prev_month(dt: DateTime<Utc>, tz: &FixedOffset) -> DateTime<Utc> {
     } else {
         (local.year(), local.month() - 1)
     };
-    let naive = NaiveDate::from_ymd_opt(year, month, 1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0));
+    let naive = NaiveDate::from_ymd_opt(year, month, 1).and_then(|d| d.and_hms_opt(0, 0, 0));
     match naive {
         Some(nm) => tz
             .from_local_datetime(&nm)
@@ -410,8 +408,14 @@ mod tests {
 
     #[test]
     fn test_build_date_range_absolute() {
-        let range =
-            build_date_range(Some("2026-01-01"), Some("2026-01-31"), None, fixed_now(), &utc_tz()).unwrap();
+        let range = build_date_range(
+            Some("2026-01-01"),
+            Some("2026-01-31"),
+            None,
+            fixed_now(),
+            &utc_tz(),
+        )
+        .unwrap();
         assert_eq!(range.start.unwrap().day(), 1);
         assert_eq!(range.end.unwrap().day(), 31);
     }
@@ -428,30 +432,21 @@ mod tests {
     fn test_parse_duration_days() {
         // 3d from Jan 22 2026 noon → Jan 19 2026 00:00 UTC
         let result = parse_duration("3d", fixed_now(), &utc_tz()).unwrap();
-        assert_eq!(
-            result,
-            Utc.with_ymd_and_hms(2026, 1, 19, 0, 0, 0).unwrap()
-        );
+        assert_eq!(result, Utc.with_ymd_and_hms(2026, 1, 19, 0, 0, 0).unwrap());
     }
 
     #[test]
     fn test_parse_duration_weeks() {
         // 2w from Jan 22 2026 noon → Jan 8 2026 00:00 UTC
         let result = parse_duration("2w", fixed_now(), &utc_tz()).unwrap();
-        assert_eq!(
-            result,
-            Utc.with_ymd_and_hms(2026, 1, 8, 0, 0, 0).unwrap()
-        );
+        assert_eq!(result, Utc.with_ymd_and_hms(2026, 1, 8, 0, 0, 0).unwrap());
     }
 
     #[test]
     fn test_parse_duration_months() {
         // 1m from Jan 22 2026 noon → Dec 22 2025 00:00 UTC
         let result = parse_duration("1m", fixed_now(), &utc_tz()).unwrap();
-        assert_eq!(
-            result,
-            Utc.with_ymd_and_hms(2025, 12, 22, 0, 0, 0).unwrap()
-        );
+        assert_eq!(result, Utc.with_ymd_and_hms(2025, 12, 22, 0, 0, 0).unwrap());
     }
 
     #[test]
@@ -459,20 +454,14 @@ mod tests {
         // 1m from March 31 → Feb 28 (non-leap year 2026)
         let march_31 = Utc.with_ymd_and_hms(2026, 3, 31, 12, 0, 0).unwrap();
         let result = parse_duration("1m", march_31, &utc_tz()).unwrap();
-        assert_eq!(
-            result,
-            Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap()
-        );
+        assert_eq!(result, Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap());
     }
 
     #[test]
     fn test_parse_duration_months_multiple() {
         // 3m from Jan 22 2026 → Oct 22 2025
         let result = parse_duration("3m", fixed_now(), &utc_tz()).unwrap();
-        assert_eq!(
-            result,
-            Utc.with_ymd_and_hms(2025, 10, 22, 0, 0, 0).unwrap()
-        );
+        assert_eq!(result, Utc.with_ymd_and_hms(2025, 10, 22, 0, 0, 0).unwrap());
     }
 
     #[test]
