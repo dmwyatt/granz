@@ -105,6 +105,12 @@ struct Utterance {
 /// sentinel entry either; the `[You]` label in the chunk text and the
 /// window indices already identify them, and an invented name would sit
 /// in the same namespace speaker filtering matches display names against.
+///
+/// Overlap carryover text duplicated from the previous chunk sits outside
+/// the window, so its speakers are deliberately not listed here, matching
+/// how `window_start_idx`/`window_end_idx` already exclude carryover. The
+/// chunk that owns those utterances attributes them; listing them twice
+/// would double-attribute every speaker near a chunk boundary.
 fn window_speakers(utterances: &[Utterance], start: usize, end: usize) -> Vec<String> {
     let mut speakers: Vec<String> = Vec::new();
     for utt in utterances.get(start..=end).unwrap_or(&[]) {
@@ -1897,6 +1903,55 @@ mod tests {
         let meta1 = chunks[1].metadata.as_ref().unwrap();
         assert_eq!(meta0["speakers"], serde_json::json!(["Jane Doe"]));
         assert_eq!(meta1["speakers"], serde_json::json!(["John Smith"]));
+    }
+
+    #[test]
+    fn test_adaptive_speakers_exclude_overlap_carryover() {
+        // Chars-mode overlap copies the tail of the previous chunk into
+        // the next one, so a prior speaker's words can appear in a chunk
+        // whose window doesn't include them. The speakers array follows
+        // the window, exactly like window_start_idx/window_end_idx: the
+        // chunk that owns the utterance attributes it, and adjacent
+        // chunks don't double-attribute shared overlap text.
+        let utt_a = "Jane spends a while walking through the quarterly budget figures";
+        let utt_b = "John follows up with a question about the deployment schedule now";
+        let utts = vec![
+            (
+                "doc1",
+                "2025-01-01T10:00:00Z",
+                utt_a,
+                Some("system"),
+                Some("Jane Doe"),
+            ),
+            (
+                "doc1",
+                "2025-01-01T10:01:00Z",
+                utt_b,
+                Some("system"),
+                Some("John Smith"),
+            ),
+        ];
+        let conn = setup_test_db_with_speakers(&utts);
+        let config = ChunkingConfig {
+            target_tokens: 25,
+            max_tokens: 100,
+            overlap_tokens: 15,
+            min_chars: 10,
+            chars_per_token: 4.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        // The second chunk really does carry Jane's words via overlap...
+        assert!(chunks[1].text.contains("budget figures"));
+        // ...but its window is utterance 1 only, and speakers match it.
+        let meta = chunks[1].metadata.as_ref().unwrap();
+        assert_eq!(meta["window_start_idx"], 1);
+        assert_eq!(meta["speakers"], serde_json::json!(["John Smith"]));
+        // Jane is attributed by the chunk that owns her utterance.
+        let meta0 = chunks[0].metadata.as_ref().unwrap();
+        assert_eq!(meta0["speakers"], serde_json::json!(["Jane Doe"]));
     }
 
     #[test]
