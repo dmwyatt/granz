@@ -124,7 +124,11 @@ CLI (main.rs, cli/) → Commands (commands/) → DB queries (db/) → SQLite
 
 Migrations live in `src/db/migrations/` using `rusqlite_migration`. To add a schema change:
 
-1. Create `src/db/migrations/v00X_description.sql` (next sequential number)
+1. Create `src/db/migrations/v00X_description.sql` (next sequential number).
+   Before choosing the number, check open PRs and other local branches for
+   migrations claiming it (`gh pr list`, `git branch -a`); concurrent sessions
+   have collided here. A migration number already applied to a real database
+   is immovable; renumber the unmerged side.
 2. Use `ALTER TABLE ADD COLUMN` for new columns, `CREATE TABLE IF NOT EXISTS` for new tables
 3. Register in `migrations()` in `src/db/migrations/mod.rs`:
    ```rust
@@ -135,6 +139,16 @@ Migrations live in `src/db/migrations/` using `rusqlite_migration`. To add a sch
 6. Add migration tests in `src/db/migrations/mod.rs`
 
 Schema version is tracked via SQLite's `PRAGMA user_version`. The system auto-backs up the database before applying migrations.
+
+## Tracker Hygiene
+
+Multiple agent sessions work this repo concurrently and dispatch off issue labels, so stale tracker state is a dispatch bug, not a cosmetic one.
+
+- Closing a tracking issue whose content has been delivered is part of delivering it; close with evidence in the same session.
+- `status: ready` is a claim other agents act on. If your findings invalidate an issue's premise, re-triage it in the same session; don't leave stale `ready` labels.
+- `status:` labels are single-valued; replace, don't stack.
+- Efforts that file 3+ related issues get a milestone when filed; milestone names carry state (e.g. "(tabled)").
+- Blocked issues carry `status: blocked` and name their blocker in the body's first line. When closing an issue, check `gh issue list --label "status: blocked"` for issues it unblocks and re-triage them.
 
 ## Granola API Explorer
 
