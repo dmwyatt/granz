@@ -224,6 +224,11 @@ pub fn transcript_window_chunker_adaptive(
         // utterance-boundary overlap. Oversized-split fragments are not
         // utterances and are deliberately never tracked.
         let mut buffer_utts: Vec<String> = Vec::new();
+        // False while the buffer holds only overlap carryover. A buffer
+        // is only ever finalized once fresh content lands on top of the
+        // carryover; finalizing before that would emit a chunk that is
+        // 100% text duplicated from its neighbor (#123).
+        let mut buffer_has_new_content = false;
         let mut buffer_start_idx = 0;
         let mut buffer_end_idx = 0;
         let mut buffer_start_ts: Option<&str> = None;
@@ -269,6 +274,7 @@ pub fn transcript_window_chunker_adaptive(
                     &mut buffer_utts,
                     overlap_chars,
                 );
+                buffer_has_new_content = false;
                 buffer_start_idx = i;
             }
 
@@ -292,6 +298,7 @@ pub fn transcript_window_chunker_adaptive(
                     buffer.push('\n');
                     buffer.push_str(fits);
                 }
+                buffer_has_new_content = true;
                 buffer_end_idx = i;
                 buffer_start_ts = buffer_start_ts.or(utt.start_timestamp.as_deref());
                 buffer_end_ts = utt.end_timestamp.as_deref();
@@ -321,6 +328,7 @@ pub fn transcript_window_chunker_adaptive(
                     &mut buffer_utts,
                     overlap_chars,
                 );
+                buffer_has_new_content = false;
                 buffer_start_idx = i;
                 buffer_start_ts = None;
                 remaining = rest.to_string();
@@ -334,8 +342,10 @@ pub fn transcript_window_chunker_adaptive(
                     buffer.len() + 1 + remaining.len()
                 };
 
-                // Check if adding would exceed target (but not max)
-                if new_combined_len > target_chars && !buffer.is_empty() {
+                // Check if adding would exceed target (but not max). A
+                // buffer holding only carryover is never finalized: that
+                // would duplicate its neighbor's text wholesale (#123).
+                if new_combined_len > target_chars && buffer_has_new_content {
                     // Finalize current buffer
                     if buffer.len() >= config.min_chars {
                         chunks.push(make_transcript_chunk(
@@ -359,8 +369,23 @@ pub fn transcript_window_chunker_adaptive(
                         &mut buffer_utts,
                         overlap_chars,
                     );
+                    buffer_has_new_content = false;
                     buffer_start_idx = i;
                     buffer_start_ts = None;
+                }
+
+                // If the carried-over text alone would push this utterance
+                // past the hard cap, shrink the carryover to fit.
+                if !buffer_has_new_content
+                    && !buffer.is_empty()
+                    && buffer.len() + 1 + remaining.len() > max_chars
+                {
+                    trim_carryover(
+                        config.overlap_mode,
+                        &mut buffer,
+                        &mut buffer_utts,
+                        max_chars.saturating_sub(remaining.len() + 1),
+                    );
                 }
 
                 // Add to buffer
@@ -373,6 +398,7 @@ pub fn transcript_window_chunker_adaptive(
                     buffer.push('\n');
                     buffer.push_str(&remaining);
                 }
+                buffer_has_new_content = true;
                 buffer_end_idx = i;
                 buffer_end_ts = utt.end_timestamp.as_deref();
             }
@@ -450,6 +476,44 @@ fn overlap_carryover(
             buffer_utts.join("\n")
         }
     }
+}
+
+/// Shrink an all-carryover buffer to at most `allowed` bytes so that
+/// carryover + incoming content stays within the hard cap. Overlap is a
+/// soft budget; the model cap is not. Chars mode keeps the trailing
+/// characters; Utterances mode drops whole utterances from the front
+/// (`buffer_utts` mirrors the survivors) so chunks still start at
+/// utterance boundaries.
+fn trim_carryover(
+    mode: OverlapMode,
+    buffer: &mut String,
+    buffer_utts: &mut Vec<String>,
+    allowed: usize,
+) {
+    if buffer.len() <= allowed {
+        return;
+    }
+    match mode {
+        OverlapMode::Chars => {
+            let mut start = buffer.len() - allowed;
+            while !buffer.is_char_boundary(start) {
+                start += 1;
+            }
+            *buffer = buffer[start..].to_string();
+        }
+        OverlapMode::Utterances => {
+            while !buffer_utts.is_empty() && joined_len(buffer_utts) > allowed {
+                buffer_utts.remove(0);
+            }
+            *buffer = buffer_utts.join("\n");
+        }
+    }
+}
+
+/// Byte length of `parts` joined with single newlines.
+fn joined_len(parts: &[String]) -> usize {
+    let text: usize = parts.iter().map(String::len).sum();
+    text + parts.len().saturating_sub(1)
 }
 
 /// Split text to fit within max_chars, returning (fits, remainder).
@@ -916,7 +980,7 @@ mod tests {
         // Each chunk should not exceed max_chars
         for chunk in &chunks {
             assert!(
-                chunk.text.len() <= config.max_chars() + 50, // Allow some margin for sentence boundaries
+                chunk.text.len() <= config.max_chars(),
                 "Chunk too large: {} chars, max was {}",
                 chunk.text.len(),
                 config.max_chars()
@@ -961,6 +1025,86 @@ mod tests {
         }
         // The tail of the oversized utterance survives the splits.
         assert!(chunks.last().unwrap().text.ends_with("xxx"));
+    }
+
+    #[test]
+    fn test_adaptive_no_pure_carryover_duplicate_chunk() {
+        // #123 defect 2: a large utterance arriving at a max boundary used
+        // to double-finalize, emitting a chunk that was 100% overlap
+        // carryover duplicated from its neighbor, with an inverted window
+        // (window_start_idx > window_end_idx). The live database had 149
+        // of these, every one exactly overlap_chars long.
+        let first = "a".repeat(140);
+        let second = "b".repeat(120);
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", first.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", second.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(chunks.len(), 2, "duplicate carryover chunk emitted");
+        for chunk in &chunks {
+            let meta = chunk.metadata.as_ref().unwrap();
+            assert!(
+                meta["window_start_idx"].as_u64() <= meta["window_end_idx"].as_u64(),
+                "inverted window in {}: {:?}",
+                chunk.source_id,
+                meta
+            );
+            assert!(chunk.text.len() <= config.max_chars());
+        }
+        // The second chunk keeps the whole utterance, with the carryover
+        // trimmed to fit the cap, and its window points at it.
+        assert!(chunks[1].text.ends_with(second.as_str()));
+        let meta = chunks[1].metadata.as_ref().unwrap();
+        assert_eq!(meta["window_start_idx"], 1);
+    }
+
+    #[test]
+    fn test_adaptive_utterance_overlap_dropped_at_max_boundary() {
+        // Utterances-mode variant of the same boundary: carried whole
+        // utterances are dropped from the front rather than char-sliced
+        // when they would push the incoming utterance past the cap, so
+        // chunks still start at utterance boundaries.
+        let u0 = "a".repeat(60);
+        let u1 = "b".repeat(70);
+        let u2 = "c".repeat(120);
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", u0.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", u1.as_str(), None),
+            ("doc1", "2025-01-01T10:02:00Z", u2.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 80,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Utterances,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        for chunk in &chunks {
+            assert!(chunk.text.len() <= config.max_chars());
+            let meta = chunk.metadata.as_ref().unwrap();
+            assert!(
+                meta["window_start_idx"].as_u64() <= meta["window_end_idx"].as_u64(),
+                "inverted window in {}: {:?}",
+                chunk.source_id,
+                meta
+            );
+        }
+        // No carried utterance fits next to u2, so the last chunk starts
+        // clean at the utterance boundary.
+        assert_eq!(chunks.last().unwrap().text, u2);
     }
 
     #[test]
