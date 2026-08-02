@@ -303,6 +303,18 @@ fn desired_chunks_for_spec(conn: &Connection, spec: &config::EmbedSpec) -> Resul
     Ok(chunks)
 }
 
+/// True when a chunk's desired metadata no longer matches what is stored.
+/// Compared as parsed JSON so key order and formatting don't count;
+/// unparseable stored metadata counts as drifted so a refresh repairs it.
+fn chunk_metadata_differs(stored: Option<&str>, desired: Option<&serde_json::Value>) -> bool {
+    let stored_value = stored.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    match (&stored_value, desired) {
+        (None, None) => false,
+        (Some(s), Some(d)) => s != d,
+        _ => true,
+    }
+}
+
 /// Wipe all embeddings from the database.
 /// Used by `grans embed --force` to force re-embedding.
 pub fn wipe_all_embeddings(conn: &Connection) -> Result<()> {
@@ -390,8 +402,9 @@ pub fn ensure_embeddings(
         .map(|s| ((s.source_type.as_str(), s.source_id.as_str()), s))
         .collect();
 
-    // Diff: find new/changed chunks and orphaned chunks
+    // Diff: find new/changed chunks, metadata drift, and orphaned chunks
     let mut to_embed: Vec<&Chunk> = Vec::new();
+    let mut to_refresh: Vec<(i64, Option<String>)> = Vec::new();
     let mut desired_keys: HashSet<(String, String)> = HashSet::new();
 
     for chunk in &desired_chunks {
@@ -400,7 +413,19 @@ pub fn ensure_embeddings(
 
         match stored_map.get(&key) {
             Some(existing) if existing.content_hash == chunk.content_hash => {
-                // Unchanged — skip
+                // Unchanged embed input. Metadata can still drift (e.g.
+                // speaker attribution arriving after the chunk was
+                // embedded); carry it into the store without re-embedding.
+                if chunk_metadata_differs(
+                    existing.metadata_json.as_deref(),
+                    chunk.metadata.as_ref(),
+                ) {
+                    let serialized = chunk
+                        .metadata
+                        .as_ref()
+                        .map(|m| serde_json::to_string(m).unwrap_or_default());
+                    to_refresh.push((existing.id, serialized));
+                }
             }
             _ => {
                 // New or changed
@@ -419,6 +444,15 @@ pub fn ensure_embeddings(
     // Delete orphans
     if !orphan_ids.is_empty() {
         store::delete_chunks(conn, &orphan_ids)?;
+    }
+
+    // Refresh drifted metadata on chunks whose embed input is unchanged
+    if !to_refresh.is_empty() {
+        eprintln!(
+            "[grans] Refreshing metadata for {} unchanged chunks.",
+            to_refresh.len()
+        );
+        store::update_chunk_metadata_batch(conn, &to_refresh)?;
     }
 
     // Embed new/changed chunks
@@ -978,6 +1012,69 @@ mod tests {
         )
         .unwrap();
         assert!(index.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_metadata_differs() {
+        let desired = serde_json::json!({"speakers": ["Jane Doe"]});
+
+        assert!(!chunk_metadata_differs(None, None));
+        assert!(chunk_metadata_differs(None, Some(&desired)));
+        assert!(chunk_metadata_differs(Some(r#"{"speakers": []}"#), None));
+        assert!(chunk_metadata_differs(
+            Some(r#"{"speakers": []}"#),
+            Some(&desired)
+        ));
+        // Key order and whitespace don't count as drift.
+        assert!(!chunk_metadata_differs(
+            Some(r#"{ "speakers" : [ "Jane Doe" ] }"#),
+            Some(&desired)
+        ));
+        // Unparseable stored metadata counts as drifted so it gets repaired.
+        assert!(chunk_metadata_differs(Some("not json"), Some(&desired)));
+    }
+
+    #[test]
+    fn test_metadata_refresh_without_reembed() {
+        // The #110 invariant end to end: speaker names arriving after a
+        // corpus is embedded must flow into stored chunk metadata without
+        // a single chunk re-embedding.
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is document content that is long enough to meet the minimum character threshold for the embedding chunker.",
+            ],
+        );
+
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::default_for(512);
+
+        // First run embeds the corpus; nothing is attributed yet.
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+        assert!(index.stats.is_some());
+        let meta: serde_json::Value =
+            serde_json::from_str(index.vectors[0].metadata_json.as_ref().unwrap()).unwrap();
+        assert_eq!(meta["speakers"], serde_json::json!([]));
+
+        // Attribution arrives (post-cutover sync).
+        conn.execute(
+            "UPDATE transcript_utterances SET source = 'system', speaker_name = 'Jane Doe'",
+            [],
+        )
+        .unwrap();
+        // Setting source changes the embed input ([Other] prefix), which
+        // WOULD re-embed; this test isolates the metadata path, so keep
+        // the input identical by only setting speaker_name.
+        conn.execute("UPDATE transcript_utterances SET source = NULL", [])
+            .unwrap();
+
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+        assert!(index.stats.is_none(), "metadata refresh must not re-embed");
+        let meta: serde_json::Value =
+            serde_json::from_str(index.vectors[0].metadata_json.as_ref().unwrap()).unwrap();
+        assert_eq!(meta["speakers"], serde_json::json!(["Jane Doe"]));
     }
 
     #[test]
