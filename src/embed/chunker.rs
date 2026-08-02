@@ -249,8 +249,11 @@ pub fn transcript_window_chunker_adaptive(
                 buffer.len() + 1 + text_to_add.len() // +1 for newline
             };
 
-            // Check if adding this would exceed max
-            if combined_len > max_chars && !buffer.is_empty() {
+            // Check if adding this would exceed max. Like the target check
+            // below, a buffer holding only carryover is never finalized;
+            // the split loop can leave one behind when an oversized
+            // utterance's post-boundary remainder trims to nothing.
+            if combined_len > max_chars && buffer_has_new_content {
                 // Finalize current buffer as a chunk
                 if buffer.len() >= config.min_chars {
                     chunks.push(make_transcript_chunk(
@@ -408,8 +411,9 @@ pub fn transcript_window_chunker_adaptive(
             }
         }
 
-        // Finalize any remaining buffer
-        if buffer.len() >= config.min_chars {
+        // Finalize any remaining buffer, unless it is only carryover
+        // already emitted with the previous chunk.
+        if buffer_has_new_content && buffer.len() >= config.min_chars {
             chunks.push(make_transcript_chunk(
                 doc_id,
                 chunk_idx,
@@ -1154,6 +1158,66 @@ mod tests {
         // No carried utterance fits next to u2, so the last chunk starts
         // clean at the utterance boundary.
         assert_eq!(chunks.last().unwrap().text, u2);
+    }
+
+    #[test]
+    fn test_adaptive_empty_split_remainder_no_carryover_flush() {
+        // Review follow-up on #123 defect 2: split_text_at_limit trims the
+        // remainder, so an oversized utterance whose post-boundary tail is
+        // pure whitespace leaves `remaining` empty. Nothing is appended,
+        // the buffer stays carryover-only, and the end-of-document flush
+        // used to emit it as a chunk duplicating the previous chunk's tail.
+        let text = format!("{}.{}", "x".repeat(140), " ".repeat(20));
+        let conn = setup_test_db(&[("doc1", "2025-01-01T10:00:00Z", text.as_str(), None)]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(
+            chunks.len(),
+            1,
+            "carryover-only buffer flushed as a duplicate chunk"
+        );
+        assert_eq!(chunks[0].text, format!("{}.", "x".repeat(140)));
+    }
+
+    #[test]
+    fn test_adaptive_empty_split_remainder_no_carryover_finalize_at_max() {
+        // Same setup, but a following large utterance trips the max check
+        // while the buffer is still carryover-only. The max check used to
+        // finalize it as a duplicate chunk; it must instead be trimmed and
+        // absorbed into the next chunk.
+        let first = format!("{}.{}", "x".repeat(140), " ".repeat(20));
+        let second = "b".repeat(140);
+        let conn = setup_test_db(&[
+            ("doc1", "2025-01-01T10:00:00Z", first.as_str(), None),
+            ("doc1", "2025-01-01T10:01:00Z", second.as_str(), None),
+        ]);
+        let config = ChunkingConfig {
+            target_tokens: 100,
+            max_tokens: 150,
+            overlap_tokens: 30,
+            min_chars: 10,
+            chars_per_token: 1.0,
+            overlap_mode: OverlapMode::Chars,
+        };
+        let chunks = transcript_window_chunker_adaptive(&conn, &config, None).unwrap();
+
+        assert_eq!(
+            chunks.len(),
+            2,
+            "carryover-only buffer finalized as a duplicate chunk"
+        );
+        assert!(chunks[1].text.ends_with(second.as_str()));
+        for chunk in &chunks {
+            assert!(chunk.text.len() <= config.max_chars());
+        }
     }
 
     #[test]
