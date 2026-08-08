@@ -575,6 +575,17 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
     Ok(stats)
 }
 
+/// Read the last sync time recorded for a given entity type (RFC3339),
+/// or None if that entity has never synced.
+pub fn get_last_sync_time(conn: &Connection, entity_type: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM metadata WHERE key = ?1",
+        [format!("last_sync_{}", entity_type)],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 /// Set the last sync time for a given entity type
 pub fn set_last_sync_time(conn: &Connection, entity_type: &str) -> Result<()> {
     let key = format!("last_sync_{}", entity_type);

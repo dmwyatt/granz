@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod chunker;
 pub mod config;
+pub mod freshness;
 pub mod headers;
 pub mod model;
 pub mod progress;
