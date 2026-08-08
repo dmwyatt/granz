@@ -109,6 +109,21 @@ pub fn search(
     }
 
     let embedder = crate::embed::model::FastEmbedModel::new()?;
+
+    // The reranker's model load needs nothing retrieval produces, so start
+    // it here and let embedding and retrieval run in front of it. Spawning
+    // at the top of the command hides the load just as completely but races
+    // the embedder for the one-time ONNX runtime init, slowing embedder
+    // init by ~70ms (placement A/B in #82's PR). Only statement order and
+    // this comment keep the spawn after the embedder; moving it up still
+    // compiles and passes, it just pays that contention again.
+    let pending_reranker = opts
+        .rerank
+        .then(|| {
+            crate::embed::rerank::PendingReranker::spawn(crate::embed::rerank::DEFAULT_RERANK_MODEL)
+        })
+        .transpose()?;
+
     let spec =
         crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
     let index =
@@ -125,36 +140,15 @@ pub fn search(
         include_deleted,
     )?;
 
-    // Ranked (id, score) pairs; ordering is the pipeline's and is not
-    // touched again below.
-    let ordered: Vec<(String, Option<f32>)> = if opts.rerank {
-        let reranker = crate::embed::rerank::FastEmbedReranker::new(
-            crate::embed::rerank::DEFAULT_RERANK_MODEL,
-        )?;
-        let ranking_ctx = crate::query::adjust::RankingContext::load(conn)?;
-        let cfg = crate::query::adjust::RankingConfig::default();
-        let mut reranked = crate::query::rerank::rerank_hybrid(
-            conn,
-            &reranker,
-            query,
-            &ranking,
-            &ranking_ctx,
-            &cfg,
-        )?;
-        if let Some(min) = opts.min_score {
-            reranked.retain(|d| d.score >= min);
-        }
-        reranked
-            .into_iter()
-            .map(|d| (d.document_id, Some(d.score)))
-            .collect()
-    } else {
-        ranking
-            .fused
-            .iter()
-            .map(|d| (d.document_id.clone(), None))
-            .collect()
-    };
+    let reranker = pending_reranker
+        .map(crate::embed::rerank::PendingReranker::join)
+        .transpose()?;
+    let reranker = reranker
+        .as_ref()
+        .map(|r| r as &dyn crate::embed::rerank::Reranker);
+    // `ordered` is the pipeline's final order; nothing below re-sorts it.
+    let ordered =
+        crate::query::rerank::order_candidates(conn, query, &ranking, reranker, opts.min_score)?;
 
     let ids: Vec<String> = ordered.iter().map(|(id, _)| id.clone()).collect();
     let docs = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;

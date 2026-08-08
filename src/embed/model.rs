@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::env;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 
@@ -34,14 +35,30 @@ pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
 }
 
 /// Set HF_HOME so fastembed's hf-hub downloads land in [`hf_cache_dir`].
+///
+/// Callers must invoke this before spawning any thread that might read the
+/// process environment. Model loader threads do read it, not for HF_HOME
+/// but for the platform paths (XDG_DATA_HOME, HOME, USERPROFILE) and
+/// hf-hub's HF_ENDPOINT and HF_TOKEN, and setenv racing any getenv is
+/// undefined behavior regardless of which variable each touches. The write
+/// happens at most once per process; later calls only re-resolve the cache
+/// directory, so a failed [`hf_cache_dir`] is retried rather than memoized.
 pub(crate) fn set_hf_cache_dir() -> Result<()> {
-    let cache_dir = hf_cache_dir()?;
+    static HF_HOME: OnceLock<()> = OnceLock::new();
 
-    // SAFETY: called during model initialization (single-threaded context),
-    // before any threads the model wrappers spawn.
-    unsafe {
-        env::set_var("HF_HOME", cache_dir);
-    }
+    let cache_dir = hf_cache_dir()?;
+    HF_HOME.get_or_init(|| {
+        // SAFETY: sound only under the contract above. The first caller
+        // runs before any environment-reading thread exists, so
+        // thread::spawn's happens-before edge (not this OnceLock, which
+        // those readers never touch) orders the write ahead of every
+        // getenv on a later thread. What the OnceLock adds is that the
+        // write cannot recur once loader threads are running: every call
+        // after the first is read-only.
+        unsafe {
+            env::set_var("HF_HOME", cache_dir);
+        }
+    });
     Ok(())
 }
 
