@@ -284,6 +284,24 @@ pub fn set_model_metadata(
     Ok(())
 }
 
+/// Record that the embedding store was brought up to date with the source
+/// tables at this moment. Written on every `ensure_embeddings` completion,
+/// including no-op runs: a run that found nothing pending still certifies
+/// freshness as of its own time.
+pub fn set_last_embedded_at(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO embedding_metadata (key, value) VALUES ('last_embedded_at', ?1)",
+        [&chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// When the embedding store was last brought up to date (RFC3339), or None
+/// on databases embedded before the stamp existed.
+pub fn get_last_embedded_at(conn: &Connection) -> Option<String> {
+    get_metadata_value(conn, "last_embedded_at")
+}
+
 /// One metadata value by key.
 fn get_metadata_value(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(

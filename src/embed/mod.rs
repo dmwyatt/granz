@@ -398,6 +398,7 @@ pub fn ensure_embeddings(
                 embedder.max_length(),
             )?;
         }
+        store::set_last_embedded_at(conn)?;
         eprintln!("[grans] No embeddable content found.");
         return Ok(EmbeddingIndex {
             vectors: Vec::new(),
@@ -535,6 +536,7 @@ pub fn ensure_embeddings(
         embedder.max_length(),
     )?;
     store::set_chunking_metadata(conn, spec)?;
+    store::set_last_embedded_at(conn)?;
 
     // Load all vectors for search
     let vectors = store::load_all_vectors(conn)?;
@@ -718,6 +720,48 @@ mod tests {
             ])
             .unwrap();
         }
+    }
+
+    #[test]
+    fn ensure_embeddings_stamps_last_embedded_at() {
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
+        assert!(store::get_last_embedded_at(&conn).is_none());
+
+        let embedder = MockEmbedder::default();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+
+        let stamp = store::get_last_embedded_at(&conn).unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(&stamp).is_ok());
+    }
+
+    #[test]
+    fn ensure_embeddings_stamps_last_embedded_at_when_nothing_to_embed() {
+        // A no-op run still certifies the store matches the sources as of
+        // now; the stamp is what clears a staleness warning after a sync
+        // that brought no embeddable changes.
+        let conn = setup_test_db();
+        let embedder = MockEmbedder::default();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+        assert!(store::get_last_embedded_at(&conn).is_some());
     }
 
     #[test]
