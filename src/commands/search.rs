@@ -104,7 +104,15 @@ pub fn search(
     include_deleted: bool,
     ctx: &RunContext,
 ) -> Result<()> {
-    if !confirm_embedding_work(conn, opts.yes, ctx)? {
+    // Resolve via the model constant: this path must not load the ONNX
+    // model just to count pending chunks. The plan is the expensive chunk
+    // rebuild (~1s on a large database); computed once here, it feeds both
+    // the confirmation prompt and the embedding pass (#126).
+    let spec =
+        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
+    let plan = crate::embed::EmbeddingPlan::compute(conn, spec)?;
+
+    if !confirm_embedding_work(&plan, conn, opts.yes, ctx)? {
         return Ok(());
     }
 
@@ -124,10 +132,12 @@ pub fn search(
         })
         .transpose()?;
 
-    let spec =
-        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
-    let index =
-        crate::embed::ensure_embeddings(conn, &embedder, crate::embed::DEFAULT_BATCH_SIZE, &spec)?;
+    let index = crate::embed::ensure_embeddings_with_plan(
+        conn,
+        &embedder,
+        crate::embed::DEFAULT_BATCH_SIZE,
+        plan,
+    )?;
 
     let ranking = crate::query::hybrid::hybrid_ranked(
         conn,
@@ -274,12 +284,13 @@ fn render_ranked_meeting_list(
 /// Check embedding status and, on a TTY, prompt before a large or full
 /// re-embedding run. Returns false when the user declines (the search
 /// should stop). `yes` skips the prompt.
-fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Result<bool> {
-    // Resolve via the model constant: this path must not load the ONNX
-    // model just to count pending chunks.
-    let spec =
-        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
-    let status = crate::embed::get_embedding_status(conn, crate::embed::model::MODEL_NAME, &spec)?;
+fn confirm_embedding_work(
+    plan: &crate::embed::EmbeddingPlan,
+    conn: &Connection,
+    yes: bool,
+    ctx: &RunContext,
+) -> Result<bool> {
+    let status = plan.status(conn, crate::embed::model::MODEL_NAME)?;
     let needs_full_reembed = status.orphaned_chunks > 0
         || status.legacy_max_length_warning
         || status.model_changed_warning;
