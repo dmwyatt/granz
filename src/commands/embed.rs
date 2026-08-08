@@ -353,6 +353,9 @@ fn embed_with_prompt(
     let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
 
     if status.total_chunks == 0 {
+        // The status check verified the store matches the sources; that
+        // certifies freshness even though nothing was embedded.
+        embed::store::set_last_embedded_at(conn)?;
         match mode {
             OutputMode::Json => {
                 println!(
@@ -372,6 +375,7 @@ fn embed_with_prompt(
     }
 
     if status.pending_chunks == 0 && status.orphaned_chunks == 0 {
+        embed::store::set_last_embedded_at(conn)?;
         match mode {
             OutputMode::Json => {
                 println!(
@@ -487,6 +491,8 @@ pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
     let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, &spec)?;
 
     if status.total_chunks == 0 {
+        // As in embed_with_prompt: the status check certifies freshness.
+        embed::store::set_last_embedded_at(conn)?;
         if mode != OutputMode::Json {
             eprintln!("[grans] No embeddable content found.");
         }
@@ -494,6 +500,7 @@ pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
     }
 
     if status.pending_chunks == 0 && status.orphaned_chunks == 0 {
+        embed::store::set_last_embedded_at(conn)?;
         if mode != OutputMode::Json {
             eprintln!(
                 "[grans] All {} chunks already embedded.",
@@ -527,4 +534,107 @@ fn format_number(n: usize) -> String {
 
 fn percentage(part: usize, total: usize) -> usize {
     if total == 0 { 0 } else { (100 * part) / total }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::model::MockEmbedder;
+
+    fn setup_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::create_tables(&conn).unwrap();
+        conn
+    }
+
+    /// A database fully embedded under the production model name, without
+    /// loading the production model: embed with the mock, then relabel.
+    /// Content hashes don't involve the model, so the status check sees
+    /// nothing pending and the already-embedded short-circuits fire.
+    fn setup_fully_embedded_db() -> Connection {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO documents (id, title, created_at) VALUES ('doc1', 'Doc', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text)
+             VALUES ('u1', 'doc1', '2025-01-01T10:00:00Z',
+                     'This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.')",
+            [],
+        )
+        .unwrap();
+        let embedder = MockEmbedder::default();
+        let spec = EmbedSpec::default_for(512);
+        embed::ensure_embeddings(&conn, &embedder, embed::DEFAULT_BATCH_SIZE, &spec).unwrap();
+        conn.execute(
+            "UPDATE embedding_metadata SET value = ?1 WHERE key = 'model_name'",
+            [embed::model::MODEL_NAME],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn clear_stamp(conn: &Connection) {
+        conn.execute(
+            "DELETE FROM embedding_metadata WHERE key = 'last_embedded_at'",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn embed_with_prompt_stamps_when_already_embedded() {
+        let conn = setup_fully_embedded_db();
+        clear_stamp(&conn);
+
+        let spec = EmbedSpec::default_for(512);
+        embed_with_prompt(
+            &conn,
+            false,
+            embed::DEFAULT_BATCH_SIZE,
+            OutputMode::Json,
+            &spec,
+        )
+        .unwrap();
+
+        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+    }
+
+    #[test]
+    fn embed_with_prompt_stamps_when_no_content() {
+        let conn = setup_test_db();
+
+        let spec = EmbedSpec::default_for(512);
+        embed_with_prompt(
+            &conn,
+            false,
+            embed::DEFAULT_BATCH_SIZE,
+            OutputMode::Json,
+            &spec,
+        )
+        .unwrap();
+
+        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+    }
+
+    #[test]
+    fn run_after_sync_stamps_when_already_embedded() {
+        let conn = setup_fully_embedded_db();
+        clear_stamp(&conn);
+
+        run_after_sync(&conn, OutputMode::Json).unwrap();
+
+        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+    }
+
+    #[test]
+    fn run_after_sync_stamps_when_no_content() {
+        let conn = setup_test_db();
+
+        run_after_sync(&conn, OutputMode::Json).unwrap();
+
+        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+    }
 }
