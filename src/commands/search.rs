@@ -5,21 +5,21 @@
 //! meetings for the query, cut from bounded candidate pools, so the output
 //! never claims a corpus total; it cross-links `grans grep` with the
 //! uncapped FTS match count instead.
-
-use std::io::{self, Write};
+//!
+//! Search is read-only over the embedding store: it searches what is
+//! embedded and warns about what is not. `grans embed` is the only
+//! command that creates or repairs embeddings (#126).
 
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
 use crate::commands::search_common::{print_shaped_cards, shape_and_page};
+use crate::embed::freshness::IndexFreshness;
 use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
 use crate::query::filter::{DEFAULT_SEARCH_TARGETS, SearchTarget, targets_to_flag_value};
-
-/// Threshold for prompting before embedding during a search.
-const EMBED_WARN_THRESHOLD: usize = 200;
 
 /// Filter values that affect the match count, kept so the grep cross-link
 /// can reproduce that count. Dates and the meeting filter are echoed as the
@@ -55,7 +55,6 @@ pub struct SearchOptions {
     pub meeting_filter: Option<String>,
     pub rerank: bool,
     pub min_score: Option<f32>,
-    pub yes: bool,
     pub limit: usize,
     /// Match snippets shown per meeting card.
     pub matches: usize,
@@ -69,12 +68,10 @@ impl SearchOptions {
     /// Construct SearchOptions from CLI arguments. A bare search reranks;
     /// --fast keeps fusion order. Targets and the meeting filter derive
     /// from the raw values in `echo`.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_cli_args(
         fast: bool,
         min_score: Option<f32>,
         context: usize,
-        yes: bool,
         limit: usize,
         matches: usize,
         echo: FilterEcho,
@@ -84,7 +81,6 @@ impl SearchOptions {
             meeting_filter: echo.meeting.clone(),
             rerank: !fast,
             min_score,
-            yes,
             limit,
             matches,
             context,
@@ -104,10 +100,6 @@ pub fn search(
     include_deleted: bool,
     ctx: &RunContext,
 ) -> Result<()> {
-    if !confirm_embedding_work(conn, opts.yes, ctx)? {
-        return Ok(());
-    }
-
     let embedder = crate::embed::model::FastEmbedModel::new()?;
 
     // The reranker's model load needs nothing retrieval produces, so start
@@ -124,10 +116,11 @@ pub fn search(
         })
         .transpose()?;
 
-    let spec =
-        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
-    let index =
-        crate::embed::ensure_embeddings(conn, &embedder, crate::embed::DEFAULT_BATCH_SIZE, &spec)?;
+    let (index, freshness) =
+        crate::embed::freshness::load_search_index(conn, crate::embed::model::MODEL_NAME)?;
+    if let Some(warning) = freshness_warning(&freshness) {
+        eprintln!("[grans] {}", warning);
+    }
 
     let ranking = crate::query::hybrid::hybrid_ranked(
         conn,
@@ -195,7 +188,7 @@ fn ranked_header(shown: usize, query: &str) -> String {
 /// The grep command that reproduces `keyword_total`: the query plus every
 /// search filter that affects the match count, echoed as given. Flags that
 /// only shape presentation or the ranked pipeline (--limit, --matches,
-/// --context, --fast, --min-score, --yes) are omitted because they do not
+/// --context, --fast, --min-score) are omitted because they do not
 /// change what counts as a match.
 fn grep_command_echo(query: &str, filters: &FilterEcho) -> String {
     let mut cmd = format!("grans grep \"{}\"", query);
@@ -271,62 +264,28 @@ fn render_ranked_meeting_list(
     }
 }
 
-/// Check embedding status and, on a TTY, prompt before a large or full
-/// re-embedding run. Returns false when the user declines (the search
-/// should stop). `yes` skips the prompt.
-fn confirm_embedding_work(conn: &Connection, yes: bool, ctx: &RunContext) -> Result<bool> {
-    // Resolve via the model constant: this path must not load the ONNX
-    // model just to count pending chunks.
-    let spec =
-        crate::embed::config::EmbedSpec::resolve_stored(conn, crate::embed::MODEL_MAX_TOKENS);
-    let status = crate::embed::get_embedding_status(conn, crate::embed::model::MODEL_NAME, &spec)?;
-    let needs_full_reembed = status.orphaned_chunks > 0
-        || status.legacy_max_length_warning
-        || status.model_changed_warning;
-
-    if (status.pending_chunks > EMBED_WARN_THRESHOLD || needs_full_reembed) && !yes {
-        if ctx.output_mode == OutputMode::Tty {
-            if needs_full_reembed {
-                eprintln!("\nWarning: Embeddings need to be rebuilt.");
-                if status.orphaned_chunks > 0 {
-                    eprintln!(
-                        "  - {} existing chunks are orphaned and will be deleted",
-                        status.orphaned_chunks
-                    );
-                }
-                if status.legacy_max_length_warning {
-                    eprintln!("  - Existing embeddings use an outdated chunking strategy");
-                }
-                if status.model_changed_warning {
-                    eprintln!(
-                        "  - Existing embeddings were created by a different embedding model"
-                    );
-                }
-                eprintln!("  - {} new chunks need embedding", status.pending_chunks);
-                eprintln!();
-                eprintln!("Existing embeddings cannot be used. Run `grans embed` to rebuild.");
-            } else {
-                eprintln!(
-                    "\nWarning: {} chunks need embedding.",
-                    status.pending_chunks
-                );
-                eprintln!(
-                    "This may take a while. Run `grans embed` separately to control when this happens."
-                );
-            }
-            eprint!("Proceed anyway? [y/N] ");
-            io::stderr().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Search cancelled. Run `grans embed` to build embeddings.");
-                return Ok(false);
-            }
-        }
+/// The stderr warning for an index that cannot cover everything, or None
+/// when it is fresh. Printed in every output mode; stderr keeps JSON
+/// stdout clean.
+fn freshness_warning(freshness: &IndexFreshness) -> Option<String> {
+    match freshness {
+        IndexFreshness::Fresh => None,
+        IndexFreshness::Stale => Some(
+            "Meeting data has synced since the last embed; recent content may be \
+             missing from these results. Run `grans embed` to include it."
+                .to_string(),
+        ),
+        IndexFreshness::Empty => Some(
+            "No embeddings exist; showing keyword-only results. Run `grans embed` \
+             to enable semantic search."
+                .to_string(),
+        ),
+        IndexFreshness::ModelMismatch { stored_model } => Some(format!(
+            "Existing embeddings were created by a different model ({}); showing \
+             keyword-only results. Run `grans embed` to rebuild them.",
+            stored_model
+        )),
     }
-
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -345,7 +304,6 @@ mod tests {
             false,
             None,
             0,
-            false,
             10,
             1,
             echo_with(|e| e.in_targets = vec![SearchTarget::Titles, SearchTarget::Notes]),
@@ -356,7 +314,6 @@ mod tests {
         assert!(opts.meeting_filter.is_none());
         assert!(opts.rerank);
         assert_eq!(opts.min_score, None);
-        assert!(!opts.yes);
         assert_eq!(opts.limit, 10);
         assert_eq!(opts.matches, 1);
         assert_eq!(opts.context, 0);
@@ -364,14 +321,13 @@ mod tests {
 
     #[test]
     fn from_cli_args_fast_skips_rerank() {
-        let opts = SearchOptions::from_cli_args(true, None, 0, false, 10, 1, FilterEcho::default());
+        let opts = SearchOptions::from_cli_args(true, None, 0, 10, 1, FilterEcho::default());
         assert!(!opts.rerank);
     }
 
     #[test]
     fn from_cli_args_min_score_threads() {
-        let opts =
-            SearchOptions::from_cli_args(false, Some(0.4), 0, false, 10, 1, FilterEcho::default());
+        let opts = SearchOptions::from_cli_args(false, Some(0.4), 0, 10, 1, FilterEcho::default());
         assert_eq!(opts.min_score, Some(0.4));
     }
 
@@ -381,7 +337,6 @@ mod tests {
             false,
             None,
             0,
-            false,
             10,
             1,
             echo_with(|e| e.meeting = Some("daily".to_string())),
@@ -391,10 +346,38 @@ mod tests {
 
     #[test]
     fn from_cli_args_matches_and_context_thread() {
-        let opts =
-            SearchOptions::from_cli_args(false, None, 3, false, 10, 4, FilterEcho::default());
+        let opts = SearchOptions::from_cli_args(false, None, 3, 10, 4, FilterEcho::default());
         assert_eq!(opts.context, 3);
         assert_eq!(opts.matches, 4);
+    }
+
+    #[test]
+    fn freshness_warning_silent_when_fresh() {
+        assert_eq!(freshness_warning(&IndexFreshness::Fresh), None);
+    }
+
+    #[test]
+    fn freshness_warning_stale_points_at_embed() {
+        let warning = freshness_warning(&IndexFreshness::Stale).unwrap();
+        assert!(warning.contains("synced since the last embed"));
+        assert!(warning.contains("grans embed"));
+    }
+
+    #[test]
+    fn freshness_warning_empty_says_keyword_only() {
+        let warning = freshness_warning(&IndexFreshness::Empty).unwrap();
+        assert!(warning.contains("keyword-only"));
+        assert!(warning.contains("grans embed"));
+    }
+
+    #[test]
+    fn freshness_warning_model_mismatch_names_the_model() {
+        let warning = freshness_warning(&IndexFreshness::ModelMismatch {
+            stored_model: "old-model".to_string(),
+        })
+        .unwrap();
+        assert!(warning.contains("old-model"));
+        assert!(warning.contains("grans embed"));
     }
 
     #[test]

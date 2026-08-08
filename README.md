@@ -293,19 +293,15 @@ The JSON envelopes differ where the contracts do: grep JSON reports `total_meeti
 
 The semantic half of search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-A `grans search` touches local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. A search may also prompt for confirmation before embedding new content if more than 200 chunks are unembedded. Use `--yes` (`-y`) to skip the prompt:
+A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, or when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results). Each warning says to run `grans embed`; searching itself never blocks.
 
-```bash
-grans search "deployment" --yes
-```
-
-When an upgrade changes the embedding model, existing embeddings are detected as stale and rebuilt automatically on the next embed or search. This full rebuild is a one-time cost and can take a while on large databases; run `grans embed -y` to do it at a time of your choosing.
+When an upgrade changes the embedding model, the next `grans embed` detects the stale embeddings and rebuilds them all. This full rebuild is a one-time cost and can take a while on large databases.
 
 Transcript chunks include speaker labels (`[You]` / `[Other]`) when speaker data is available, improving search relevance for queries like "what did I say about..." vs "what did they say about...".
 
 ### Embed
 
-Build embeddings for hybrid search. Use this to control when embedding happens instead of waiting for the first search.
+Build embeddings for hybrid search. This is the only command that creates or updates them; search reads them as-is.
 
 ```bash
 # Build embeddings for new/changed chunks (prompts for confirmation)
@@ -328,7 +324,7 @@ grans embed clear --count 10
 grans embed clear --yes && grans embed --yes
 ```
 
-Embeddings are built automatically during `grans sync --embed` or on the first search if not already present. The `embed` command gives you explicit control over when this happens, which is useful when you have a lot of new content and don't want the first search to block.
+Embeddings are built by this command or during `grans sync --embed`; search only reads them. Run one of the two after syncing new content to make it searchable semantically.
 
 ### List Meetings
 
@@ -496,7 +492,7 @@ Share your grans database across multiple machines via Dropbox.
 
 1. **Transcript sync** (`grans sync transcripts`) - Fetches transcripts from Granola's API with rate limiting (~1.5s per document). For 200 meetings, that's ~5 minutes.
 
-2. **Embedding generation** - The first search builds vector embeddings for transcripts, panel sections, and notes, which takes time on CPU.
+2. **Embedding generation** - `grans embed` builds vector embeddings for transcripts, panel sections, and notes, which takes time on CPU.
 
 Once you've done this work on one machine, Dropbox sync lets you share the results instead of repeating it everywhere.
 
