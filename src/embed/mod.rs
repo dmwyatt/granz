@@ -3,10 +3,13 @@ pub mod chunker;
 pub mod config;
 pub mod headers;
 pub mod model;
+pub mod plan;
 pub mod progress;
 pub mod rerank;
 pub mod search;
 pub mod store;
+
+pub use plan::EmbeddingPlan;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -184,133 +187,7 @@ pub fn get_embedding_status(
     current_model: &str,
     spec: &config::EmbedSpec,
 ) -> Result<EmbeddingStatus> {
-    use chunk::ChunkSourceType;
-
-    let desired_chunks = desired_chunks_for_spec(conn, spec)?;
-
-    // Get stored chunks
-    let stored = store::get_stored_chunks(conn)?;
-    let stored_map: HashMap<(&str, &str), &store::StoredChunk> = stored
-        .iter()
-        .map(|s| ((s.source_type.as_str(), s.source_id.as_str()), s))
-        .collect();
-
-    // Build set of desired keys and count by type
-    let mut desired_keys: HashSet<(String, String)> = HashSet::new();
-    let mut pending_count = 0;
-    let mut total_by_type = SourceTypeBreakdown::default();
-    let mut pending_by_type = SourceTypeBreakdown::default();
-
-    for chunk in &desired_chunks {
-        let key = (chunk.source_type.as_str(), chunk.source_id.as_str());
-        desired_keys.insert((chunk.source_type.to_string(), chunk.source_id.clone()));
-
-        // Count total by type
-        match chunk.source_type {
-            ChunkSourceType::TranscriptWindow => total_by_type.transcript_window += 1,
-            ChunkSourceType::PanelSection => total_by_type.panel_section += 1,
-            ChunkSourceType::NotesParagraph => total_by_type.notes_paragraph += 1,
-        }
-
-        match stored_map.get(&key) {
-            Some(existing) if existing.content_hash == chunk.content_hash => {
-                // Unchanged — already embedded
-            }
-            _ => {
-                // New or changed — needs embedding
-                pending_count += 1;
-                match chunk.source_type {
-                    ChunkSourceType::TranscriptWindow => pending_by_type.transcript_window += 1,
-                    ChunkSourceType::PanelSection => pending_by_type.panel_section += 1,
-                    ChunkSourceType::NotesParagraph => pending_by_type.notes_paragraph += 1,
-                }
-            }
-        }
-    }
-
-    // Embeddings written by a different model are unusable: everything must
-    // be re-embedded, regardless of content hashes.
-    let model_name = store::get_model_name(conn);
-    let model_changed_warning =
-        model_name.is_some() && model_name.as_deref() != Some(current_model);
-    if model_changed_warning {
-        pending_count = desired_chunks.len();
-        pending_by_type = total_by_type.clone();
-    }
-
-    // Calculate embedded by type (total - pending)
-    let embedded_by_type = SourceTypeBreakdown {
-        transcript_window: total_by_type.transcript_window - pending_by_type.transcript_window,
-        panel_section: total_by_type.panel_section - pending_by_type.panel_section,
-        notes_paragraph: total_by_type.notes_paragraph - pending_by_type.notes_paragraph,
-    };
-
-    // Count orphans (stored but not in desired)
-    let orphan_count = stored
-        .iter()
-        .filter(|s| !desired_keys.contains(&(s.source_type.clone(), s.source_id.clone())))
-        .count();
-
-    // Get chunk size statistics
-    let chunk_size_stats = calculate_chunk_size_stats(conn)?;
-
-    // Get max_length setting
-    let max_length = store::get_max_length(conn);
-
-    // Determine if we should show legacy warning:
-    // Model exists but max_length is missing (legacy embeddings)
-    let legacy_max_length_warning = model_name.is_some() && max_length.is_none();
-
-    let chunking_changed_warning = spec.differs_from_stored(conn);
-
-    Ok(EmbeddingStatus {
-        total_chunks: desired_chunks.len(),
-        embedded_chunks: desired_chunks.len() - pending_count,
-        pending_chunks: pending_count,
-        orphaned_chunks: orphan_count,
-        total_by_type,
-        embedded_by_type,
-        pending_by_type,
-        model_name,
-        chunk_size_stats,
-        max_length,
-        legacy_max_length_warning,
-        model_changed_warning,
-        chunking_changed_warning,
-    })
-}
-
-/// Run all chunkers under `spec`, building contextual headers when the
-/// spec asks for them. This is the single definition of which chunks a
-/// database "should" contain; status and embedding both use it so their
-/// hashes always agree.
-fn desired_chunks_for_spec(conn: &Connection, spec: &config::EmbedSpec) -> Result<Vec<Chunk>> {
-    let doc_headers = if spec.contextual_headers {
-        Some(headers::build_doc_headers(conn)?)
-    } else {
-        None
-    };
-    let doc_headers = doc_headers.as_ref();
-
-    let mut chunks =
-        chunker::transcript_window_chunker_adaptive(conn, &spec.chunking, doc_headers)?;
-    chunks.extend(chunker::panel_section_chunker(
-        conn,
-        &spec.chunking,
-        doc_headers,
-    )?);
-    // Notes keep their historical 20-char minimum; cap and header budget
-    // come from the shared chunking spec.
-    let notes_config = chunker::ChunkingConfig {
-        min_chars: 20,
-        ..spec.chunking.clone()
-    };
-    chunks.extend(chunker::notes_paragraph_chunker(
-        conn,
-        &notes_config,
-        doc_headers,
-    )?);
-    Ok(chunks)
+    EmbeddingPlan::compute(conn, spec.clone())?.status(conn, current_model)
 }
 
 /// True when a chunk's desired metadata no longer matches what is stored.
@@ -384,10 +261,33 @@ pub fn ensure_embeddings(
     batch_size: usize,
     spec: &config::EmbedSpec,
 ) -> Result<EmbeddingIndex> {
+    let plan = EmbeddingPlan::compute(conn, spec.clone())?;
+    ensure_embeddings_with_plan(conn, embedder, batch_size, plan)
+}
+
+/// Like [`ensure_embeddings`], but consuming an already-computed
+/// [`EmbeddingPlan`]. Callers that also need an [`EmbeddingStatus`] (the
+/// search prompt) compute one plan and feed both, instead of paying for
+/// the chunk rebuild twice.
+pub fn ensure_embeddings_with_plan(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    batch_size: usize,
+    plan: EmbeddingPlan,
+) -> Result<EmbeddingIndex> {
     // Check model consistency — if model changed, all embeddings are wiped
     let model_consistent = store::check_model_consistency(conn, embedder.model_name())?;
 
-    let desired_chunks = desired_chunks_for_spec(conn, spec)?;
+    let EmbeddingPlan {
+        spec,
+        desired_chunks,
+        stored,
+    } = plan;
+
+    // The plan's stored snapshot predates the wipe a model change just
+    // triggered; after the wipe nothing is stored, so everything desired
+    // must be embedded.
+    let stored = if model_consistent { stored } else { Vec::new() };
 
     if desired_chunks.is_empty() {
         if !model_consistent {
@@ -405,8 +305,6 @@ pub fn ensure_embeddings(
         });
     }
 
-    // Get stored state
-    let stored = store::get_stored_chunks(conn)?;
     let stored_map: HashMap<(&str, &str), &store::StoredChunk> = stored
         .iter()
         .map(|s| ((s.source_type.as_str(), s.source_id.as_str()), s))
@@ -534,7 +432,7 @@ pub fn ensure_embeddings(
         embedder.dimension(),
         embedder.max_length(),
     )?;
-    store::set_chunking_metadata(conn, spec)?;
+    store::set_chunking_metadata(conn, &spec)?;
 
     // Load all vectors for search
     let vectors = store::load_all_vectors(conn)?;
@@ -718,6 +616,113 @@ mod tests {
             ])
             .unwrap();
         }
+    }
+
+    /// A MockEmbedder that reports a different model name, for exercising
+    /// model-change paths.
+    struct RenamedEmbedder {
+        inner: MockEmbedder,
+        name: &'static str,
+    }
+
+    impl Embedder for RenamedEmbedder {
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.inner.embed_batch(texts)
+        }
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            self.inner.embed_query(text)
+        }
+        fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+        fn model_name(&self) -> &str {
+            self.name
+        }
+        fn max_length(&self) -> usize {
+            self.inner.max_length()
+        }
+    }
+
+    #[test]
+    fn embedding_plan_status_reports_pending_and_embedded() {
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::default_for(512);
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+
+        insert_utterances(
+            &conn,
+            "doc2",
+            &[
+                "A second document whose content is also long enough to clear the minimum chunk size threshold for embedding.",
+            ],
+        );
+
+        let plan = EmbeddingPlan::compute(&conn, spec).unwrap();
+        let status = plan.status(&conn, "mock-embedder").unwrap();
+        assert_eq!(status.total_chunks, 2);
+        assert_eq!(status.embedded_chunks, 1);
+        assert_eq!(status.pending_chunks, 1);
+        assert_eq!(status.orphaned_chunks, 0);
+        assert!(!status.model_changed_warning);
+    }
+
+    #[test]
+    fn ensure_embeddings_with_plan_embeds_pending_chunks() {
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::default_for(512);
+
+        let plan = EmbeddingPlan::compute(&conn, spec.clone()).unwrap();
+        let index =
+            ensure_embeddings_with_plan(&conn, &embedder, DEFAULT_BATCH_SIZE, plan).unwrap();
+        assert_eq!(index.vectors.len(), 1);
+
+        let status = get_embedding_status(&conn, "mock-embedder", &spec).unwrap();
+        assert_eq!(status.pending_chunks, 0);
+    }
+
+    #[test]
+    fn ensure_embeddings_with_plan_model_change_reembeds_all() {
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::default_for(512);
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+
+        // The plan's stored snapshot predates the wipe that a model change
+        // triggers inside ensure; it must not suppress re-embedding.
+        let plan = EmbeddingPlan::compute(&conn, spec.clone()).unwrap();
+        let other = RenamedEmbedder {
+            inner: MockEmbedder::default(),
+            name: "other-model",
+        };
+        let index = ensure_embeddings_with_plan(&conn, &other, DEFAULT_BATCH_SIZE, plan).unwrap();
+        assert_eq!(index.vectors.len(), 1);
+
+        let status = get_embedding_status(&conn, "other-model", &spec).unwrap();
+        assert_eq!(status.pending_chunks, 0);
+        assert!(!status.model_changed_warning);
     }
 
     #[test]
