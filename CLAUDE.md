@@ -59,6 +59,9 @@ On Windows, run tests from PowerShell rather than Git Bash. Git Bash prepends
 its coreutils to PATH, so PATH-sensitive tests pass there and fail on a GitHub
 Actions windows runner.
 
+A pre-commit hook (local, in the shared `.git/hooks`) rejects commits whose
+staged Rust files are unformatted; run `cargo fmt` before committing.
+
 ## Sanity Check
 
 After making changes, sync data and run queries to verify things work end-to-end:
