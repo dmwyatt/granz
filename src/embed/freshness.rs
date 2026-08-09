@@ -33,6 +33,10 @@ pub enum IndexFreshness {
     Stale,
     /// No embeddings stored; the semantic half of search has nothing.
     Empty,
+    /// Usable, but built before chunking settings were recorded (no
+    /// stored max_length): an outdated chunking strategy that degrades
+    /// relevance until `grans embed` rebuilds the store.
+    LegacyChunking,
     /// Stored embeddings were built by a different model and are
     /// unusable with the current one.
     ModelMismatch { stored_model: String },
@@ -63,7 +67,9 @@ pub fn load_search_index(
         return Ok((empty(), IndexFreshness::Empty));
     }
 
-    let freshness = if synced_since_last_embed(conn)? {
+    let freshness = if store::get_max_length(conn).is_none() {
+        IndexFreshness::LegacyChunking
+    } else if synced_since_last_embed(conn)? {
         IndexFreshness::Stale
     } else {
         IndexFreshness::Fresh
@@ -246,6 +252,20 @@ mod tests {
 
         let (_, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
         assert_eq!(freshness, IndexFreshness::Stale);
+    }
+
+    #[test]
+    fn missing_max_length_is_legacy_chunking() {
+        // Regression for #129 review: the read-only path lost main's
+        // pre-search rebuild warning for stores that predate persisted
+        // chunking settings; the verdict must carry it instead.
+        let conn = setup_embedded_db();
+        conn.execute("DELETE FROM embedding_metadata WHERE key = 'max_length'", [])
+            .unwrap();
+
+        let (index, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
+        assert!(!index.is_empty(), "legacy index still searches");
+        assert_eq!(freshness, IndexFreshness::LegacyChunking);
     }
 
     #[test]

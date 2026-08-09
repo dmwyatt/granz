@@ -280,6 +280,11 @@ fn freshness_warning(freshness: &IndexFreshness) -> Option<String> {
              to enable semantic search."
                 .to_string(),
         ),
+        IndexFreshness::LegacyChunking => Some(
+            "Existing embeddings use an outdated chunking strategy; results may be \
+             degraded. Run `grans embed` to rebuild them."
+                .to_string(),
+        ),
         IndexFreshness::ModelMismatch { stored_model } => Some(format!(
             "Existing embeddings were created by a different model ({}); showing \
              keyword-only results. Run `grans embed` to rebuild them.",
@@ -367,6 +372,13 @@ mod tests {
     fn freshness_warning_empty_says_keyword_only() {
         let warning = freshness_warning(&IndexFreshness::Empty).unwrap();
         assert!(warning.contains("keyword-only"));
+        assert!(warning.contains("grans embed"));
+    }
+
+    #[test]
+    fn freshness_warning_legacy_chunking_points_at_rebuild() {
+        let warning = freshness_warning(&IndexFreshness::LegacyChunking).unwrap();
+        assert!(warning.contains("outdated chunking strategy"));
         assert!(warning.contains("grans embed"));
     }
 
