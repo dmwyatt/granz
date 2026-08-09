@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::chunk::{Chunk, ChunkSourceType};
 
@@ -219,6 +219,11 @@ pub fn delete_recent_chunks(conn: &Connection, count: usize) -> Result<usize> {
 
     let actual = ids.len();
     delete_chunks(conn, &ids)?;
+    if actual > 0 {
+        // The removed chunks were covered by the watermark; the coverage
+        // claim no longer holds, so search must warn until the next embed.
+        set_embedded_watermark(conn, None)?;
+    }
     Ok(actual)
 }
 
@@ -282,6 +287,45 @@ pub fn set_model_metadata(
         [&max_length.to_string()],
     )?;
     Ok(())
+}
+
+/// Record the sync watermark the embedding store covers: the newest
+/// chunk-source `last_sync_*` value, captured *before* the run read the
+/// source tables. Storing the pre-read watermark (rather than a
+/// completion-time wall clock) keeps a sync that lands mid-run reported
+/// as stale, and keeps this machine's clock out of the comparison.
+/// `None` (no chunk source had ever synced at capture time) clears the
+/// key. Written only by runs that fully succeeded; a run that failed to
+/// embed or that removed covered chunks must not certify coverage.
+pub fn set_embedded_watermark(conn: &Connection, watermark: Option<&str>) -> Result<()> {
+    match watermark {
+        Some(ts) => {
+            conn.execute(
+                "INSERT OR REPLACE INTO embedding_metadata (key, value) \
+                 VALUES ('embedded_sync_watermark', ?1)",
+                [ts],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "DELETE FROM embedding_metadata WHERE key = 'embedded_sync_watermark'",
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The sync watermark the store covers (RFC3339), or None when no
+/// successful embed run has certified one.
+pub fn get_embedded_watermark(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM embedding_metadata WHERE key = 'embedded_sync_watermark'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// One metadata value by key.
@@ -683,6 +727,54 @@ mod tests {
 
         let remaining = get_stored_chunks(&conn).unwrap();
         assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn watermark_roundtrip_and_clear() {
+        let conn = test_db();
+        assert_eq!(get_embedded_watermark(&conn).unwrap(), None);
+
+        set_embedded_watermark(&conn, Some("2025-06-01T00:00:00+00:00")).unwrap();
+        assert_eq!(
+            get_embedded_watermark(&conn).unwrap().as_deref(),
+            Some("2025-06-01T00:00:00+00:00")
+        );
+
+        set_embedded_watermark(&conn, None).unwrap();
+        assert_eq!(get_embedded_watermark(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_recent_chunks_invalidates_the_watermark() {
+        // Regression for #129 review: `grans embed --clear --count N`
+        // removed covered chunks but left the freshness claim standing,
+        // so search reported Fresh over the gap.
+        let conn = test_db();
+        let chunk = Chunk {
+            source_type: ChunkSourceType::TranscriptWindow,
+            source_id: "doc1:w0".to_string(),
+            document_id: "doc1".to_string(),
+            text: "test".to_string(),
+            content_hash: hash_content("test"),
+            metadata: None,
+            header: None,
+        };
+        insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
+        set_embedded_watermark(&conn, Some("2025-06-01T00:00:00+00:00")).unwrap();
+
+        delete_recent_chunks(&conn, 1).unwrap();
+
+        assert_eq!(get_embedded_watermark(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_recent_chunks_noop_keeps_the_watermark() {
+        let conn = test_db();
+        set_embedded_watermark(&conn, Some("2025-06-01T00:00:00+00:00")).unwrap();
+
+        delete_recent_chunks(&conn, 5).unwrap();
+
+        assert!(get_embedded_watermark(&conn).unwrap().is_some());
     }
 
     #[test]

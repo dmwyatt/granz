@@ -139,7 +139,6 @@ fn main() -> Result<()> {
             from,
             to,
             date,
-            yes,
             limit,
             include_deleted,
         } => {
@@ -151,9 +150,8 @@ fn main() -> Result<()> {
                 to: to.clone(),
                 include_deleted: *include_deleted,
             };
-            let opts = SearchOptions::from_cli_args(
-                *fast, *min_score, *context, *yes, *limit, *matches, echo,
-            );
+            let opts =
+                SearchOptions::from_cli_args(*fast, *min_score, *context, *limit, *matches, echo);
             let date_range = query::dates::build_date_range(
                 from.as_deref(),
                 to.as_deref(),

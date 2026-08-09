@@ -167,7 +167,14 @@ fn retrieve_hybrid(
 ) -> Result<Vec<RankedDoc>> {
     let targets = SearchTarget::all();
     let fused = crate::query::hybrid::hybrid_ranked(
-        conn, embedder, index, query, &targets, None, None, false,
+        conn,
+        Some(embedder),
+        index,
+        query,
+        &targets,
+        None,
+        None,
+        false,
     )?
     .fused;
     Ok(fused
@@ -193,7 +200,14 @@ fn retrieve_hybrid_rerank_detailed(
 ) -> Result<Vec<RerankCandidate>> {
     let targets = SearchTarget::all();
     let ranking = crate::query::hybrid::hybrid_ranked(
-        conn, embedder, index, query, &targets, None, None, false,
+        conn,
+        Some(embedder),
+        index,
+        query,
+        &targets,
+        None,
+        None,
+        false,
     )?;
     crate::query::rerank::rerank_hybrid_detailed(conn, reranker, query, &ranking, ctx, cfg)
 }

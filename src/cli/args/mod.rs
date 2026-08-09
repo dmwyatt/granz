@@ -54,8 +54,8 @@ pub enum Commands {
     /// best few meetings for the query, not a complete list; when you need
     /// every meeting containing exact words, or matches attributed to a
     /// speaker, use `grans grep`. The first search downloads the embedding
-    /// and reranker models, and a search may prompt before embedding new
-    /// content (--yes accepts).
+    /// and reranker models. Search only covers embedded content; it warns
+    /// when data has synced since the last `grans embed`.
     #[command(visible_alias = "s")]
     Search {
         /// Search query; words match in any order, "quoted phrases" must match exactly
@@ -98,10 +98,6 @@ pub enum Commands {
         /// Relative date filter, overrides --from/--to [today, yesterday, this-week, last-week, this-month, last-month]
         #[arg(long)]
         date: Option<String>,
-
-        /// Skip embedding confirmation prompt
-        #[arg(long, short = 'y')]
-        yes: bool,
 
         /// Maximum number of results to return (0 = no limit)
         #[arg(long, default_value = "10")]

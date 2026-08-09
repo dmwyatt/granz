@@ -48,6 +48,10 @@ pub struct HybridRanking {
 /// Run FTS and semantic retrieval for `query` and fuse the rankings.
 /// Fused documents come back best first.
 ///
+/// `embedder: None` skips the semantic leg entirely (keyword-only
+/// ranking); callers with an empty or unusable index pass None to avoid
+/// paying embedder initialization for nothing.
+///
 /// `meeting_filter` (case-insensitive substring of document title or id)
 /// restricts both candidate lists before fusion truncates them to the
 /// pool, so ranking happens within the requested meeting rather than
@@ -55,7 +59,7 @@ pub struct HybridRanking {
 #[allow(clippy::too_many_arguments)]
 pub fn hybrid_ranked(
     conn: &Connection,
-    embedder: &dyn Embedder,
+    embedder: Option<&dyn Embedder>,
     index: &EmbeddingIndex,
     query: &str,
     targets: &[SearchTarget],
@@ -88,16 +92,19 @@ pub fn hybrid_ranked(
     // including FTS-only documents outside the semantic top of the pool.
     // Fusion still truncates each id list to the pool.
     let source_filter = semantic_source_filter(targets);
-    let (semantic_results, _) = crate::embed::semantic_search_with_index(
-        conn,
-        embedder,
-        index,
-        query,
-        date_range,
-        0,
-        source_filter.as_deref(),
-        include_deleted,
-    )?;
+    let (semantic_results, _) = match embedder {
+        Some(embedder) => crate::embed::semantic_search_with_index(
+            conn,
+            embedder,
+            index,
+            query,
+            date_range,
+            0,
+            source_filter.as_deref(),
+            include_deleted,
+        )?,
+        None => (Vec::new(), 0),
+    };
 
     let mut semantic_ids = Vec::with_capacity(semantic_results.len());
     let mut best_chunks = HashMap::with_capacity(semantic_results.len());
@@ -222,7 +229,7 @@ mod tests {
 
         let fused = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -255,7 +262,7 @@ mod tests {
 
         let fused = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &targets,
@@ -287,7 +294,7 @@ mod tests {
 
         let ranking = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -323,7 +330,7 @@ mod tests {
 
         let ranking = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -365,7 +372,7 @@ mod tests {
 
         let ranking = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -419,7 +426,7 @@ mod tests {
 
         let ranking = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -440,7 +447,7 @@ mod tests {
         // Sanity: without the filter the beta doc is truncated out.
         let unfiltered = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -466,7 +473,7 @@ mod tests {
 
         let ranking = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -496,7 +503,7 @@ mod tests {
         // Title substring, different case.
         let by_title = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -515,7 +522,7 @@ mod tests {
         // Id substring.
         let by_id = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "kumquat",
             &all_targets(),
@@ -540,7 +547,7 @@ mod tests {
         for filter in [None, Some("sync"), Some("sync a"), Some("nowhere")] {
             let ranking = hybrid_ranked(
                 &conn,
-                &FixedEmbedder,
+                Some(&FixedEmbedder),
                 &index,
                 "kumquat",
                 &all_targets(),
@@ -561,6 +568,37 @@ mod tests {
     }
 
     #[test]
+    fn no_embedder_yields_keyword_only_ranking() {
+        // The caller skips embedder init when the index is unusable; the
+        // ranking must then be exactly the FTS side.
+        let conn = build_test_db(&hybrid_state());
+        let index = EmbeddingIndex {
+            vectors: Vec::new(),
+            stats: None,
+        };
+
+        let ranking = hybrid_ranked(
+            &conn,
+            None,
+            &index,
+            "kumquat",
+            &all_targets(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let ids: Vec<&str> = ranking
+            .fused
+            .iter()
+            .map(|d| d.document_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["doc-fts", "doc-both"]);
+        assert!(ranking.best_chunks.is_empty());
+    }
+
+    #[test]
     fn no_matches_fuse_to_empty() {
         let conn = build_test_db(&hybrid_state());
         let index = EmbeddingIndex {
@@ -570,7 +608,7 @@ mod tests {
 
         let ranking = hybrid_ranked(
             &conn,
-            &FixedEmbedder,
+            Some(&FixedEmbedder),
             &index,
             "zyzzyva",
             &all_targets(),
