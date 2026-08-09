@@ -4,7 +4,7 @@
 //! are updated based on their primary key (usually `id`).
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::api::types::GetRecipesResponse;
 use crate::models::{CalendarEvent, Document, DocumentPeople, PanelTemplate, Person, Recipe};
@@ -576,14 +576,17 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
 }
 
 /// Read the last sync time recorded for a given entity type (RFC3339),
-/// or None if that entity has never synced.
-pub fn get_last_sync_time(conn: &Connection, entity_type: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM metadata WHERE key = ?1",
-        [format!("last_sync_{}", entity_type)],
-        |row| row.get(0),
-    )
-    .ok()
+/// or None if that entity has never synced. Database failures are errors,
+/// not None: freshness decisions ride on this value, and a locked or
+/// broken database must not read as "never synced".
+pub fn get_last_sync_time(conn: &Connection, entity_type: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [format!("last_sync_{}", entity_type)],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// Set the last sync time for a given entity type
@@ -615,6 +618,28 @@ mod tests {
             "panelTemplates": [],
             "publicRecipes": []
         })
+    }
+
+    #[test]
+    fn get_last_sync_time_none_when_never_synced() {
+        let conn = build_test_db(&empty_state());
+        assert_eq!(get_last_sync_time(&conn, "documents").unwrap(), None);
+    }
+
+    #[test]
+    fn get_last_sync_time_roundtrips() {
+        let conn = build_test_db(&empty_state());
+        set_last_sync_time(&conn, "documents").unwrap();
+        let ts = get_last_sync_time(&conn, "documents").unwrap().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(&ts).is_ok());
+    }
+
+    #[test]
+    fn get_last_sync_time_propagates_db_errors() {
+        // A broken database (here: no metadata table) must surface as an
+        // error, not read as "never synced".
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(get_last_sync_time(&conn, "documents").is_err());
     }
 
     #[test]

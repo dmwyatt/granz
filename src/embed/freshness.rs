@@ -58,7 +58,7 @@ pub fn load_search_index(
         return Ok((empty(), IndexFreshness::Empty));
     }
 
-    let freshness = if synced_since_last_embed(conn) {
+    let freshness = if synced_since_last_embed(conn)? {
         IndexFreshness::Stale
     } else {
         IndexFreshness::Fresh
@@ -74,20 +74,20 @@ pub fn load_search_index(
 
 /// True when any chunk-source entity synced after the last embed, or when
 /// the last embed time is unknown or unparseable (conservative: warn).
-fn synced_since_last_embed(conn: &Connection) -> bool {
-    let last_synced = CHUNK_SOURCE_ENTITIES
-        .iter()
-        .filter_map(|entity| db::sync::get_last_sync_time(conn, entity))
-        .filter_map(|ts| parse_rfc3339(&ts))
-        .max();
+fn synced_since_last_embed(conn: &Connection) -> Result<bool> {
+    let mut last_synced: Option<DateTime<FixedOffset>> = None;
+    for entity in CHUNK_SOURCE_ENTITIES {
+        let synced = db::sync::get_last_sync_time(conn, entity)?.and_then(|ts| parse_rfc3339(&ts));
+        last_synced = last_synced.max(synced);
+    }
     let Some(last_synced) = last_synced else {
         // Never synced: nothing can have drifted.
-        return false;
+        return Ok(false);
     };
 
     match store::get_last_embedded_at(conn).and_then(|ts| parse_rfc3339(&ts)) {
-        Some(last_embedded) => last_synced > last_embedded,
-        None => true,
+        Some(last_embedded) => Ok(last_synced > last_embedded),
+        None => Ok(true),
     }
 }
 
