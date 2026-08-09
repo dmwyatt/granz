@@ -555,78 +555,77 @@ pub fn ensure_embeddings(
     Ok(EmbeddingIndex { vectors, stats })
 }
 
-/// Filter semantic search results by document creation date.
-fn filter_results_by_date(
+/// Restrict semantic hits to documents that pass the same document-level
+/// filters the FTS retriever applies in SQL: the document exists, is not
+/// deleted (unless deleted documents were requested), and falls inside
+/// the optional date range. Stored vectors outlive their documents
+/// between embed runs, so this boundary is what keeps orphaned vectors
+/// out of results. The allowed set comes from one scan of `documents`
+/// (thousands of rows) rather than an IN-list over per-chunk results,
+/// which could exceed SQLite's variable limit.
+fn filter_results_by_documents(
     conn: &Connection,
     results: Vec<SemanticSearchResult>,
-    date_range: &crate::query::dates::DateRange,
+    date_range: Option<&crate::query::dates::DateRange>,
     include_deleted: bool,
 ) -> Result<Vec<SemanticSearchResult>> {
-    use chrono::DateTime;
     use std::collections::HashSet;
 
-    // Get all document IDs from results
-    let doc_ids: Vec<String> = results.iter().map(|r| r.document_id.clone()).collect();
-
-    if doc_ids.is_empty() {
+    if results.is_empty() {
         return Ok(results);
     }
 
-    // Query documents table to get created_at dates
-    let placeholders = doc_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let deleted_filter = if include_deleted {
-        ""
+    let sql = if include_deleted {
+        "SELECT id, created_at FROM documents"
     } else {
-        " AND deleted_at IS NULL"
+        "SELECT id, created_at FROM documents WHERE deleted_at IS NULL"
     };
-    let sql = format!(
-        "SELECT id, created_at FROM documents WHERE id IN ({}){}",
-        placeholders, deleted_filter
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::types::ToSql> = doc_ids
-        .iter()
-        .map(|id| id as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let mut valid_doc_ids = HashSet::new();
-    let rows = stmt.query_map(params.as_slice(), |row| {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
-        let created_at_str: String = row.get(1)?;
-        Ok((id, created_at_str))
+        let created_at: Option<String> = row.get(1)?;
+        Ok((id, created_at))
     })?;
 
+    let mut allowed: HashSet<String> = HashSet::new();
     for row in rows {
-        if let Ok((id, created_at_str)) = row {
-            if let Ok(created_at) = DateTime::parse_from_rfc3339(&created_at_str) {
-                let created_utc = created_at.with_timezone(&chrono::Utc);
-
-                // Check if the date is in range
-                let mut in_range = true;
-                if let Some(start) = &date_range.start {
-                    if &created_utc < start {
-                        in_range = false;
-                    }
-                }
-                if let Some(end) = &date_range.end {
-                    if &created_utc >= end {
-                        in_range = false;
-                    }
-                }
-
-                if in_range {
-                    valid_doc_ids.insert(id);
-                }
-            }
+        let (id, created_at) = row?;
+        if created_in_range(created_at.as_deref(), date_range) {
+            allowed.insert(id);
         }
     }
 
-    // Filter results to only include documents in the date range
     Ok(results
         .into_iter()
-        .filter(|r| valid_doc_ids.contains(&r.document_id))
+        .filter(|r| allowed.contains(&r.document_id))
         .collect())
+}
+
+/// Whether a document's creation date falls inside the range. No range
+/// admits everything; with a range, a missing or unparseable date is out.
+fn created_in_range(
+    created_at: Option<&str>,
+    date_range: Option<&crate::query::dates::DateRange>,
+) -> bool {
+    let Some(range) = date_range else {
+        return true;
+    };
+    let Some(created) = created_at.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+    else {
+        return false;
+    };
+    let created_utc = created.with_timezone(&chrono::Utc);
+    if let Some(start) = &range.start {
+        if &created_utc < start {
+            return false;
+        }
+    }
+    if let Some(end) = &range.end {
+        if &created_utc >= end {
+            return false;
+        }
+    }
+    true
 }
 
 /// Run a semantic search against an already-loaded embedder and index.
@@ -650,10 +649,10 @@ pub fn semantic_search_with_index(
     let query_vec = embedder.embed_query(query)?;
     let mut results = index.search(&query_vec, 0.0, source_type_filter);
 
-    // Filter results by date range if provided
-    if let Some(range) = date_range {
-        results = filter_results_by_date(conn, results, range, include_deleted)?;
-    }
+    // Document-level constraints (existence, deletion, date) always apply:
+    // the read-only index may hold vectors for documents that were deleted
+    // or edited since the last embed (#126).
+    results = filter_results_by_documents(conn, results, date_range, include_deleted)?;
 
     // Capture total count before applying limit
     let total_count = results.len();
@@ -887,6 +886,79 @@ mod tests {
         .unwrap();
 
         assert!(store::get_embedded_watermark(&conn).unwrap().is_none());
+    }
+
+    const LONG_TEXT_A: &str = "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.";
+    const LONG_TEXT_B: &str = "Another sufficiently long utterance with plenty of characters so the chunker accepts it for embedding as well.";
+
+    #[test]
+    fn semantic_search_excludes_deleted_documents() {
+        // Regression for #129 review: without a date range the semantic
+        // path skipped document filtering entirely, so vectors of
+        // soft-deleted meetings ranked in results.
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc-live", &[LONG_TEXT_A]);
+        insert_utterances(&conn, "doc-gone", &[LONG_TEXT_B]);
+        conn.execute(
+            "UPDATE documents SET deleted_at = '2025-06-01T00:00:00Z' WHERE id = 'doc-gone'",
+            [],
+        )
+        .unwrap();
+
+        let embedder = MockEmbedder::default();
+        let (results, _) = semantic_search_with_embedder(&conn, "query", &embedder).unwrap();
+
+        assert!(results.iter().any(|r| r.document_id == "doc-live"));
+        assert!(results.iter().all(|r| r.document_id != "doc-gone"));
+    }
+
+    #[test]
+    fn semantic_search_include_deleted_keeps_deleted_documents() {
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc-gone", &[LONG_TEXT_A]);
+        conn.execute(
+            "UPDATE documents SET deleted_at = '2025-06-01T00:00:00Z' WHERE id = 'doc-gone'",
+            [],
+        )
+        .unwrap();
+
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::resolve_stored(&conn, embedder.max_length());
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+        let (results, _) = semantic_search_with_index(
+            &conn, &embedder, &index, "query", None, 0, None, true,
+        )
+        .unwrap();
+
+        assert!(results.iter().any(|r| r.document_id == "doc-gone"));
+    }
+
+    #[test]
+    fn semantic_search_drops_vectors_of_missing_documents() {
+        // A document hard-deleted after its chunks were embedded leaves
+        // orphan vectors behind (no FK ties chunks to documents); they
+        // must not surface as results.
+        let conn = setup_test_db();
+        insert_utterances(&conn, "doc-live", &[LONG_TEXT_A]);
+        insert_utterances(&conn, "doc-ghost", &[LONG_TEXT_B]);
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::resolve_stored(&conn, embedder.max_length());
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+        conn.execute(
+            "DELETE FROM transcript_utterances WHERE document_id = 'doc-ghost'",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM documents WHERE id = 'doc-ghost'", [])
+            .unwrap();
+
+        let (results, _) = semantic_search_with_index(
+            &conn, &embedder, &index, "query", None, 0, None, false,
+        )
+        .unwrap();
+
+        assert!(results.iter().any(|r| r.document_id == "doc-live"));
+        assert!(results.iter().all(|r| r.document_id != "doc-ghost"));
     }
 
     #[test]
