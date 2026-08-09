@@ -1,11 +1,16 @@
 //! Read-only loading of the stored vector index for search.
 //!
 //! Search never repairs the embedding store (#126): it searches what is
-//! embedded and reports what is not. Freshness is judged from two
-//! timestamps that both live inside the database file (so a synced copy
-//! of the database stays self-consistent): the `last_sync_*` stamps the
-//! sync command writes, and the `last_embedded_at` stamp
-//! `ensure_embeddings` writes on completion.
+//! embedded and reports what is not. Freshness is judged entirely within
+//! the `last_sync_*` stamp stream (so a synced copy of the database stays
+//! self-consistent): an embed run captures the newest chunk-source sync
+//! stamp before reading any source data and stores it as the covered
+//! watermark on success; the index is stale once any chunk-source stamp
+//! is newer than that watermark. Because the watermark is a copied sync
+//! stamp, the embedding machine's clock never enters the comparison; the
+//! residual assumption is only that sync stamps themselves advance, which
+//! holds across machines sharing a database unless their clocks disagree
+//! by more than the gap between two consecutive syncs.
 
 use anyhow::Result;
 use chrono::{DateTime, FixedOffset};
@@ -21,10 +26,10 @@ const CHUNK_SOURCE_ENTITIES: [&str; 3] = ["documents", "transcripts", "panels"];
 /// What search can say about the stored vector index before using it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexFreshness {
-    /// Usable and no chunk-source sync since the last embed.
+    /// Usable and no chunk-source sync past the covered watermark.
     Fresh,
-    /// Usable, but chunk sources synced after the last embed (or the
-    /// embed time is unknown); recent content may be missing.
+    /// Usable, but chunk sources synced past the covered watermark (or
+    /// no watermark is stored); recent content may be missing.
     Stale,
     /// No embeddings stored; the semantic half of search has nothing.
     Empty,
@@ -72,21 +77,45 @@ pub fn load_search_index(
     ))
 }
 
-/// True when any chunk-source entity synced after the last embed, or when
-/// the last embed time is unknown or unparseable (conservative: warn).
-fn synced_since_last_embed(conn: &Connection) -> Result<bool> {
-    let mut last_synced: Option<DateTime<FixedOffset>> = None;
+/// The newest chunk-source sync stamp, raw and parsed. None when no chunk
+/// source has ever synced (or no stamp parses).
+fn newest_chunk_source_sync(
+    conn: &Connection,
+) -> Result<Option<(String, DateTime<FixedOffset>)>> {
+    let mut newest: Option<(String, DateTime<FixedOffset>)> = None;
     for entity in CHUNK_SOURCE_ENTITIES {
-        let synced = db::sync::get_last_sync_time(conn, entity)?.and_then(|ts| parse_rfc3339(&ts));
-        last_synced = last_synced.max(synced);
+        let Some(raw) = db::sync::get_last_sync_time(conn, entity)? else {
+            continue;
+        };
+        let Some(parsed) = parse_rfc3339(&raw) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(_, t)| parsed > *t) {
+            newest = Some((raw, parsed));
+        }
     }
-    let Some(last_synced) = last_synced else {
+    Ok(newest)
+}
+
+/// The sync watermark an embed run must capture *before* reading source
+/// data: whatever it embeds covers at most the syncs recorded so far, so
+/// this is the newest stamp the run may claim on success. A sync that
+/// completes mid-run writes a newer stamp and correctly reads as stale.
+pub fn current_sync_watermark(conn: &Connection) -> Result<Option<String>> {
+    Ok(newest_chunk_source_sync(conn)?.map(|(raw, _)| raw))
+}
+
+/// True when a chunk-source sync stamp is newer than the watermark the
+/// store covers, or when syncs exist but no watermark is stored or it is
+/// unparseable (conservative: warn).
+fn synced_since_last_embed(conn: &Connection) -> Result<bool> {
+    let Some((_, last_synced)) = newest_chunk_source_sync(conn)? else {
         // Never synced: nothing can have drifted.
         return Ok(false);
     };
 
-    match store::get_last_embedded_at(conn).and_then(|ts| parse_rfc3339(&ts)) {
-        Some(last_embedded) => Ok(last_synced > last_embedded),
+    match store::get_embedded_watermark(conn)?.and_then(|ts| parse_rfc3339(&ts)) {
+        Some(covered) => Ok(last_synced > covered),
         None => Ok(true),
     }
 }
@@ -135,9 +164,10 @@ mod tests {
         .unwrap();
     }
 
-    fn set_embedded_at(conn: &Connection, ts: &str) {
+    fn set_watermark(conn: &Connection, ts: &str) {
         conn.execute(
-            "INSERT OR REPLACE INTO embedding_metadata (key, value) VALUES ('last_embedded_at', ?1)",
+            "INSERT OR REPLACE INTO embedding_metadata (key, value) \
+             VALUES ('embedded_sync_watermark', ?1)",
             [ts],
         )
         .unwrap();
@@ -163,10 +193,12 @@ mod tests {
     }
 
     #[test]
-    fn embed_after_sync_is_fresh() {
+    fn watermark_covering_latest_sync_is_fresh() {
+        // The stored watermark is the sync stamp the embed run captured;
+        // a stamp equal to the newest sync means everything is covered.
         let conn = setup_embedded_db();
         set_sync_time(&conn, "transcripts", "2025-06-01T00:00:00Z");
-        set_embedded_at(&conn, "2025-06-02T00:00:00Z");
+        set_watermark(&conn, "2025-06-01T00:00:00Z");
 
         let (_, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
         assert_eq!(freshness, IndexFreshness::Fresh);
@@ -175,7 +207,7 @@ mod tests {
     #[test]
     fn sync_after_embed_is_stale() {
         let conn = setup_embedded_db();
-        set_embedded_at(&conn, "2025-06-01T00:00:00Z");
+        set_watermark(&conn, "2025-06-01T00:00:00Z");
         set_sync_time(&conn, "transcripts", "2025-06-02T00:00:00Z");
 
         let (index, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
@@ -187,7 +219,7 @@ mod tests {
     fn any_chunk_source_entity_counts_for_staleness() {
         for entity in ["documents", "transcripts", "panels"] {
             let conn = setup_embedded_db();
-            set_embedded_at(&conn, "2025-06-01T00:00:00Z");
+            set_watermark(&conn, "2025-06-01T00:00:00Z");
             set_sync_time(&conn, entity, "2025-06-02T00:00:00Z");
 
             let (_, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
@@ -198,7 +230,7 @@ mod tests {
     #[test]
     fn non_chunk_entity_sync_does_not_go_stale() {
         let conn = setup_embedded_db();
-        set_embedded_at(&conn, "2025-06-01T00:00:00Z");
+        set_watermark(&conn, "2025-06-01T00:00:00Z");
         set_sync_time(&conn, "people", "2025-06-02T00:00:00Z");
 
         let (_, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
@@ -206,19 +238,37 @@ mod tests {
     }
 
     #[test]
-    fn synced_with_missing_embed_stamp_is_stale() {
-        // Databases embedded before the stamp existed must warn, not
-        // silently claim freshness.
+    fn synced_with_missing_watermark_is_stale() {
+        // Databases embedded before the watermark existed (or whose
+        // watermark was invalidated) must warn, not claim freshness.
         let conn = setup_embedded_db();
-        conn.execute(
-            "DELETE FROM embedding_metadata WHERE key = 'last_embedded_at'",
-            [],
-        )
-        .unwrap();
         set_sync_time(&conn, "documents", "2025-06-01T00:00:00Z");
 
         let (_, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
         assert_eq!(freshness, IndexFreshness::Stale);
+    }
+
+    #[test]
+    fn current_sync_watermark_is_newest_chunk_source_stamp() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::create_tables(&conn).unwrap();
+        set_sync_time(&conn, "documents", "2025-06-01T00:00:00Z");
+        set_sync_time(&conn, "transcripts", "2025-06-03T00:00:00Z");
+        set_sync_time(&conn, "panels", "2025-06-02T00:00:00Z");
+        // Non-chunk entities never move the watermark.
+        set_sync_time(&conn, "people", "2025-06-09T00:00:00Z");
+
+        assert_eq!(
+            current_sync_watermark(&conn).unwrap().as_deref(),
+            Some("2025-06-03T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn current_sync_watermark_none_when_never_synced() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::schema::create_tables(&conn).unwrap();
+        assert_eq!(current_sync_watermark(&conn).unwrap(), None);
     }
 
     #[test]

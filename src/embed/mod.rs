@@ -76,6 +76,9 @@ pub struct EmbeddingStatus {
     pub pending_chunks: usize,
     /// Number of orphaned chunks (embedded but source deleted).
     pub orphaned_chunks: usize,
+    /// Chunk-table ids of the orphaned chunks, so callers that skip the
+    /// embedding model can still delete them.
+    pub orphan_ids: Vec<i64>,
     /// Per-source-type breakdown of total chunks.
     pub total_by_type: SourceTypeBreakdown,
     /// Per-source-type breakdown of embedded chunks.
@@ -246,11 +249,12 @@ pub fn get_embedding_status(
         notes_paragraph: total_by_type.notes_paragraph - pending_by_type.notes_paragraph,
     };
 
-    // Count orphans (stored but not in desired)
-    let orphan_count = stored
+    // Orphans: stored but not in desired
+    let orphan_ids: Vec<i64> = stored
         .iter()
         .filter(|s| !desired_keys.contains(&(s.source_type.clone(), s.source_id.clone())))
-        .count();
+        .map(|s| s.id)
+        .collect();
 
     // Get chunk size statistics
     let chunk_size_stats = calculate_chunk_size_stats(conn)?;
@@ -268,7 +272,8 @@ pub fn get_embedding_status(
         total_chunks: desired_chunks.len(),
         embedded_chunks: desired_chunks.len() - pending_count,
         pending_chunks: pending_count,
-        orphaned_chunks: orphan_count,
+        orphaned_chunks: orphan_ids.len(),
+        orphan_ids,
         total_by_type,
         embedded_by_type,
         pending_by_type,
@@ -385,26 +390,20 @@ pub fn ensure_embeddings(
     batch_size: usize,
     spec: &config::EmbedSpec,
 ) -> Result<EmbeddingIndex> {
+    // Capture the sync watermark before reading any source data: the run
+    // covers at most the syncs recorded up to this point, so a sync that
+    // completes mid-run must stay newer than what this run certifies.
+    let watermark = freshness::current_sync_watermark(conn)?;
+
     // Check model consistency — if model changed, all embeddings are wiped
-    let model_consistent = store::check_model_consistency(conn, embedder.model_name())?;
+    store::check_model_consistency(conn, embedder.model_name())?;
 
     let desired_chunks = desired_chunks_for_spec(conn, spec)?;
 
     if desired_chunks.is_empty() {
-        if !model_consistent {
-            store::set_model_metadata(
-                conn,
-                embedder.model_name(),
-                embedder.dimension(),
-                embedder.max_length(),
-            )?;
-        }
-        store::set_last_embedded_at(conn)?;
+        // No early return: stored chunks whose sources are gone are all
+        // orphans, and the orphan pass below must still delete them.
         eprintln!("[grans] No embeddable content found.");
-        return Ok(EmbeddingIndex {
-            vectors: Vec::new(),
-            stats: None,
-        });
     }
 
     // Get stored state
@@ -468,6 +467,7 @@ pub fn ensure_embeddings(
     }
 
     // Embed new/changed chunks
+    let mut failed_chunks = 0usize;
     let stats = if !to_embed.is_empty() {
         let pb = progress::embedding_progress_bar(to_embed.len() as u64);
         let start = Instant::now();
@@ -489,6 +489,7 @@ pub fn ensure_embeddings(
 
                     for (i, result) in results.iter().enumerate() {
                         if let Err(e) = result {
+                            failed_chunks += 1;
                             eprintln!(
                                 "[grans] Warning: failed to store chunk {}: {}",
                                 batch[i].source_id, e
@@ -497,6 +498,7 @@ pub fn ensure_embeddings(
                     }
                 }
                 Err(e) => {
+                    failed_chunks += batch.len();
                     eprintln!("[grans] Warning: batch embedding failed: {}", e);
                 }
             }
@@ -537,7 +539,15 @@ pub fn ensure_embeddings(
         embedder.max_length(),
     )?;
     store::set_chunking_metadata(conn, spec)?;
-    store::set_last_embedded_at(conn)?;
+    if failed_chunks == 0 {
+        store::set_embedded_watermark(conn, watermark.as_deref())?;
+    } else {
+        eprintln!(
+            "[grans] {} chunks failed to embed; the index is not certified fresh. \
+             Re-run `grans embed` to retry them.",
+            failed_chunks
+        );
+    }
 
     // Load all vectors for search
     let vectors = store::load_all_vectors(conn)?;
@@ -723,8 +733,20 @@ mod tests {
         }
     }
 
+    fn set_sync_stamp(conn: &Connection, ts: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_sync_transcripts', ?1)",
+            [ts],
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn ensure_embeddings_stamps_last_embedded_at() {
+    fn ensure_embeddings_stores_the_pre_read_sync_watermark() {
+        // Regression for #129 review: the stamp used to be the run's
+        // completion time, so a sync finishing during a long run was
+        // wrongly certified as covered. The watermark must be the sync
+        // stamp as of the moment the run read its source data.
         let conn = setup_test_db();
         insert_utterances(
             &conn,
@@ -733,7 +755,8 @@ mod tests {
                 "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
             ],
         );
-        assert!(store::get_last_embedded_at(&conn).is_none());
+        set_sync_stamp(&conn, "2025-06-01T00:00:00+00:00");
+        assert!(store::get_embedded_watermark(&conn).unwrap().is_none());
 
         let embedder = MockEmbedder::default();
         ensure_embeddings(
@@ -744,15 +767,37 @@ mod tests {
         )
         .unwrap();
 
-        let stamp = store::get_last_embedded_at(&conn).unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(&stamp).is_ok());
+        assert_eq!(
+            store::get_embedded_watermark(&conn).unwrap().as_deref(),
+            Some("2025-06-01T00:00:00+00:00")
+        );
     }
 
     #[test]
-    fn ensure_embeddings_stamps_last_embedded_at_when_nothing_to_embed() {
-        // A no-op run still certifies the store matches the sources as of
-        // now; the stamp is what clears a staleness warning after a sync
+    fn ensure_embeddings_certifies_when_nothing_to_embed() {
+        // A no-op run still certifies the store covers the syncs recorded
+        // so far; that is what clears a staleness warning after a sync
         // that brought no embeddable changes.
+        let conn = setup_test_db();
+        set_sync_stamp(&conn, "2025-06-01T00:00:00+00:00");
+        let embedder = MockEmbedder::default();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+        assert_eq!(
+            store::get_embedded_watermark(&conn).unwrap().as_deref(),
+            Some("2025-06-01T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn ensure_embeddings_without_syncs_stores_no_watermark() {
+        // Never-synced database: there is no sync to cover, and freshness
+        // treats "no syncs" as fresh on its own.
         let conn = setup_test_db();
         let embedder = MockEmbedder::default();
         ensure_embeddings(
@@ -762,7 +807,86 @@ mod tests {
             &config::EmbedSpec::default_for(512),
         )
         .unwrap();
-        assert!(store::get_last_embedded_at(&conn).is_some());
+        assert!(store::get_embedded_watermark(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn ensure_embeddings_deletes_orphans_when_no_content_remains() {
+        // Regression for #129 review: the empty-desired short-circuit used
+        // to return before the orphan pass, so vectors for deleted sources
+        // survived forever.
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
+        let embedder = MockEmbedder::default();
+        let spec = config::EmbedSpec::default_for(512);
+        ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+        conn.execute("DELETE FROM transcript_utterances", [])
+            .unwrap();
+
+        let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
+
+        assert!(index.is_empty());
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    /// Embedder whose batches always fail, for exercising the
+    /// warn-and-continue path.
+    struct FailingEmbedder;
+
+    impl Embedder for FailingEmbedder {
+        fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            anyhow::bail!("batch failure")
+        }
+
+        fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+            anyhow::bail!("query failure")
+        }
+
+        fn dimension(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "failing-embedder"
+        }
+
+        fn max_length(&self) -> usize {
+            512
+        }
+    }
+
+    #[test]
+    fn failed_batches_do_not_certify_freshness() {
+        // Regression for #129 review: a run whose batches all failed used
+        // to stamp anyway, so search reported Fresh over missing vectors.
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.",
+            ],
+        );
+        set_sync_stamp(&conn, "2025-06-01T00:00:00+00:00");
+
+        ensure_embeddings(
+            &conn,
+            &FailingEmbedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+
+        assert!(store::get_embedded_watermark(&conn).unwrap().is_none());
     }
 
     #[test]

@@ -342,6 +342,43 @@ fn clear_embeddings(
     Ok(())
 }
 
+/// The nothing-needs-the-model outcome of [`reconcile_without_model`],
+/// carried back so each caller can phrase it for its output channel.
+enum ShortCircuit {
+    /// No embeddable content exists; any stored chunks were orphans and
+    /// have been deleted.
+    NoContent { orphans_removed: usize },
+    /// Every desired chunk is already embedded and nothing is orphaned.
+    AlreadyEmbedded,
+}
+
+/// Compute embedding status with a sync watermark captured before the
+/// status read, and when nothing needs the embedding model, reconcile the
+/// store (delete orphans) and certify freshness. Centralizing capture,
+/// cleanup, and stamp here keeps every short-circuit path honest: a path
+/// that skips this helper cannot accidentally certify coverage.
+fn reconcile_without_model(
+    conn: &Connection,
+    spec: &EmbedSpec,
+) -> Result<(embed::EmbeddingStatus, Option<ShortCircuit>)> {
+    let watermark = embed::freshness::current_sync_watermark(conn)?;
+    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
+
+    if status.total_chunks == 0 {
+        let orphans_removed = status.orphan_ids.len();
+        embed::store::delete_chunks(conn, &status.orphan_ids)?;
+        embed::store::set_embedded_watermark(conn, watermark.as_deref())?;
+        return Ok((status, Some(ShortCircuit::NoContent { orphans_removed })));
+    }
+
+    if status.pending_chunks == 0 && status.orphaned_chunks == 0 {
+        embed::store::set_embedded_watermark(conn, watermark.as_deref())?;
+        return Ok((status, Some(ShortCircuit::AlreadyEmbedded)));
+    }
+
+    Ok((status, None))
+}
+
 /// Embed with optional confirmation prompt.
 fn embed_with_prompt(
     conn: &Connection,
@@ -350,52 +387,57 @@ fn embed_with_prompt(
     mode: OutputMode,
     spec: &EmbedSpec,
 ) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
+    let (status, short_circuit) = reconcile_without_model(conn, spec)?;
 
-    if status.total_chunks == 0 {
-        // The status check verified the store matches the sources; that
-        // certifies freshness even though nothing was embedded.
-        embed::store::set_last_embedded_at(conn)?;
-        match mode {
-            OutputMode::Json => {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "action": "embed",
-                        "message": "No content to embed",
-                        "total_chunks": 0,
-                    })
-                );
+    match short_circuit {
+        Some(ShortCircuit::NoContent { orphans_removed }) => {
+            match mode {
+                OutputMode::Json => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action": "embed",
+                            "message": "No content to embed",
+                            "total_chunks": 0,
+                            "orphans_removed": orphans_removed,
+                        })
+                    );
+                }
+                _ => {
+                    println!("No embeddable content found.");
+                    if orphans_removed > 0 {
+                        println!(
+                            "Removed {} orphaned embeddings.",
+                            format_number(orphans_removed)
+                        );
+                    }
+                }
             }
-            _ => {
-                println!("No embeddable content found.");
-            }
+            return Ok(());
         }
-        return Ok(());
-    }
-
-    if status.pending_chunks == 0 && status.orphaned_chunks == 0 {
-        embed::store::set_last_embedded_at(conn)?;
-        match mode {
-            OutputMode::Json => {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "action": "embed",
-                        "message": "All chunks already embedded",
-                        "total_chunks": status.total_chunks,
-                        "embedded_chunks": status.embedded_chunks,
-                    })
-                );
+        Some(ShortCircuit::AlreadyEmbedded) => {
+            match mode {
+                OutputMode::Json => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action": "embed",
+                            "message": "All chunks already embedded",
+                            "total_chunks": status.total_chunks,
+                            "embedded_chunks": status.embedded_chunks,
+                        })
+                    );
+                }
+                _ => {
+                    println!(
+                        "All {} chunks are already embedded.",
+                        format_number(status.total_chunks)
+                    );
+                }
             }
-            _ => {
-                println!(
-                    "All {} chunks are already embedded.",
-                    format_number(status.total_chunks)
-                );
-            }
+            return Ok(());
         }
-        return Ok(());
+        None => {}
     }
 
     // Prompt unless --yes or non-TTY
@@ -488,26 +530,31 @@ fn do_embed(
 /// Does not prompt since user explicitly requested embedding.
 pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
     let spec = EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS);
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, &spec)?;
+    let (status, short_circuit) = reconcile_without_model(conn, &spec)?;
 
-    if status.total_chunks == 0 {
-        // As in embed_with_prompt: the status check certifies freshness.
-        embed::store::set_last_embedded_at(conn)?;
-        if mode != OutputMode::Json {
-            eprintln!("[grans] No embeddable content found.");
+    match short_circuit {
+        Some(ShortCircuit::NoContent { orphans_removed }) => {
+            if mode != OutputMode::Json {
+                eprintln!("[grans] No embeddable content found.");
+                if orphans_removed > 0 {
+                    eprintln!(
+                        "[grans] Removed {} orphaned embeddings.",
+                        format_number(orphans_removed)
+                    );
+                }
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
-
-    if status.pending_chunks == 0 && status.orphaned_chunks == 0 {
-        embed::store::set_last_embedded_at(conn)?;
-        if mode != OutputMode::Json {
-            eprintln!(
-                "[grans] All {} chunks already embedded.",
-                format_number(status.total_chunks)
-            );
+        Some(ShortCircuit::AlreadyEmbedded) => {
+            if mode != OutputMode::Json {
+                eprintln!(
+                    "[grans] All {} chunks already embedded.",
+                    format_number(status.total_chunks)
+                );
+            }
+            return Ok(());
         }
-        return Ok(());
+        None => {}
     }
 
     if mode != OutputMode::Json {
@@ -576,18 +623,29 @@ mod tests {
         conn
     }
 
-    fn clear_stamp(conn: &Connection) {
+    const SYNC_STAMP: &str = "2025-06-01T00:00:00+00:00";
+
+    fn set_sync_stamp(conn: &Connection) {
         conn.execute(
-            "DELETE FROM embedding_metadata WHERE key = 'last_embedded_at'",
-            [],
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_sync_transcripts', ?1)",
+            [SYNC_STAMP],
         )
         .unwrap();
     }
 
+    fn stored_watermark(conn: &Connection) -> Option<String> {
+        embed::store::get_embedded_watermark(conn).unwrap()
+    }
+
+    fn chunk_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[test]
-    fn embed_with_prompt_stamps_when_already_embedded() {
+    fn embed_with_prompt_certifies_when_already_embedded() {
         let conn = setup_fully_embedded_db();
-        clear_stamp(&conn);
+        set_sync_stamp(&conn);
 
         let spec = EmbedSpec::default_for(512);
         embed_with_prompt(
@@ -599,12 +657,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+        assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
     }
 
     #[test]
-    fn embed_with_prompt_stamps_when_no_content() {
+    fn embed_with_prompt_certifies_when_no_content() {
         let conn = setup_test_db();
+        set_sync_stamp(&conn);
 
         let spec = EmbedSpec::default_for(512);
         embed_with_prompt(
@@ -616,25 +675,64 @@ mod tests {
         )
         .unwrap();
 
-        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+        assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
     }
 
     #[test]
-    fn run_after_sync_stamps_when_already_embedded() {
+    fn embed_with_prompt_no_content_removes_orphans() {
+        // Regression for #129 review: the no-content short-circuit used to
+        // certify freshness and return before any orphan cleanup, leaving
+        // vectors for deleted sources served to search forever.
         let conn = setup_fully_embedded_db();
-        clear_stamp(&conn);
+        conn.execute("DELETE FROM transcript_utterances", [])
+            .unwrap();
+        set_sync_stamp(&conn);
+        assert!(chunk_count(&conn) > 0);
 
-        run_after_sync(&conn, OutputMode::Json).unwrap();
+        let spec = EmbedSpec::default_for(512);
+        embed_with_prompt(
+            &conn,
+            false,
+            embed::DEFAULT_BATCH_SIZE,
+            OutputMode::Json,
+            &spec,
+        )
+        .unwrap();
 
-        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+        assert_eq!(chunk_count(&conn), 0);
+        assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
     }
 
     #[test]
-    fn run_after_sync_stamps_when_no_content() {
-        let conn = setup_test_db();
+    fn run_after_sync_certifies_when_already_embedded() {
+        let conn = setup_fully_embedded_db();
+        set_sync_stamp(&conn);
 
         run_after_sync(&conn, OutputMode::Json).unwrap();
 
-        assert!(embed::store::get_last_embedded_at(&conn).is_some());
+        assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
+    }
+
+    #[test]
+    fn run_after_sync_certifies_when_no_content() {
+        let conn = setup_test_db();
+        set_sync_stamp(&conn);
+
+        run_after_sync(&conn, OutputMode::Json).unwrap();
+
+        assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
+    }
+
+    #[test]
+    fn run_after_sync_no_content_removes_orphans() {
+        let conn = setup_fully_embedded_db();
+        conn.execute("DELETE FROM transcript_utterances", [])
+            .unwrap();
+        set_sync_stamp(&conn);
+
+        run_after_sync(&conn, OutputMode::Json).unwrap();
+
+        assert_eq!(chunk_count(&conn), 0);
+        assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
     }
 }
