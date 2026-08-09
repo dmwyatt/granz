@@ -925,10 +925,9 @@ mod tests {
         let embedder = MockEmbedder::default();
         let spec = config::EmbedSpec::resolve_stored(&conn, embedder.max_length());
         let index = ensure_embeddings(&conn, &embedder, DEFAULT_BATCH_SIZE, &spec).unwrap();
-        let (results, _) = semantic_search_with_index(
-            &conn, &embedder, &index, "query", None, 0, None, true,
-        )
-        .unwrap();
+        let (results, _) =
+            semantic_search_with_index(&conn, &embedder, &index, "query", None, 0, None, true)
+                .unwrap();
 
         assert!(results.iter().any(|r| r.document_id == "doc-gone"));
     }
@@ -952,10 +951,9 @@ mod tests {
         conn.execute("DELETE FROM documents WHERE id = 'doc-ghost'", [])
             .unwrap();
 
-        let (results, _) = semantic_search_with_index(
-            &conn, &embedder, &index, "query", None, 0, None, false,
-        )
-        .unwrap();
+        let (results, _) =
+            semantic_search_with_index(&conn, &embedder, &index, "query", None, 0, None, false)
+                .unwrap();
 
         assert!(results.iter().any(|r| r.document_id == "doc-live"));
         assert!(results.iter().all(|r| r.document_id != "doc-ghost"));

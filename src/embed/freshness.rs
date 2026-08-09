@@ -85,9 +85,7 @@ pub fn load_search_index(
 
 /// The newest chunk-source sync stamp, raw and parsed. None when no chunk
 /// source has ever synced (or no stamp parses).
-fn newest_chunk_source_sync(
-    conn: &Connection,
-) -> Result<Option<(String, DateTime<FixedOffset>)>> {
+fn newest_chunk_source_sync(conn: &Connection) -> Result<Option<(String, DateTime<FixedOffset>)>> {
     let mut newest: Option<(String, DateTime<FixedOffset>)> = None;
     for entity in CHUNK_SOURCE_ENTITIES {
         let Some(raw) = db::sync::get_last_sync_time(conn, entity)? else {
@@ -260,8 +258,11 @@ mod tests {
         // pre-search rebuild warning for stores that predate persisted
         // chunking settings; the verdict must carry it instead.
         let conn = setup_embedded_db();
-        conn.execute("DELETE FROM embedding_metadata WHERE key = 'max_length'", [])
-            .unwrap();
+        conn.execute(
+            "DELETE FROM embedding_metadata WHERE key = 'max_length'",
+            [],
+        )
+        .unwrap();
 
         let (index, freshness) = load_search_index(&conn, "mock-embedder").unwrap();
         assert!(!index.is_empty(), "legacy index still searches");
