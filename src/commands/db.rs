@@ -214,14 +214,14 @@ fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
     let conn = crate::db::connection::open_db_at_path(db_path)?;
 
     let old_binding = accounts::get_active_binding(&conn)?;
-    if let Some(binding) = &old_binding {
-        if binding.account_id == sub {
-            println!(
-                "Database is already bound to {}. Nothing to do.",
-                account_label(binding.email.as_deref(), &binding.account_id)
-            );
-            return Ok(());
-        }
+    if let Some(binding) = &old_binding
+        && binding.account_id == sub
+    {
+        println!(
+            "Database is already bound to {}. Nothing to do.",
+            account_label(binding.email.as_deref(), &binding.account_id)
+        );
+        return Ok(());
     }
 
     let client = ApiClient::new(token)?;
