@@ -1,0 +1,204 @@
+name: Cargo Update
+
+# A weekly `cargo update` PR keeps the lockfile fresh, so security advisories
+# are usually fixed here before they are ever filed against us. Every flagged
+# crate in the batch of nine Dependabot alerts cleared by #135 had a
+# semver-compatible fix available; this workflow exists so that batch never
+# accumulates again. Dependabot alerts stay on as the backstop for the two
+# cases a lockfile refresh cannot fix: advisories whose only patch is in a new
+# major version, and advisories with no patch released yet.
+#
+# The update step runs on nightly cargo for -Zmin-publish-age (RFC 3923):
+# versions published more recently than the cooldown are not selected, and the
+# resolver falls back to the newest old-enough release. The cooldown gives a
+# freshly compromised release a detection window before a scheduled run here
+# can pull it in. Three days matches crates.io's 72-hour
+# deletion-by-publisher window and the default both Dependabot and Renovate
+# converged on. Once min-publish-age stabilizes, drop `+nightly` and the -Z
+# flag and this workflow has no nightly dependency left.
+#
+# Nightly resolves, but stable tests: the full suite runs on the updated
+# lockfile with stable cargo before any PR is opened. That is also the guard
+# against a subtle nightly hazard: with no `package.rust-version` set, the
+# MSRV-aware resolver caps candidate versions at the running toolchain, so
+# nightly may select a crate release whose MSRV is ahead of stable. Stable
+# failing to build it turns that into a red run instead of a broken PR.
+
+on:
+  schedule:
+    # Mondays 08:00 UTC, an hour before platform-tests' cron so the two
+    # weekly runs do not interleave their results.
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+# One update run at a time; a manual dispatch supersedes an in-flight cron.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  COOLDOWN: 3 days
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Update lockfile
+    runs-on: ubuntu-latest
+    # Nothing blocks on this workflow, so a hung run would burn the 360
+    # minute default unnoticed. See the same guard in ci.yml.
+    timeout-minutes: 20
+    env:
+      # Must match ci.yml: rust-cache keys on these, and the workflows share
+      # a cache so this run does not start cold.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The push and the PR both happen with this token. With the
+          # fine-grained PAT (contents + pull-requests write) the opened PR
+          # triggers ci.yml like any human PR; with the fallback GITHUB_TOKEN
+          # the PR is still created but GitHub suppresses downstream
+          # workflows, so it shows no checks until someone closes and reopens
+          # it. The PR body carries that instruction.
+          token: ${{ secrets.CARGO_UPDATE_PR_TOKEN || github.token }}
+
+      # Nightly first, stable second: the dtolnay action makes the last
+      # toolchain it installs the default, and everything except the update
+      # step must run on stable.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # nightly
+        with:
+          toolchain: nightly
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: grans-tests
+
+      - name: Update Cargo.lock with cooldown
+        id: update
+        run: |
+          set -euo pipefail
+
+          cargo +nightly -Z min-publish-age \
+            --config "registry.global-min-publish-age=\"${COOLDOWN}\"" \
+            update 2>&1 | tee /tmp/cargo-update.log
+
+          if git diff --quiet Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          # The cooldown is the point of this workflow, so its silent loss is
+          # the one failure mode that must not pass. When the flag applies,
+          # cargo's Locking line reads "... compatible versions as of N days
+          # ago"; if that stops appearing on a run that changed the lockfile,
+          # either the -Z flag was dropped or nightly changed the feature. A
+          # wording change in cargo also lands here, in which case update the
+          # pattern rather than deleting the check.
+          if ! grep -q 'as of' /tmp/cargo-update.log; then
+            echo "::error::Cargo.lock changed but the cooldown did not apply (no 'as of' in the Locking line)."
+            exit 1
+          fi
+
+      - name: Test updated lockfile on stable
+        if: steps.update.outputs.changed == 'true'
+        run: cargo test --no-fail-fast
+
+      - name: Open or update the PR
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CARGO_UPDATE_PR_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # One rolling branch and PR. A force-push supersedes an unmerged
+          # previous week with a fresh update from current main, rather than
+          # stacking a second PR beside it.
+          git switch -c automation/cargo-update
+          git add Cargo.lock
+          git commit -m "Weekly cargo update ($(date -u +%F))"
+          git push -f origin automation/cargo-update
+
+          {
+            echo "Weekly lockfile refresh: every selected version had been published for at least ${COOLDOWN} (\`-Zmin-publish-age\`), and the full test suite passed on stable with this lockfile before the PR was opened."
+            echo
+            echo '```'
+            grep -E 'Locking|Updating|Adding|Removing|Downgrading' /tmp/cargo-update.log | grep -v 'crates.io index' || true
+            echo '```'
+            echo
+            echo "If this PR shows no CI checks, it was opened with the default workflow token, whose events do not trigger workflows. Close and reopen it to run CI, or add a \`CARGO_UPDATE_PR_TOKEN\` repo secret (fine-grained PAT, contents + pull requests read/write) so future weeks trigger CI on their own."
+          } > /tmp/pr-body.md
+
+          existing=$(gh pr list --head automation/cargo-update --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" \
+              --title "Weekly cargo update ($(date -u +%F))" \
+              --body-file /tmp/pr-body.md
+            echo "Updated existing PR #${existing}"
+          else
+            gh pr create \
+              --title "Weekly cargo update ($(date -u +%F))" \
+              --label 'type: chore' \
+              --body-file /tmp/pr-body.md
+          fi
+
+  # Cron failures otherwise surface only as an email attributed to the
+  # repository, which is indistinguishable from silence. File the failure
+  # where work is dispatched from, mirroring platform-tests.yml. The likely
+  # causes are an upstream release breaking the build (real signal) or the
+  # unstable -Z flag changing under us (fix the workflow).
+  report-failure:
+    name: Report failure
+    needs: update
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: File or update the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          body="The weekly cargo update failed.
+
+          ${RUN_URL}
+
+          Either an upstream release broke the build or tests (see the run
+          log for which crates moved), or nightly's unstable
+          \`-Zmin-publish-age\` flag changed and the workflow needs
+          updating."
+
+          # One open issue per outage, not one per run: a cron that fails
+          # every Monday should grow a comment thread rather than a pile of
+          # duplicates.
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --label 'ci: cargo-update' --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "Commented on existing issue #${existing}"
+          else
+            gh issue create --repo "$REPO" \
+              --title "Weekly cargo update is failing" \
+              --label 'ci: cargo-update' --label 'type: chore' --label 'status: triage' \
+              --body "$body"
+          fi
