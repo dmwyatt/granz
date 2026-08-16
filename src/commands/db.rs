@@ -88,21 +88,7 @@ fn show_database_info(db_path: &Path) -> Result<()> {
                 println!("Schema version: {}", schema_version);
             }
 
-            // Which accounts this database has synced from.
-            match accounts::list_accounts(&conn) {
-                Ok(records) if records.is_empty() => println!("Accounts seen: none"),
-                Ok(records) => {
-                    println!("Accounts seen:");
-                    for record in records {
-                        println!(
-                            "  {} (first seen {})",
-                            account_label(&record.email, &record.account_id),
-                            record.first_seen_at
-                        );
-                    }
-                }
-                Err(e) => println!("Accounts seen: could not be read ({})", e),
-            }
+            print_accounts_seen(&conn);
 
             // Show last sync times
             let sync_keys = [
@@ -146,6 +132,33 @@ fn show_database_info(db_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print which Granola accounts this database has synced from.
+fn print_accounts_seen(conn: &rusqlite::Connection) {
+    for line in accounts_seen_lines(conn) {
+        println!("{}", line);
+    }
+}
+
+/// The "Accounts seen" report, one line per entry. A pre-v017 database has
+/// no accounts table; that reads as "could not be read", not as empty.
+fn accounts_seen_lines(conn: &rusqlite::Connection) -> Vec<String> {
+    match accounts::list_accounts(conn) {
+        Ok(records) if records.is_empty() => vec!["Accounts seen: none".to_string()],
+        Ok(records) => {
+            let mut lines = vec!["Accounts seen:".to_string()];
+            lines.extend(records.into_iter().map(|record| {
+                format!(
+                    "  {} (first seen {})",
+                    account_label(&record.email, &record.account_id),
+                    record.first_seen_at
+                )
+            }));
+            lines
+        }
+        Err(e) => vec![format!("Accounts seen: could not be read ({})", e)],
+    }
 }
 
 /// Print whether each full-text index still agrees with the table it indexes.
@@ -269,16 +282,37 @@ mod tests {
     }
 
     #[test]
-    fn test_show_database_info_reports_accounts_seen() {
+    fn accounts_seen_lines_report_each_account() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
-
         let conn = crate::db::migrations::open_and_migrate(&db_path).unwrap();
+
+        assert_eq!(
+            accounts_seen_lines(&conn),
+            vec!["Accounts seen: none".to_string()]
+        );
+
         crate::db::accounts::record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com")
             .unwrap();
-        drop(conn);
+        crate::db::accounts::record_account(&conn, "user_01BBB", Some("uuid-2"), "b@example.com")
+            .unwrap();
 
-        assert!(show_database_info(&db_path).is_ok());
+        let lines = accounts_seen_lines(&conn);
+        assert_eq!(lines[0], "Accounts seen:");
+        assert!(lines[1].contains("a@example.com (user_01AAA)"));
+        assert!(lines[1].contains("first seen "));
+        assert!(lines[2].contains("b@example.com (user_01BBB)"));
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn accounts_seen_lines_report_an_unreadable_log() {
+        // A database without the accounts table (pre-v017) reports why the
+        // log is unavailable instead of pretending it is empty.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let lines = accounts_seen_lines(&conn);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Accounts seen: could not be read"));
     }
 
     #[test]
