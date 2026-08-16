@@ -138,6 +138,7 @@ pub(super) fn sync_panels(
     }
 
     let resolved_token = crate::api::resolve_token(token)?;
+    let _ = super::account_binding::ensure_account_binding(conn, &resolved_token, dry_run)?;
 
     let mut fetched = 0;
     let mut errors = 0;

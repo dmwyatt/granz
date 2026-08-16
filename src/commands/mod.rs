@@ -1,3 +1,4 @@
+mod account_binding;
 pub mod auth;
 pub mod benchmark;
 pub mod browse;

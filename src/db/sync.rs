@@ -135,14 +135,22 @@ fn serialize_recipe_json(recipe: &Recipe) -> RecipeJsonFields {
 
 /// Upsert documents from the API into the database.
 /// Returns counts of inserted, updated, unchanged.
-pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<SyncStats> {
+///
+/// `source_account_id` is the account the database is bound to; it is stamped
+/// on inserted rows only. Updates to an existing row never touch it: the
+/// column records which account a row first entered the database under.
+pub fn upsert_documents(
+    conn: &Connection,
+    documents: &[Document],
+    source_account_id: Option<&str>,
+) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
-        "INSERT INTO documents (id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "INSERT INTO documents (id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json, extra_json, raw_json, source_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             created_at = excluded.created_at,
@@ -180,6 +188,7 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
             &json.event_json,
             &json.extra_json,
             &json.raw_json,
+            source_account_id,
         ])?;
 
         if conn.changes() > 0 {
@@ -669,7 +678,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
         assert_eq!(stats.updated, 0);
 
@@ -709,7 +718,7 @@ mod tests {
             status: None,
             extra: Default::default(),
         }];
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         // Update with newer timestamp
         let updated_docs = vec![Document {
@@ -735,7 +744,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_documents(&conn, &updated_docs).unwrap();
+        let stats = upsert_documents(&conn, &updated_docs, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.updated, 1);
 
@@ -774,13 +783,71 @@ mod tests {
             extra: Default::default(),
         }];
 
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         // Upsert same document again
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.updated, 0);
         assert_eq!(stats.unchanged, 1);
+    }
+
+    #[test]
+    fn test_upsert_documents_stamps_source_account_on_insert() {
+        let conn = build_test_db(&empty_state());
+
+        let docs = vec![Document {
+            id: Some("doc-1".to_string()),
+            title: Some("Stamped".to_string()),
+            updated_at: Some("2026-01-20T10:00:00Z".to_string()),
+            ..Default::default()
+        }];
+
+        upsert_documents(&conn, &docs, Some("user_01AAA")).unwrap();
+
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT source_account_id FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, Some("user_01AAA".to_string()));
+    }
+
+    #[test]
+    fn test_upsert_documents_update_never_touches_source_account() {
+        let conn = build_test_db(&empty_state());
+
+        let docs = vec![Document {
+            id: Some("doc-1".to_string()),
+            title: Some("Original Title".to_string()),
+            updated_at: Some("2026-01-20T10:00:00Z".to_string()),
+            ..Default::default()
+        }];
+        upsert_documents(&conn, &docs, Some("user_01AAA")).unwrap();
+
+        // The same document re-served under a different account (the
+        // account-transfer scenario): the update goes through, but the
+        // insert-time provenance must survive.
+        let updated_docs = vec![Document {
+            id: Some("doc-1".to_string()),
+            title: Some("Updated Title".to_string()),
+            updated_at: Some("2026-01-20T11:00:00Z".to_string()),
+            ..Default::default()
+        }];
+        let stats = upsert_documents(&conn, &updated_docs, Some("user_01BBB")).unwrap();
+        assert_eq!(stats.updated, 1);
+
+        let (title, source): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, source_account_id FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Updated Title");
+        assert_eq!(source, Some("user_01AAA".to_string()));
     }
 
     #[test]
@@ -966,7 +1033,7 @@ mod tests {
             },
         ];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         let count: i64 = conn
@@ -1002,7 +1069,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row(
@@ -1045,7 +1112,7 @@ mod tests {
             status: None,
             extra: Default::default(),
         }];
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         // Update with newer timestamp and different title
         let updated_docs = vec![Document {
@@ -1070,7 +1137,7 @@ mod tests {
             status: None,
             extra: Default::default(),
         }];
-        upsert_documents(&conn, &updated_docs).unwrap();
+        upsert_documents(&conn, &updated_docs, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row(
@@ -1113,7 +1180,7 @@ mod tests {
             extra,
         }];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Verify extra_json was persisted
@@ -1749,10 +1816,10 @@ mod tests {
             ..Default::default()
         }];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.unchanged, 1);
     }

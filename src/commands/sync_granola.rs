@@ -90,6 +90,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
     eprintln!("[grans] Starting full sync from Granola API...");
 
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_binding::ensure_account_binding(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     // Sync each entity type
@@ -97,7 +98,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
 
     // Documents
     eprintln!("[grans] Syncing documents...");
-    match sync_documents_with_client(conn, &client, dry_run) {
+    match sync_documents_with_client(conn, &client, dry_run, source_account.as_deref()) {
         Ok(stats) => {
             total_stats.documents = stats;
             eprintln!(
@@ -249,6 +250,7 @@ fn sync_documents(
 ) -> Result<()> {
     debug!("sync_documents (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_binding::ensure_account_binding(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching documents from API...");
@@ -265,7 +267,7 @@ fn sync_documents(
             errors: 0,
         }
     } else {
-        upsert_documents(conn, &documents)?
+        upsert_documents(conn, &documents, source_account.as_deref())?
     };
 
     print_sync_stats("documents", &stats, dry_run, mode);
@@ -281,6 +283,7 @@ fn sync_documents_with_client(
     conn: &Connection,
     client: &ApiClient,
     dry_run: bool,
+    source_account: Option<&str>,
 ) -> Result<SyncStats> {
     let documents = client.get_documents()?;
 
@@ -293,7 +296,7 @@ fn sync_documents_with_client(
         });
     }
 
-    upsert_documents(conn, &documents)
+    upsert_documents(conn, &documents, source_account)
 }
 
 fn sync_people(
@@ -304,6 +307,7 @@ fn sync_people(
 ) -> Result<()> {
     debug!("sync_people (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let _ = super::account_binding::ensure_account_binding(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching people from API...");
@@ -359,6 +363,7 @@ fn sync_calendars(
 ) -> Result<()> {
     debug!("sync_calendars (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let _ = super::account_binding::ensure_account_binding(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching calendar events from API...");
@@ -435,6 +440,7 @@ fn sync_templates(
 ) -> Result<()> {
     debug!("sync_templates (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let _ = super::account_binding::ensure_account_binding(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching templates from API...");
@@ -490,6 +496,7 @@ fn sync_recipes(
 ) -> Result<()> {
     debug!("sync_recipes (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let _ = super::account_binding::ensure_account_binding(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching recipes from API...");
