@@ -96,7 +96,7 @@ fn show_database_info(db_path: &Path) -> Result<()> {
                     for record in records {
                         println!(
                             "  {} (first seen {})",
-                            account_label(record.email.as_deref(), &record.account_id),
+                            account_label(&record.email, &record.account_id),
                             record.first_seen_at
                         );
                     }

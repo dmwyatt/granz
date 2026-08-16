@@ -53,7 +53,7 @@ fn record_source_account_with(
 
     eprintln!(
         "[grans] Recording new account {}",
-        accounts::account_label(Some(&email), &sub)
+        accounts::account_label(&email, &sub)
     );
     if backfilled > 0 {
         eprintln!(
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(account_count(&conn), 1);
 
         let records = accounts::list_accounts(&conn).unwrap();
-        assert_eq!(records[0].email.as_deref(), Some("a@example.com"));
+        assert_eq!(records[0].email, "a@example.com");
     }
 
     #[test]

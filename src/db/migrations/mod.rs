@@ -1041,9 +1041,10 @@ mod tests {
     }
 
     #[test]
-    fn test_v017_leaves_preexisting_documents_unstamped() {
-        // Documents that predate v017 get NULL provenance; the backfill
-        // happens when the first account is recorded, not at migration time.
+    fn test_v017_leaves_preexisting_rows_unstamped() {
+        // Rows that predate v017 get NULL provenance in every stamped table;
+        // the backfill happens when the first account is recorded, not at
+        // migration time.
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let mut conn = Connection::open(&db_path).unwrap();
@@ -1051,22 +1052,37 @@ mod tests {
         let m = migrations();
         m.to_version(&mut conn, 16).unwrap();
 
-        conn.execute(
-            "INSERT INTO documents (id, title) VALUES ('doc-old', 'Pre-v017')",
-            [],
-        )
-        .unwrap();
+        let inserts = [
+            "INSERT INTO documents (id, title) VALUES ('old', 'Pre-v017')",
+            "INSERT INTO people (id, name) VALUES ('old', 'Pre-v017')",
+            "INSERT INTO calendars (id) VALUES ('old')",
+            "INSERT INTO events (id, summary) VALUES ('old', 'Pre-v017')",
+            "INSERT INTO templates (id, title) VALUES ('old', 'Pre-v017')",
+            "INSERT INTO recipes (id, slug) VALUES ('old', 'pre-v017')",
+        ];
+        for insert in inserts {
+            conn.execute(insert, []).unwrap();
+        }
 
         m.to_latest(&mut conn).unwrap();
 
-        let source: Option<String> = conn
-            .query_row(
-                "SELECT source_account_id FROM documents WHERE id = 'doc-old'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(source.is_none());
+        for table in [
+            "documents",
+            "people",
+            "calendars",
+            "events",
+            "templates",
+            "recipes",
+        ] {
+            let source: Option<String> = conn
+                .query_row(
+                    &format!("SELECT source_account_id FROM {} WHERE id = 'old'", table),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(source.is_none(), "{} should stay unstamped", table);
+        }
     }
 
     fn transcript_hits(conn: &Connection, query: &str) -> i64 {

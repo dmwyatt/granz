@@ -13,9 +13,9 @@
 
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
+    account_id TEXT NOT NULL UNIQUE,
     granola_user_id TEXT,
-    email TEXT,
+    email TEXT NOT NULL,
     first_seen_at TEXT NOT NULL
 );
 

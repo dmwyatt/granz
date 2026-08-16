@@ -28,19 +28,16 @@ pub struct AccountRecord {
     pub account_id: String,
     /// Granola user UUID captured from get-user-info when first seen.
     pub granola_user_id: Option<String>,
-    /// Email captured from get-user-info when first seen.
-    pub email: Option<String>,
+    /// Email captured from get-user-info when first seen. Recording refuses
+    /// email-less identities, so every row has one.
+    pub email: String,
     /// RFC 3339 timestamp of when this account was first seen.
     pub first_seen_at: String,
 }
 
-/// Human-readable account label: the email when one was captured, with the
-/// WorkOS id alongside; just the id otherwise.
-pub fn account_label(email: Option<&str>, account_id: &str) -> String {
-    match email {
-        Some(email) => format!("{} ({})", email, account_id),
-        None => account_id.to_string(),
-    }
+/// Human-readable account label: the email with the WorkOS id alongside.
+pub fn account_label(email: &str, account_id: &str) -> String {
+    format!("{} ({})", email, account_id)
 }
 
 /// Whether this account has been recorded in the log before.
@@ -71,7 +68,10 @@ pub fn list_accounts(conn: &Connection) -> Result<Vec<AccountRecord>> {
     Ok(records)
 }
 
-/// Record a newly seen account in the log.
+/// Record a newly seen account in the log. Idempotent: recording an account
+/// that is already in the log changes nothing, so the check-then-act pair of
+/// [`account_seen`] and this function cannot duplicate rows however they
+/// interleave.
 ///
 /// When this is the first account ever recorded (the accounts table was
 /// still empty inside the transaction), also backfill `source_account_id` on
@@ -100,7 +100,8 @@ pub fn record_account(
 
     tx.execute(
         "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
-         VALUES (?1, ?2, ?3, ?4)",
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account_id) DO NOTHING",
         rusqlite::params![
             account_id,
             granola_user_id,
@@ -169,6 +170,21 @@ mod tests {
     }
 
     #[test]
+    fn recording_the_same_account_twice_keeps_one_row() {
+        // account_seen (bare connection) and record_account (its own
+        // transaction) form a check-then-act pair; the insert itself must be
+        // idempotent so a race between them cannot duplicate log rows.
+        let conn = db_with_rows();
+
+        record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com").unwrap();
+        record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com").unwrap();
+
+        let records = list_accounts(&conn).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].account_id, "user_01AAA");
+    }
+
+    #[test]
     fn account_seen_false_until_recorded() {
         let conn = db_with_rows();
         assert!(!account_seen(&conn, "user_01AAA").unwrap());
@@ -208,7 +224,7 @@ mod tests {
         let records = list_accounts(&conn).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].account_id, "user_01AAA");
-        assert_eq!(records[0].email.as_deref(), Some("a@example.com"));
+        assert_eq!(records[0].email, "a@example.com");
         assert!(chrono::DateTime::parse_from_rfc3339(&records[0].first_seen_at).is_ok());
     }
 
