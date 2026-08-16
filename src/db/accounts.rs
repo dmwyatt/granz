@@ -57,7 +57,7 @@ pub fn bind_account(
     conn: &Connection,
     account_id: &str,
     granola_user_id: Option<&str>,
-    email: Option<&str>,
+    email: &str,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
@@ -89,7 +89,7 @@ pub fn bind_account_with_backfill(
     conn: &Connection,
     account_id: &str,
     granola_user_id: Option<&str>,
-    email: Option<&str>,
+    email: &str,
 ) -> Result<usize> {
     let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
@@ -154,13 +154,9 @@ mod tests {
     fn backfilling_bind_stamps_existing_documents_on_first_bind() {
         let conn = db_with_documents();
 
-        let backfilled = bind_account_with_backfill(
-            &conn,
-            "user_01AAA",
-            Some("uuid-1"),
-            Some("old@example.com"),
-        )
-        .unwrap();
+        let backfilled =
+            bind_account_with_backfill(&conn, "user_01AAA", Some("uuid-1"), "old@example.com")
+                .unwrap();
         assert_eq!(backfilled, 2);
 
         assert_eq!(
@@ -185,8 +181,7 @@ mod tests {
         // and the insert: the backfill fires only when the accounts table is
         // still empty inside the transaction.
         let conn = db_with_documents();
-        bind_account_with_backfill(&conn, "user_01AAA", Some("uuid-1"), Some("old@example.com"))
-            .unwrap();
+        bind_account_with_backfill(&conn, "user_01AAA", Some("uuid-1"), "old@example.com").unwrap();
 
         conn.execute(
             "INSERT INTO documents (id, title) VALUES ('doc-3', 'Late')",
@@ -194,13 +189,9 @@ mod tests {
         )
         .unwrap();
 
-        let backfilled = bind_account_with_backfill(
-            &conn,
-            "user_01BBB",
-            Some("uuid-2"),
-            Some("new@example.com"),
-        )
-        .unwrap();
+        let backfilled =
+            bind_account_with_backfill(&conn, "user_01BBB", Some("uuid-2"), "new@example.com")
+                .unwrap();
         assert_eq!(backfilled, 0);
         assert_eq!(source_account_of(&conn, "doc-3"), None);
     }
@@ -213,7 +204,7 @@ mod tests {
         // honest value; only sync's auto-bind backfills.
         let conn = db_with_documents();
 
-        bind_account(&conn, "user_01BBB", Some("uuid-2"), Some("new@example.com")).unwrap();
+        bind_account(&conn, "user_01BBB", Some("uuid-2"), "new@example.com").unwrap();
 
         assert_eq!(source_account_of(&conn, "doc-1"), None);
         assert_eq!(source_account_of(&conn, "doc-2"), None);
@@ -225,10 +216,9 @@ mod tests {
     #[test]
     fn plain_bind_appends_history_and_leaves_stamps_alone() {
         let conn = db_with_documents();
-        bind_account_with_backfill(&conn, "user_01AAA", Some("uuid-1"), Some("old@example.com"))
-            .unwrap();
+        bind_account_with_backfill(&conn, "user_01AAA", Some("uuid-1"), "old@example.com").unwrap();
 
-        bind_account(&conn, "user_01BBB", Some("uuid-2"), Some("new@example.com")).unwrap();
+        bind_account(&conn, "user_01BBB", Some("uuid-2"), "new@example.com").unwrap();
 
         // Provenance of already-stamped rows is untouched.
         assert_eq!(

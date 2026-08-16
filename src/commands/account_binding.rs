@@ -89,12 +89,23 @@ fn ensure_account_binding_with(
     }
 }
 
+/// The email get-user-info returned, or an error refusing to bind without
+/// one. A binding without email would leave the mismatch error (and every
+/// later "which account is this?" question) with only an opaque WorkOS id.
+pub(super) fn require_email(info: &crate::api::types::UserInfoResponse) -> Result<String> {
+    info.email.clone().ok_or_else(|| {
+        anyhow!(
+            "get-user-info returned no email for this account; refusing to record an \
+             email-less binding, because the email is what makes the binding legible later"
+        )
+    })
+}
+
 /// Bind a never-bound database to the token's account, backfilling
 /// provenance on all pre-existing documents.
 ///
-/// get-user-info failing fails the sync: binding is required before writes,
-/// and a binding without email would leave the mismatch error (and every
-/// later "which account is this?" question) with only an opaque WorkOS id.
+/// get-user-info failing (or coming back without an email) fails the sync:
+/// binding is required before writes, and the binding must carry an email.
 fn first_bind(conn: &Connection, token: &str, sub: &str) -> Result<String> {
     let client = ApiClient::new(token.to_string())?;
     let info = client.get_user_info().map_err(|e| {
@@ -103,13 +114,18 @@ fn first_bind(conn: &Connection, token: &str, sub: &str) -> Result<String> {
             e
         )
     })?;
+    let email = require_email(&info).map_err(|e| {
+        anyhow!(
+            "Cannot bind this database to the current Granola account: {}",
+            e
+        )
+    })?;
 
-    let backfilled =
-        accounts::bind_account_with_backfill(conn, sub, info.id.as_deref(), info.email.as_deref())?;
+    let backfilled = accounts::bind_account_with_backfill(conn, sub, info.id.as_deref(), &email)?;
 
     eprintln!(
         "[grans] Database is now bound to Granola account {}",
-        accounts::account_label(info.email.as_deref(), sub)
+        accounts::account_label(Some(&email), sub)
     );
     if backfilled > 0 {
         eprintln!(
@@ -181,6 +197,25 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn require_email_passes_through_a_present_email() {
+        let info = crate::api::types::UserInfoResponse {
+            id: Some("uuid-1".to_string()),
+            email: Some("user@example.com".to_string()),
+        };
+        assert_eq!(require_email(&info).unwrap(), "user@example.com");
+    }
+
+    #[test]
+    fn require_email_refuses_an_emailless_response() {
+        let info = crate::api::types::UserInfoResponse {
+            id: Some("uuid-1".to_string()),
+            email: None,
+        };
+        let err = require_email(&info).unwrap_err();
+        assert!(err.to_string().contains("no email"));
     }
 
     #[test]

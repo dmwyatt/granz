@@ -213,9 +213,11 @@ fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
     let info = client
         .get_user_info()
         .map_err(|e| anyhow!("Cannot rebind: get-user-info failed: {}", e))?;
+    let email = super::account_binding::require_email(&info)
+        .map_err(|e| anyhow!("Cannot rebind: {}", e))?;
 
-    accounts::bind_account(&conn, &sub, info.id.as_deref(), info.email.as_deref())?;
-    let new_label = account_label(info.email.as_deref(), &sub);
+    accounts::bind_account(&conn, &sub, info.id.as_deref(), &email)?;
+    let new_label = account_label(Some(&email), &sub);
 
     match old_binding {
         Some(binding) => println!(
