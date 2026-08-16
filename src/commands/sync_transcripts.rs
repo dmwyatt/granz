@@ -136,7 +136,7 @@ pub(super) fn sync_transcripts(
     }
 
     let resolved_token = crate::api::resolve_token(token)?;
-    let _ = super::account_binding::ensure_account_binding(conn, &resolved_token, dry_run)?;
+    let _ = super::account_record::record_source_account(conn, &resolved_token, dry_run)?;
 
     let mut fetched = 0;
     let mut errors = 0;
@@ -285,7 +285,7 @@ pub(super) fn sync_single_transcript(
     }
 
     let resolved_token = crate::api::resolve_token(token)?;
-    let _ = super::account_binding::ensure_account_binding(conn, &resolved_token, dry_run)?;
+    let _ = super::account_record::record_source_account(conn, &resolved_token, dry_run)?;
 
     if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
         eprintln!(

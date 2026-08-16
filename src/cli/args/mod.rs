@@ -642,13 +642,6 @@ pub enum DbAction {
     /// The repair for the drift that 'grans admin db info' reports. Re-derives
     /// each index from its source, so nothing is lost and no re-sync is needed.
     RebuildFts,
-    /// Bind the database to the current token's Granola account
-    ///
-    /// Sync refuses to run when the token belongs to a different account than
-    /// the database is bound to. When switching accounts intentionally (e.g.
-    /// after Granola's account-to-account note import), run this to bind the
-    /// database to the current account. The old binding is kept as history.
-    Rebind,
 }
 
 // === Auth Subcommands ===

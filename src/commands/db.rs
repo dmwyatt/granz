@@ -1,12 +1,11 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use std::path::Path;
 
-use crate::api::{ApiClient, jwt, resolve_token};
 use crate::cli::args::DbAction;
 use crate::db::accounts::{self, account_label};
 use crate::db::integrity;
 
-pub fn run_with_path(action: &DbAction, db_path: &Path, token: Option<&str>) -> Result<()> {
+pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
     match action {
         DbAction::Clear { all } => {
             if *all {
@@ -23,9 +22,6 @@ pub fn run_with_path(action: &DbAction, db_path: &Path, token: Option<&str>) -> 
         }
         DbAction::RebuildFts => {
             rebuild_search_indexes(db_path)?;
-        }
-        DbAction::Rebind => {
-            rebind_account(db_path, token)?;
         }
     }
     Ok(())
@@ -92,15 +88,20 @@ fn show_database_info(db_path: &Path) -> Result<()> {
                 println!("Schema version: {}", schema_version);
             }
 
-            // The diagnostic for the sync mismatch error: which account this
-            // database is bound to.
-            match accounts::get_active_binding(&conn) {
-                Ok(Some(binding)) => println!(
-                    "Account binding: {}",
-                    account_label(binding.email.as_deref(), &binding.account_id)
-                ),
-                Ok(None) => println!("Account binding: not bound"),
-                Err(e) => println!("Account binding: could not be read ({})", e),
+            // Which accounts this database has synced from.
+            match accounts::list_accounts(&conn) {
+                Ok(records) if records.is_empty() => println!("Accounts seen: none"),
+                Ok(records) => {
+                    println!("Accounts seen:");
+                    for record in records {
+                        println!(
+                            "  {} (first seen {})",
+                            account_label(record.email.as_deref(), &record.account_id),
+                            record.first_seen_at
+                        );
+                    }
+                }
+                Err(e) => println!("Accounts seen: could not be read ({})", e),
             }
 
             // Show last sync times
@@ -191,66 +192,6 @@ fn rebuild_search_indexes(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Bind the database to the current token's account, appending an accounts
-/// row. Binding to the account already active is a no-op. Rebind never
-/// stamps existing documents, even on a never-bound database: the user is
-/// declaring an account switch, so the provenance of rows already present is
-/// unknowable and stays NULL. Only sync's auto-bind backfills.
-fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
-    if !db_path.exists() {
-        bail!(
-            "No database found at {}. Run 'grans sync' to create it; the first sync binds it automatically.",
-            db_path.display()
-        );
-    }
-    // Resolve and decode the token before opening the database: opening runs
-    // pending migrations (with a pre-migration backup), work that a garbage
-    // token should not trigger.
-    let token = resolve_token(token)?;
-    let sub = jwt::decode_sub(&token).ok_or_else(|| {
-        anyhow!("The current token is not a decodable Granola JWT, so its account identity is unknown. Rebind needs a real Granola token.")
-    })?;
-
-    let conn = crate::db::connection::open_db_at_path(db_path)?;
-
-    let old_binding = accounts::get_active_binding(&conn)?;
-    if let Some(binding) = &old_binding
-        && binding.account_id == sub
-    {
-        println!(
-            "Database is already bound to {}. Nothing to do.",
-            account_label(binding.email.as_deref(), &binding.account_id)
-        );
-        return Ok(());
-    }
-
-    let client = ApiClient::new(token)?;
-    let info = client
-        .get_user_info()
-        .map_err(|e| anyhow!("Cannot rebind: get-user-info failed: {}", e))?;
-    let email = super::account_binding::require_email(&info)
-        .map_err(|e| anyhow!("Cannot rebind: {}", e))?;
-
-    accounts::bind_account(&conn, &sub, info.id.as_deref(), &email)?;
-    let new_label = account_label(Some(&email), &sub);
-
-    match old_binding {
-        Some(binding) => println!(
-            "Rebound database: {} -> {}",
-            account_label(binding.email.as_deref(), &binding.account_id),
-            new_label
-        ),
-        None => println!(
-            "Database was not bound. Bound to {}.\n\
-             Existing documents keep no source account (their provenance is unknowable); \
-             documents synced from now on are recorded under this account.",
-            new_label
-        ),
-    }
-
-    Ok(())
-}
-
 fn list_all_databases() -> Result<()> {
     let data_dir = crate::platform::data_dir()?;
 
@@ -328,12 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn test_show_database_info_reports_binding_on_a_bound_db() {
+    fn test_show_database_info_reports_accounts_seen() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = crate::db::migrations::open_and_migrate(&db_path).unwrap();
-        crate::db::accounts::bind_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com")
+        crate::db::accounts::record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com")
             .unwrap();
         drop(conn);
 
