@@ -31,6 +31,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("v014_utterance_speaker_name.sql")),
         M::up(include_str!("v015_fts_triggers.sql")),
         M::up(include_str!("v016_titles_fts.sql")),
+        M::up(include_str!("v017_account_provenance.sql")),
     ])
 }
 
@@ -55,7 +56,7 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         rusqlite_migration::SchemaVersion::Inside(v) => {
             // Check if current version is less than the number of migrations
             let current = v.get();
-            let total = 16; // We have 16 migrations (v001-v016)
+            let total = 17; // We have 17 migrations (v001-v017)
             current < total
         }
         rusqlite_migration::SchemaVersion::Outside(_) => false,
@@ -171,8 +172,8 @@ mod tests {
         let conn = open_and_migrate(&db_path).unwrap();
         let version = get_schema_version(&conn).unwrap();
 
-        // Should be version 16 after all migrations
-        assert_eq!(version, 16);
+        // Should be version 17 after all migrations
+        assert_eq!(version, 17);
     }
 
     #[test]
@@ -929,6 +930,112 @@ mod tests {
             )
             .unwrap();
         assert!(chat_url.is_none());
+    }
+
+    #[test]
+    fn test_accounts_table_records_binding_history() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_and_migrate(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+             VALUES ('user_01AAA', 'uuid-1', 'old@example.com', '2026-08-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+             VALUES ('user_01BBB', 'uuid-2', 'new@example.com', '2026-08-15T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // The active binding is the row with the highest id; history is kept.
+        let (account_id, email): (String, Option<String>) = conn
+            .query_row(
+                "SELECT account_id, email FROM accounts ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(account_id, "user_01BBB");
+        assert_eq!(email, Some("new@example.com".to_string()));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_documents_source_account_id_column() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_and_migrate(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (id, title, source_account_id)
+             VALUES ('doc1', 'Test Doc', 'user_01AAA')",
+            [],
+        )
+        .unwrap();
+
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT source_account_id FROM documents WHERE id = 'doc1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, Some("user_01AAA".to_string()));
+
+        // NULL is allowed: rows synced before the first bind have no provenance.
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc2', 'Unstamped')",
+            [],
+        )
+        .unwrap();
+
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT source_account_id FROM documents WHERE id = 'doc2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(source.is_none());
+    }
+
+    #[test]
+    fn test_v017_leaves_preexisting_documents_unstamped() {
+        // Documents that predate v017 get NULL provenance; the backfill
+        // happens at first bind, not at migration time.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut conn = Connection::open(&db_path).unwrap();
+
+        let m = migrations();
+        m.to_version(&mut conn, 16).unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (id, title) VALUES ('doc-old', 'Pre-v017')",
+            [],
+        )
+        .unwrap();
+
+        m.to_latest(&mut conn).unwrap();
+
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT source_account_id FROM documents WHERE id = 'doc-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(source.is_none());
     }
 
     fn transcript_hits(conn: &Connection, query: &str) -> i64 {
