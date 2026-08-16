@@ -20,6 +20,15 @@ pub struct ActiveBinding {
     pub bound_at: String,
 }
 
+/// Human-readable account label: the email when one was captured, with the
+/// WorkOS id alongside; just the id otherwise.
+pub fn account_label(email: Option<&str>, account_id: &str) -> String {
+    match email {
+        Some(email) => format!("{} ({})", email, account_id),
+        None => account_id.to_string(),
+    }
+}
+
 /// Fetch the active binding, or None if the database has never been bound.
 pub fn get_active_binding(conn: &Connection) -> Result<Option<ActiveBinding>> {
     Ok(conn

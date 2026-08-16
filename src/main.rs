@@ -56,7 +56,7 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| {
                 db::connection::default_db_path().expect("Failed to get default db path")
             });
-        commands::db::run_with_path(action, &db_path)?;
+        commands::db::run_with_path(action, &db_path, token_override.as_deref())?;
         return Ok(());
     }
 

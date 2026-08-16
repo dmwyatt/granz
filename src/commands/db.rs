@@ -1,10 +1,11 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use std::path::Path;
 
 use crate::cli::args::DbAction;
+use crate::db::accounts::{self, account_label};
 use crate::db::integrity;
 
-pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
+pub fn run_with_path(action: &DbAction, db_path: &Path, token: Option<&str>) -> Result<()> {
     match action {
         DbAction::Clear { all } => {
             if *all {
@@ -21,6 +22,9 @@ pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
         }
         DbAction::RebuildFts => {
             rebuild_search_indexes(db_path)?;
+        }
+        DbAction::Rebind => {
+            rebind_account(db_path, token)?;
         }
     }
     Ok(())
@@ -170,6 +174,63 @@ fn rebuild_search_indexes(db_path: &Path) -> Result<()> {
     let conn = crate::db::connection::open_db_at_path(db_path)?;
     for table in integrity::rebuild_fts_indexes(&conn)? {
         println!("Rebuilt {}", table);
+    }
+
+    Ok(())
+}
+
+/// Bind the database to the current token's account, appending an accounts
+/// row. Binding to the account already active is a no-op; binding a
+/// never-bound database is the first bind, so the provenance backfill applies.
+fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
+    if !db_path.exists() {
+        bail!(
+            "No database found at {}. Run 'grans sync' to create it; the first sync binds it automatically.",
+            db_path.display()
+        );
+    }
+    let conn = crate::db::connection::open_db_at_path(db_path)?;
+
+    let token = crate::api::resolve_token(token)?;
+    let sub = crate::api::jwt::decode_sub(&token).ok_or_else(|| {
+        anyhow!("The current token is not a decodable Granola JWT, so its account identity is unknown. Rebind needs a real Granola token.")
+    })?;
+
+    let old_binding = accounts::get_active_binding(&conn)?;
+    if let Some(binding) = &old_binding {
+        if binding.account_id == sub {
+            println!(
+                "Database is already bound to {}. Nothing to do.",
+                account_label(binding.email.as_deref(), &binding.account_id)
+            );
+            return Ok(());
+        }
+    }
+
+    let client = crate::api::ApiClient::new(token)?;
+    let info = client
+        .get_user_info()
+        .map_err(|e| anyhow!("Cannot rebind: get-user-info failed: {}", e))?;
+
+    let backfilled =
+        accounts::bind_account(&conn, &sub, info.id.as_deref(), info.email.as_deref())?;
+    let new_label = account_label(info.email.as_deref(), &sub);
+
+    match old_binding {
+        Some(binding) => println!(
+            "Rebound database: {} -> {}",
+            account_label(binding.email.as_deref(), &binding.account_id),
+            new_label
+        ),
+        None => {
+            println!("Database was not bound. Bound to {}.", new_label);
+            if backfilled > 0 {
+                println!(
+                    "Recorded {} pre-existing document(s) as synced from this account.",
+                    backfilled
+                );
+            }
+        }
     }
 
     Ok(())

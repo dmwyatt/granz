@@ -90,10 +90,9 @@ fn first_bind(conn: &Connection, token: &str, sub: &str) -> Result<String> {
 
     let backfilled = accounts::bind_account(conn, sub, info.id.as_deref(), info.email.as_deref())?;
 
-    let label = info.email.as_deref().unwrap_or(sub);
     eprintln!(
-        "[grans] Database is now bound to Granola account {} ({})",
-        label, sub
+        "[grans] Database is now bound to Granola account {}",
+        accounts::account_label(info.email.as_deref(), sub)
     );
     if backfilled > 0 {
         eprintln!(
@@ -117,14 +116,8 @@ fn fetch_email(token: &str) -> Option<String> {
 /// Format the hard error for a token that belongs to a different account
 /// than the database is bound to.
 fn mismatch_message(binding: &ActiveBinding, sub: &str, current_email: Option<&str>) -> String {
-    let bound = match binding.email.as_deref() {
-        Some(email) => format!("{} ({})", email, binding.account_id),
-        None => binding.account_id.clone(),
-    };
-    let current = match current_email {
-        Some(email) => format!("{} ({})", email, sub),
-        None => sub.to_string(),
-    };
+    let bound = accounts::account_label(binding.email.as_deref(), &binding.account_id);
+    let current = accounts::account_label(current_email, sub);
     format!(
         "This database is bound to Granola account {}, but the current token belongs to {}. \
          Refusing to sync across accounts. If this is intentional, run \
