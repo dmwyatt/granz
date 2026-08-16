@@ -139,6 +139,12 @@ This prevents one account's data from being silently upserted over another's
 (for example, after signing in to the wrong account). When the switch is
 intentional, run `grans admin db rebind` first.
 
+The mismatch is a hard error wherever a token is resolved, including under
+`--dry-run` for `sync` and the `documents`, `people`, `calendars`,
+`templates`, and `recipes` subcommands. Bulk `sync transcripts --dry-run` and
+`sync panels --dry-run` are local-database previews that never resolve a
+token, so for those two the check first applies on the real run.
+
 ### Signing in
 
 ```bash

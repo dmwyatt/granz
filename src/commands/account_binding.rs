@@ -47,7 +47,12 @@ fn decide(binding: Option<ActiveBinding>, sub: Option<String>, dry_run: bool) ->
 /// Returns the account id that document upserts should stamp, or None when
 /// the token carries no decodable identity (arbitrary `--token` values; the
 /// API rejects fake tokens on its own) or when a dry run proceeds against a
-/// never-bound database. A mismatch is a hard error, dry run or not.
+/// never-bound database. A mismatch is a hard error wherever a token is
+/// resolved; for `sync` and the documents/people/calendars/templates/recipes
+/// subcommands that includes `--dry-run`, because they resolve the token
+/// before branching on it. Bulk transcript and panel dry runs are local-db
+/// previews that never resolve a token, so their check first applies on the
+/// real run.
 pub(super) fn ensure_account_binding(
     conn: &Connection,
     token: &str,
