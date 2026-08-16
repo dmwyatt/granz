@@ -17,7 +17,7 @@ pub struct ActiveBinding {
     /// Email captured from get-user-info at bind time.
     pub email: Option<String>,
     /// RFC 3339 timestamp of when the binding was created.
-    pub bound_at: String,
+    pub first_seen_at: String,
 }
 
 /// Human-readable account label: the email when one was captured, with the
@@ -33,7 +33,7 @@ pub fn account_label(email: Option<&str>, account_id: &str) -> String {
 pub fn get_active_binding(conn: &Connection) -> Result<Option<ActiveBinding>> {
     Ok(conn
         .query_row(
-            "SELECT account_id, granola_user_id, email, bound_at
+            "SELECT account_id, granola_user_id, email, first_seen_at
              FROM accounts ORDER BY id DESC LIMIT 1",
             [],
             |row| {
@@ -41,7 +41,7 @@ pub fn get_active_binding(conn: &Connection) -> Result<Option<ActiveBinding>> {
                     account_id: row.get(0)?,
                     granola_user_id: row.get(1)?,
                     email: row.get(2)?,
-                    bound_at: row.get(3)?,
+                    first_seen_at: row.get(3)?,
                 })
             },
         )
@@ -60,7 +60,7 @@ pub fn bind_account(
     email: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+        "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
          VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![
             account_id,
@@ -97,7 +97,7 @@ pub fn bind_account_with_backfill(
         tx.query_row("SELECT COUNT(*) = 0 FROM accounts", [], |row| row.get(0))?;
 
     tx.execute(
-        "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+        "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
          VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![
             account_id,
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(binding.account_id, "user_01AAA");
         assert_eq!(binding.granola_user_id.as_deref(), Some("uuid-1"));
         assert_eq!(binding.email.as_deref(), Some("old@example.com"));
-        assert!(chrono::DateTime::parse_from_rfc3339(&binding.bound_at).is_ok());
+        assert!(chrono::DateTime::parse_from_rfc3339(&binding.first_seen_at).is_ok());
     }
 
     #[test]

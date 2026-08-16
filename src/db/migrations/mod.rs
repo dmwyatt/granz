@@ -933,86 +933,117 @@ mod tests {
     }
 
     #[test]
-    fn test_accounts_table_records_binding_history() {
+    fn test_accounts_table_logs_every_account_seen() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_and_migrate(&db_path).unwrap();
 
         conn.execute(
-            "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+            "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
              VALUES ('user_01AAA', 'uuid-1', 'old@example.com', '2026-08-01T00:00:00Z')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+            "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
              VALUES ('user_01BBB', 'uuid-2', 'new@example.com', '2026-08-15T00:00:00Z')",
             [],
         )
         .unwrap();
 
-        // The active binding is the row with the highest id; history is kept.
-        let (account_id, email): (String, Option<String>) = conn
-            .query_row(
-                "SELECT account_id, email FROM accounts ORDER BY id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(account_id, "user_01BBB");
-        assert_eq!(email, Some("new@example.com".to_string()));
-
+        // Append-only log: every account ever seen is kept.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
+
+        let (email, first_seen): (Option<String>, String) = conn
+            .query_row(
+                "SELECT email, first_seen_at FROM accounts WHERE account_id = 'user_01AAA'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(email, Some("old@example.com".to_string()));
+        assert_eq!(first_seen, "2026-08-01T00:00:00Z");
     }
 
     #[test]
-    fn test_documents_source_account_id_column() {
+    fn test_source_account_id_column_on_every_stamped_table() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_and_migrate(&db_path).unwrap();
 
-        conn.execute(
-            "INSERT INTO documents (id, title, source_account_id)
-             VALUES ('doc1', 'Test Doc', 'user_01AAA')",
-            [],
-        )
-        .unwrap();
+        // (table, insert with a stamp, insert without)
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "documents",
+                "INSERT INTO documents (id, title, source_account_id) VALUES ('d1', 'T', 'user_01AAA')",
+                "INSERT INTO documents (id, title) VALUES ('d2', 'T')",
+            ),
+            (
+                "people",
+                "INSERT INTO people (id, name, source_account_id) VALUES ('p1', 'N', 'user_01AAA')",
+                "INSERT INTO people (id, name) VALUES ('p2', 'N')",
+            ),
+            (
+                "calendars",
+                "INSERT INTO calendars (id, source_account_id) VALUES ('c1', 'user_01AAA')",
+                "INSERT INTO calendars (id) VALUES ('c2')",
+            ),
+            (
+                "events",
+                "INSERT INTO events (id, summary, source_account_id) VALUES ('e1', 'S', 'user_01AAA')",
+                "INSERT INTO events (id, summary) VALUES ('e2', 'S')",
+            ),
+            (
+                "templates",
+                "INSERT INTO templates (id, title, source_account_id) VALUES ('t1', 'T', 'user_01AAA')",
+                "INSERT INTO templates (id, title) VALUES ('t2', 'T')",
+            ),
+            (
+                "recipes",
+                "INSERT INTO recipes (id, slug, source_account_id) VALUES ('r1', 's', 'user_01AAA')",
+                "INSERT INTO recipes (id, slug) VALUES ('r2', 's')",
+            ),
+        ];
 
-        let source: Option<String> = conn
-            .query_row(
-                "SELECT source_account_id FROM documents WHERE id = 'doc1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(source, Some("user_01AAA".to_string()));
+        for (table, stamped_insert, unstamped_insert) in cases {
+            conn.execute(stamped_insert, []).unwrap();
+            conn.execute(unstamped_insert, []).unwrap();
 
-        // NULL is allowed: rows synced before the first bind have no provenance.
-        conn.execute(
-            "INSERT INTO documents (id, title) VALUES ('doc2', 'Unstamped')",
-            [],
-        )
-        .unwrap();
+            let stamped: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {} WHERE source_account_id = 'user_01AAA'",
+                        table
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stamped, 1, "{} should store the stamp", table);
 
-        let source: Option<String> = conn
-            .query_row(
-                "SELECT source_account_id FROM documents WHERE id = 'doc2'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(source.is_none());
+            let unstamped: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {} WHERE source_account_id IS NULL",
+                        table
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(unstamped, 1, "{} should allow NULL", table);
+        }
     }
 
     #[test]
     fn test_v017_leaves_preexisting_documents_unstamped() {
         // Documents that predate v017 get NULL provenance; the backfill
-        // happens at first bind, not at migration time.
+        // happens when the first account is recorded, not at migration time.
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let mut conn = Connection::open(&db_path).unwrap();

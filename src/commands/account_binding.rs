@@ -191,7 +191,7 @@ mod tests {
             }
         }));
         conn.execute(
-            "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+            "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
              VALUES (?1, 'uuid-1', ?2, '2026-08-01T00:00:00Z')",
             rusqlite::params![account_id, email],
         )
@@ -260,7 +260,7 @@ mod tests {
             account_id: account_id.to_string(),
             granola_user_id: Some("uuid-1".to_string()),
             email: email.map(str::to_string),
-            bound_at: "2026-08-01T00:00:00Z".to_string(),
+            first_seen_at: "2026-08-01T00:00:00Z".to_string(),
         }
     }
 

@@ -76,7 +76,7 @@ fn create_test_tables(conn: &Connection) {
             account_id TEXT NOT NULL,
             granola_user_id TEXT,
             email TEXT,
-            bound_at TEXT NOT NULL
+            first_seen_at TEXT NOT NULL
         );
 
         CREATE TABLE transcript_utterances (
@@ -99,7 +99,8 @@ fn create_test_tables(conn: &Connection) {
             email TEXT,
             company_name TEXT,
             job_title TEXT,
-            extra_json TEXT
+            extra_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE events (
@@ -112,7 +113,8 @@ fn create_test_tables(conn: &Connection) {
             conference_data_json TEXT,
             description TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE calendars (
@@ -122,7 +124,8 @@ fn create_test_tables(conn: &Connection) {
             access_role TEXT,
             summary TEXT,
             background_color TEXT,
-            extra_json TEXT
+            extra_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE templates (
@@ -140,7 +143,8 @@ fn create_test_tables(conn: &Connection) {
             deleted_at TEXT,
             chat_suggestions_json TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE recipes (
@@ -156,7 +160,8 @@ fn create_test_tables(conn: &Connection) {
             user_id TEXT,
             workspace_id TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE document_people (

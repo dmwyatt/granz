@@ -31,7 +31,7 @@ fn every_sync_entry_point_refuses_a_mismatched_account() {
     // Bind the database to one account...
     let conn = rusqlite::Connection::open(&env.db_path).unwrap();
     conn.execute(
-        "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+        "INSERT INTO accounts (account_id, granola_user_id, email, first_seen_at)
          VALUES ('user_01BOUND', 'uuid-1', 'bound@example.com', '2026-08-01T00:00:00Z')",
         [],
     )
