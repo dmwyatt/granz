@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use std::path::Path;
 
+use crate::api::{ApiClient, jwt, resolve_token};
 use crate::cli::args::DbAction;
 use crate::db::accounts::{self, account_label};
 use crate::db::integrity;
@@ -89,6 +90,17 @@ fn show_database_info(db_path: &Path) -> Result<()> {
             // reported 3 on a database at 14.
             if let Ok(schema_version) = crate::db::migrations::get_schema_version(&conn) {
                 println!("Schema version: {}", schema_version);
+            }
+
+            // The diagnostic for the sync mismatch error: which account this
+            // database is bound to.
+            match accounts::get_active_binding(&conn) {
+                Ok(Some(binding)) => println!(
+                    "Account binding: {}",
+                    account_label(binding.email.as_deref(), &binding.account_id)
+                ),
+                Ok(None) => println!("Account binding: not bound"),
+                Err(e) => println!("Account binding: could not be read ({})", e),
             }
 
             // Show last sync times
@@ -191,12 +203,15 @@ fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
             db_path.display()
         );
     }
-    let conn = crate::db::connection::open_db_at_path(db_path)?;
-
-    let token = crate::api::resolve_token(token)?;
-    let sub = crate::api::jwt::decode_sub(&token).ok_or_else(|| {
+    // Resolve and decode the token before opening the database: opening runs
+    // pending migrations (with a pre-migration backup), work that a garbage
+    // token should not trigger.
+    let token = resolve_token(token)?;
+    let sub = jwt::decode_sub(&token).ok_or_else(|| {
         anyhow!("The current token is not a decodable Granola JWT, so its account identity is unknown. Rebind needs a real Granola token.")
     })?;
+
+    let conn = crate::db::connection::open_db_at_path(db_path)?;
 
     let old_binding = accounts::get_active_binding(&conn)?;
     if let Some(binding) = &old_binding {
@@ -209,7 +224,7 @@ fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
         }
     }
 
-    let client = crate::api::ApiClient::new(token)?;
+    let client = ApiClient::new(token)?;
     let info = client
         .get_user_info()
         .map_err(|e| anyhow!("Cannot rebind: get-user-info failed: {}", e))?;
@@ -310,6 +325,19 @@ mod tests {
         // Should not error when showing info for non-existent database
         let result = show_database_info(&db_path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_show_database_info_reports_binding_on_a_bound_db() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = crate::db::migrations::open_and_migrate(&db_path).unwrap();
+        crate::db::accounts::bind_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com")
+            .unwrap();
+        drop(conn);
+
+        assert!(show_database_info(&db_path).is_ok());
     }
 
     #[test]
