@@ -505,7 +505,9 @@ its source. Nothing is lost and no re-sync is needed.
 on purpose (for example, after Granola's account-to-account note import). Sync
 refuses to run while the token's account differs from the one the database is
 bound to; rebinding appends a new binding, keeping the old one as history, and
-does not change the account recorded on existing documents.
+does not change the account recorded on existing documents. That holds even
+when rebind performs the first-ever bind: existing rows keep no source
+account (only sync's auto-bind backfills them, and only at the first bind).
 
 ### Dropbox Sync
 

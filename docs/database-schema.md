@@ -135,11 +135,11 @@ The core table storing meeting documents from Granola.
 | `summary` | TEXT | AI-generated meeting summary |
 | `people_json` | TEXT | JSON array of attendee data |
 | `google_calendar_event_json` | TEXT | JSON blob of linked calendar event |
-| `source_account_id` | TEXT | Account (JWT `sub`) the database was bound to when this row first entered it. Stamped on insert only; updates never touch it. NULL only on rows that predate the first bind of a database migrated to v017 |
+| `source_account_id` | TEXT | Account (JWT `sub`) the database was bound to when this row first entered it. Stamped on insert only; updates never touch it. NULL means the account is unknowable, and such rows stay NULL permanently: rows that predate the first bind when that bind was done via `admin db rebind` (sync's auto-bind backfills pre-existing rows instead), and rows inserted while the token was undecodable (non-JWT `--token`) on an already-bound database |
 
 ### accounts
 
-Which Granola account the database is bound to. Append-only history: the active binding is the row with the highest `id`, and rebinding (`grans admin db rebind`) appends rather than overwrites. Sync refuses to run when the current token's account differs from the active binding. The first-ever bind backfills `documents.source_account_id` on all existing rows.
+Which Granola account the database is bound to. Append-only history: the active binding is the row with the highest `id`, and rebinding (`grans admin db rebind`) appends rather than overwrites. Sync refuses to run when the current token's account differs from the active binding. When sync's auto-bind performs the first-ever bind it backfills `documents.source_account_id` on all existing rows; a first bind performed via `admin db rebind` does not (the rows' provenance is unknowable, so they stay NULL).
 
 | Column | Type | Description |
 |--------|------|-------------|

@@ -104,7 +104,8 @@ fn first_bind(conn: &Connection, token: &str, sub: &str) -> Result<String> {
         )
     })?;
 
-    let backfilled = accounts::bind_account(conn, sub, info.id.as_deref(), info.email.as_deref())?;
+    let backfilled =
+        accounts::bind_account_with_backfill(conn, sub, info.id.as_deref(), info.email.as_deref())?;
 
     eprintln!(
         "[grans] Database is now bound to Granola account {}",

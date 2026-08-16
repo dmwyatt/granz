@@ -180,8 +180,10 @@ fn rebuild_search_indexes(db_path: &Path) -> Result<()> {
 }
 
 /// Bind the database to the current token's account, appending an accounts
-/// row. Binding to the account already active is a no-op; binding a
-/// never-bound database is the first bind, so the provenance backfill applies.
+/// row. Binding to the account already active is a no-op. Rebind never
+/// stamps existing documents, even on a never-bound database: the user is
+/// declaring an account switch, so the provenance of rows already present is
+/// unknowable and stays NULL. Only sync's auto-bind backfills.
 fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
     if !db_path.exists() {
         bail!(
@@ -212,8 +214,7 @@ fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
         .get_user_info()
         .map_err(|e| anyhow!("Cannot rebind: get-user-info failed: {}", e))?;
 
-    let backfilled =
-        accounts::bind_account(&conn, &sub, info.id.as_deref(), info.email.as_deref())?;
+    accounts::bind_account(&conn, &sub, info.id.as_deref(), info.email.as_deref())?;
     let new_label = account_label(info.email.as_deref(), &sub);
 
     match old_binding {
@@ -222,15 +223,12 @@ fn rebind_account(db_path: &Path, token: Option<&str>) -> Result<()> {
             account_label(binding.email.as_deref(), &binding.account_id),
             new_label
         ),
-        None => {
-            println!("Database was not bound. Bound to {}.", new_label);
-            if backfilled > 0 {
-                println!(
-                    "Recorded {} pre-existing document(s) as synced from this account.",
-                    backfilled
-                );
-            }
-        }
+        None => println!(
+            "Database was not bound. Bound to {}.\n\
+             Existing documents keep no source account (their provenance is unknowable); \
+             documents synced from now on are recorded under this account.",
+            new_label
+        ),
     }
 
     Ok(())
