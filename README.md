@@ -131,6 +131,20 @@ grans sync panels --retry             # Retry previously failed panel fetches
 2. grans's own stored credentials, from `grans auth login`
 3. The token Granola's desktop app stored locally (not on macOS, see below)
 
+**Account provenance:** Account-tied rows (documents, people, calendars,
+events, templates, recipes) record the Granola account they first arrived
+under, and the `accounts` table logs every account the database has ever
+synced from (id, email, first seen). The first time a sync sees a new account
+it records it with a one-time announcement; when that is the first account
+the database has ever seen, all pre-existing rows are also stamped with it,
+an inference that pre-provenance history was single-account (rows stamped at
+insert are observations).
+Nothing enforces single-account use: data from multiple accounts coexisting
+in one database is supported by design. Updates to an existing row never
+change its recorded account, and rows synced with a token that is not a
+decodable Granola JWT (arbitrary `--token` values) get no source account.
+`grans admin db info` lists the accounts seen.
+
 ### Signing in
 
 ```bash
@@ -483,6 +497,9 @@ agrees with the table it indexes. An index that has drifted makes `grep` and
 `search` quietly return too few results while the database otherwise looks
 healthy, and `admin db rebuild-fts` repairs it by re-deriving each index from
 its source. Nothing is lost and no re-sync is needed.
+
+`admin db info` also lists every Granola account the database has synced from,
+with the email and first-seen date captured when each was recorded.
 
 ### Dropbox Sync
 

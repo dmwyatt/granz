@@ -14,7 +14,7 @@ Before starting work, ensure you have the latest code: `git fetch origin` and ch
 each: ubuntu runs the full suite, while macOS and Windows run `--bins` only.
 That is deliberate. Every platform-gated line in this repo is in `src/`, so all
 of its tests are unit tests in the bin target, and nothing in `tests/*.rs` is
-platform-gated. Each of those 75 integration tests spawns `grans.exe`, which
+platform-gated. Each of those integration tests spawns `grans.exe`, which
 costs ~2s per spawn on the Windows runner against 0.037s on ubuntu.
 
 The consequence for writing tests: **a platform-specific test belongs in `src/`,
@@ -48,12 +48,12 @@ cargo test <test_name>         # Run a single test by name
 cargo install --path .         # Install locally
 ```
 
-`cargo test` runs six binaries here: the unit tests in the bin target, then the
-five integration binaries in `tests/`, which hold 75 tests between them. It
-stops after the first binary that fails, and the bin target goes first, so one
-broken unit test means those 75 never launch and the run reports nothing about
-them. Use `--no-fail-fast` and do not read a run that died in the bin target as
-full coverage.
+`cargo test` runs several binaries here: the unit tests in the bin target, then
+the integration binaries in `tests/`. It stops after the first binary that
+fails, and the bin target goes first, so one broken unit test means the
+integration tests never launch and the run reports nothing about them. Use
+`--no-fail-fast` and do not read a run that died in the bin target as full
+coverage.
 
 On Windows, run tests from PowerShell rather than Git Bash. Git Bash prepends
 its coreutils to PATH, so PATH-sensitive tests pass there and fail on a GitHub

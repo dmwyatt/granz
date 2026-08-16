@@ -1,3 +1,4 @@
+mod account_record;
 pub mod auth;
 pub mod benchmark;
 pub mod browse;

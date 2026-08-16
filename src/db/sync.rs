@@ -135,14 +135,22 @@ fn serialize_recipe_json(recipe: &Recipe) -> RecipeJsonFields {
 
 /// Upsert documents from the API into the database.
 /// Returns counts of inserted, updated, unchanged.
-pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<SyncStats> {
+///
+/// `source_account_id` is the account this sync runs as; it is stamped on
+/// inserted rows only. Updates to an existing row never touch it: the column
+/// records the account a row first arrived under.
+pub fn upsert_documents(
+    conn: &Connection,
+    documents: &[Document],
+    source_account_id: Option<&str>,
+) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
-        "INSERT INTO documents (id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "INSERT INTO documents (id, title, created_at, updated_at, deleted_at, doc_type, notes_plain, notes_markdown, summary, people_json, google_calendar_event_json, extra_json, raw_json, source_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             created_at = excluded.created_at,
@@ -180,6 +188,7 @@ pub fn upsert_documents(conn: &Connection, documents: &[Document]) -> Result<Syn
             &json.event_json,
             &json.extra_json,
             &json.raw_json,
+            source_account_id,
         ])?;
 
         if conn.changes() > 0 {
@@ -256,14 +265,21 @@ fn upsert_document_people(
 // ============================================================================
 
 /// Upsert people from the API into the database.
-pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> {
+///
+/// `source_account_id` is stamped on inserted rows only; updates to an
+/// existing row never touch it.
+pub fn upsert_people(
+    conn: &Connection,
+    people: &[Person],
+    source_account_id: Option<&str>,
+) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM people", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
-        "INSERT INTO people (id, name, email, company_name, job_title, extra_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO people (id, name, email, company_name, job_title, extra_json, source_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             email = excluded.email,
@@ -290,6 +306,7 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
             &person.company_name,
             &person.job_title,
             &extra_json,
+            source_account_id,
         ])?;
     }
 
@@ -306,14 +323,21 @@ pub fn upsert_people(conn: &Connection, people: &[Person]) -> Result<SyncStats> 
 // ============================================================================
 
 /// Upsert calendar events from the API into the database.
-pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Result<SyncStats> {
+///
+/// `source_account_id` is stamped on inserted rows only; updates to an
+/// existing row never touch it.
+pub fn upsert_calendar_events(
+    conn: &Connection,
+    events: &[CalendarEvent],
+    source_account_id: Option<&str>,
+) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
-        "INSERT INTO events (id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO events (id, summary, start_time, end_time, calendar_id, attendees_json, conference_data_json, description, extra_json, raw_json, source_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET
             summary = excluded.summary,
             start_time = excluded.start_time,
@@ -344,6 +368,7 @@ pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Re
             &event.description,
             &json.extra_json,
             &json.raw_json,
+            source_account_id,
         ])?;
     }
 
@@ -362,10 +387,14 @@ pub fn upsert_calendar_events(conn: &Connection, events: &[CalendarEvent]) -> Re
 /// Upsert calendars into the database.
 /// Note: The API returns calendars_selected as a map, not full calendar objects.
 /// This function is for storing calendar preferences.
+///
+/// `source_account_id` is stamped on inserted rows only; updates to an
+/// existing row never touch it.
 pub fn upsert_calendars_from_selection(
     conn: &Connection,
     calendars_selected: &std::collections::HashMap<String, bool>,
     enabled_calendars: &[String],
+    source_account_id: Option<&str>,
 ) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
@@ -383,10 +412,10 @@ pub fn upsert_calendars_from_selection(
 
         if *selected {
             conn.execute(
-                "INSERT INTO calendars (id, provider, \"primary\", access_role, summary, background_color)
-                 VALUES (?1, ?2, 0, NULL, ?1, NULL)
+                "INSERT INTO calendars (id, provider, \"primary\", access_role, summary, background_color, source_account_id)
+                 VALUES (?1, ?2, 0, NULL, ?1, NULL, ?3)
                  ON CONFLICT(id) DO UPDATE SET provider = excluded.provider",
-                rusqlite::params![calendar_id, provider],
+                rusqlite::params![calendar_id, provider, source_account_id],
             )?;
         } else {
             // Unselected calendar: update provider if it exists, don't insert
@@ -409,14 +438,21 @@ pub fn upsert_calendars_from_selection(
 // ============================================================================
 
 /// Upsert panel templates from the API into the database.
-pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Result<SyncStats> {
+///
+/// `source_account_id` is stamped on inserted rows only; updates to an
+/// existing row never touch it.
+pub fn upsert_templates(
+    conn: &Connection,
+    templates: &[PanelTemplate],
+    source_account_id: Option<&str>,
+) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM templates", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
-        "INSERT INTO templates (id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO templates (id, title, category, symbol, color, description, is_granola, owner_id, sections_json, created_at, updated_at, deleted_at, chat_suggestions_json, extra_json, raw_json, source_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             category = excluded.category,
@@ -459,6 +495,7 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
             &json.chat_suggestions_json,
             &json.extra_json,
             &json.raw_json,
+            source_account_id,
         ])?;
 
         if conn.changes() == 0 {
@@ -481,14 +518,21 @@ pub fn upsert_templates(conn: &Connection, templates: &[PanelTemplate]) -> Resul
 // ============================================================================
 
 /// Upsert recipes from the API into the database.
-pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Result<SyncStats> {
+///
+/// `source_account_id` is stamped on inserted rows only; updates to an
+/// existing row never touch it.
+pub fn upsert_recipes(
+    conn: &Connection,
+    response: &GetRecipesResponse,
+    source_account_id: Option<&str>,
+) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     let initial_count: i64 = conn.query_row("SELECT COUNT(*) FROM recipes", [], |r| r.get(0))?;
 
     let mut upsert_stmt = conn.prepare(
-        "INSERT INTO recipes (id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id, extra_json, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "INSERT INTO recipes (id, slug, visibility, publisher_slug, creator_name, config_json, created_at, updated_at, deleted_at, user_id, workspace_id, extra_json, raw_json, source_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
             slug = excluded.slug,
             visibility = excluded.visibility,
@@ -538,6 +582,7 @@ pub fn upsert_recipes(conn: &Connection, response: &GetRecipesResponse) -> Resul
                 &recipe.workspace_id,
                 &json.extra_json,
                 &json.raw_json,
+                source_account_id,
             ])?;
 
             if conn.changes() == 0 {
@@ -669,7 +714,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
         assert_eq!(stats.updated, 0);
 
@@ -709,7 +754,7 @@ mod tests {
             status: None,
             extra: Default::default(),
         }];
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         // Update with newer timestamp
         let updated_docs = vec![Document {
@@ -735,7 +780,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_documents(&conn, &updated_docs).unwrap();
+        let stats = upsert_documents(&conn, &updated_docs, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.updated, 1);
 
@@ -774,13 +819,71 @@ mod tests {
             extra: Default::default(),
         }];
 
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         // Upsert same document again
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.updated, 0);
         assert_eq!(stats.unchanged, 1);
+    }
+
+    #[test]
+    fn test_upsert_documents_stamps_source_account_on_insert() {
+        let conn = build_test_db(&empty_state());
+
+        let docs = vec![Document {
+            id: Some("doc-1".to_string()),
+            title: Some("Stamped".to_string()),
+            updated_at: Some("2026-01-20T10:00:00Z".to_string()),
+            ..Default::default()
+        }];
+
+        upsert_documents(&conn, &docs, Some("user_01AAA")).unwrap();
+
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT source_account_id FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, Some("user_01AAA".to_string()));
+    }
+
+    #[test]
+    fn test_upsert_documents_update_never_touches_source_account() {
+        let conn = build_test_db(&empty_state());
+
+        let docs = vec![Document {
+            id: Some("doc-1".to_string()),
+            title: Some("Original Title".to_string()),
+            updated_at: Some("2026-01-20T10:00:00Z".to_string()),
+            ..Default::default()
+        }];
+        upsert_documents(&conn, &docs, Some("user_01AAA")).unwrap();
+
+        // The same document re-served under a different account (the
+        // account-transfer scenario): the update goes through, but the
+        // insert-time provenance must survive.
+        let updated_docs = vec![Document {
+            id: Some("doc-1".to_string()),
+            title: Some("Updated Title".to_string()),
+            updated_at: Some("2026-01-20T11:00:00Z".to_string()),
+            ..Default::default()
+        }];
+        let stats = upsert_documents(&conn, &updated_docs, Some("user_01BBB")).unwrap();
+        assert_eq!(stats.updated, 1);
+
+        let (title, source): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, source_account_id FROM documents WHERE id = 'doc-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Updated Title");
+        assert_eq!(source, Some("user_01AAA".to_string()));
     }
 
     #[test]
@@ -804,7 +907,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_people(&conn, &people).unwrap();
+        let stats = upsert_people(&conn, &people, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         let name: String = conn
@@ -843,7 +946,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_calendar_events(&conn, &events).unwrap();
+        let stats = upsert_calendar_events(&conn, &events, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         let summary: String = conn
@@ -878,7 +981,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_templates(&conn, &templates).unwrap();
+        let stats = upsert_templates(&conn, &templates, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         let title: String = conn
@@ -919,7 +1022,7 @@ mod tests {
             unlisted_recipes: vec![],
         };
 
-        let stats = upsert_recipes(&conn, &response).unwrap();
+        let stats = upsert_recipes(&conn, &response, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         let slug: String = conn
@@ -928,6 +1031,172 @@ mod tests {
             })
             .unwrap();
         assert_eq!(slug, "test-recipe");
+    }
+
+    fn stamp_of(conn: &Connection, table: &str, id: &str) -> Option<String> {
+        conn.query_row(
+            &format!("SELECT source_account_id FROM {} WHERE id = ?1", table),
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_upsert_people_stamps_insert_and_update_preserves_it() {
+        let conn = build_test_db(&empty_state());
+
+        let people = vec![Person {
+            id: Some("p-1".to_string()),
+            name: Some("Alice".to_string()),
+            ..Default::default()
+        }];
+        upsert_people(&conn, &people, Some("user_01AAA")).unwrap();
+        assert_eq!(stamp_of(&conn, "people", "p-1"), Some("user_01AAA".into()));
+
+        // people upserts always update on conflict; the stamp must survive a
+        // re-sync under a different account.
+        let renamed = vec![Person {
+            id: Some("p-1".to_string()),
+            name: Some("Alice Smith".to_string()),
+            ..Default::default()
+        }];
+        upsert_people(&conn, &renamed, Some("user_01BBB")).unwrap();
+
+        let name: String = conn
+            .query_row("SELECT name FROM people WHERE id = 'p-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Alice Smith");
+        assert_eq!(stamp_of(&conn, "people", "p-1"), Some("user_01AAA".into()));
+    }
+
+    #[test]
+    fn test_upsert_calendar_events_stamps_insert_and_update_preserves_it() {
+        let conn = build_test_db(&empty_state());
+
+        let events = vec![CalendarEvent {
+            id: Some("e-1".to_string()),
+            summary: Some("Original".to_string()),
+            ..Default::default()
+        }];
+        upsert_calendar_events(&conn, &events, Some("user_01AAA")).unwrap();
+        assert_eq!(stamp_of(&conn, "events", "e-1"), Some("user_01AAA".into()));
+
+        let updated = vec![CalendarEvent {
+            id: Some("e-1".to_string()),
+            summary: Some("Updated".to_string()),
+            ..Default::default()
+        }];
+        upsert_calendar_events(&conn, &updated, Some("user_01BBB")).unwrap();
+
+        let summary: String = conn
+            .query_row("SELECT summary FROM events WHERE id = 'e-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(summary, "Updated");
+        assert_eq!(stamp_of(&conn, "events", "e-1"), Some("user_01AAA".into()));
+    }
+
+    #[test]
+    fn test_upsert_calendars_stamps_insert_and_update_preserves_it() {
+        let conn = build_test_db(&empty_state());
+
+        let mut selected = std::collections::HashMap::new();
+        selected.insert("cal-1".to_string(), true);
+        let enabled = vec!["google".to_string()];
+
+        upsert_calendars_from_selection(&conn, &selected, &enabled, Some("user_01AAA")).unwrap();
+        assert_eq!(
+            stamp_of(&conn, "calendars", "cal-1"),
+            Some("user_01AAA".into())
+        );
+
+        // Re-selecting the same calendar updates provider only; the stamp
+        // must survive.
+        upsert_calendars_from_selection(&conn, &selected, &enabled, Some("user_01BBB")).unwrap();
+        assert_eq!(
+            stamp_of(&conn, "calendars", "cal-1"),
+            Some("user_01AAA".into())
+        );
+    }
+
+    #[test]
+    fn test_upsert_templates_stamps_insert_and_update_preserves_it() {
+        let conn = build_test_db(&empty_state());
+
+        let templates = vec![PanelTemplate {
+            id: Some("t-1".to_string()),
+            title: Some("Original".to_string()),
+            updated_at: Some("2026-01-20T10:00:00Z".to_string()),
+            ..Default::default()
+        }];
+        upsert_templates(&conn, &templates, Some("user_01AAA")).unwrap();
+        assert_eq!(
+            stamp_of(&conn, "templates", "t-1"),
+            Some("user_01AAA".into())
+        );
+
+        let updated = vec![PanelTemplate {
+            id: Some("t-1".to_string()),
+            title: Some("Updated".to_string()),
+            updated_at: Some("2026-01-20T11:00:00Z".to_string()),
+            ..Default::default()
+        }];
+        upsert_templates(&conn, &updated, Some("user_01BBB")).unwrap();
+
+        let title: String = conn
+            .query_row("SELECT title FROM templates WHERE id = 't-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Updated");
+        assert_eq!(
+            stamp_of(&conn, "templates", "t-1"),
+            Some("user_01AAA".into())
+        );
+    }
+
+    #[test]
+    fn test_upsert_recipes_stamps_insert_and_update_preserves_it() {
+        let conn = build_test_db(&empty_state());
+
+        let make_response = |slug: &str, updated_at: &str| GetRecipesResponse {
+            default_recipes: vec![],
+            public_recipes: vec![Recipe {
+                id: Some("r-1".to_string()),
+                slug: Some(slug.to_string()),
+                updated_at: Some(updated_at.to_string()),
+                visibility: Some("public".to_string()),
+                ..Default::default()
+            }],
+            user_recipes: vec![],
+            shared_recipes: vec![],
+            unlisted_recipes: vec![],
+        };
+
+        upsert_recipes(
+            &conn,
+            &make_response("original", "2026-01-20T10:00:00Z"),
+            Some("user_01AAA"),
+        )
+        .unwrap();
+        assert_eq!(stamp_of(&conn, "recipes", "r-1"), Some("user_01AAA".into()));
+
+        upsert_recipes(
+            &conn,
+            &make_response("updated", "2026-01-20T11:00:00Z"),
+            Some("user_01BBB"),
+        )
+        .unwrap();
+
+        let slug: String = conn
+            .query_row("SELECT slug FROM recipes WHERE id = 'r-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(slug, "updated");
+        assert_eq!(stamp_of(&conn, "recipes", "r-1"), Some("user_01AAA".into()));
     }
 
     #[test]
@@ -966,7 +1235,7 @@ mod tests {
             },
         ];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         let count: i64 = conn
@@ -1002,7 +1271,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row(
@@ -1045,7 +1314,7 @@ mod tests {
             status: None,
             extra: Default::default(),
         }];
-        upsert_documents(&conn, &docs).unwrap();
+        upsert_documents(&conn, &docs, None).unwrap();
 
         // Update with newer timestamp and different title
         let updated_docs = vec![Document {
@@ -1070,7 +1339,7 @@ mod tests {
             status: None,
             extra: Default::default(),
         }];
-        upsert_documents(&conn, &updated_docs).unwrap();
+        upsert_documents(&conn, &updated_docs, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row(
@@ -1113,7 +1382,7 @@ mod tests {
             extra,
         }];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Verify extra_json was persisted
@@ -1166,7 +1435,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_calendar_events(&conn, &events).unwrap();
+        let stats = upsert_calendar_events(&conn, &events, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Verify new columns were persisted
@@ -1220,7 +1489,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        let stats = upsert_templates(&conn, &templates).unwrap();
+        let stats = upsert_templates(&conn, &templates, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Verify chat_suggestions_json was persisted
@@ -1265,7 +1534,7 @@ mod tests {
             extra,
         }];
 
-        let stats = upsert_people(&conn, &people).unwrap();
+        let stats = upsert_people(&conn, &people, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Verify extra_json was persisted
@@ -1303,7 +1572,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        upsert_templates(&conn, &templates).unwrap();
+        upsert_templates(&conn, &templates, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row("SELECT raw_json FROM templates WHERE id = 't-1'", [], |r| {
@@ -1328,7 +1597,7 @@ mod tests {
             updated_at: Some("2026-01-20T10:00:00Z".to_string()),
             ..Default::default()
         }];
-        upsert_templates(&conn, &templates).unwrap();
+        upsert_templates(&conn, &templates, None).unwrap();
 
         let updated_templates = vec![PanelTemplate {
             id: Some("t-1".to_string()),
@@ -1337,7 +1606,7 @@ mod tests {
             updated_at: Some("2026-01-20T11:00:00Z".to_string()),
             ..Default::default()
         }];
-        upsert_templates(&conn, &updated_templates).unwrap();
+        upsert_templates(&conn, &updated_templates, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row("SELECT raw_json FROM templates WHERE id = 't-1'", [], |r| {
@@ -1378,7 +1647,7 @@ mod tests {
             extra: Default::default(),
         }];
 
-        upsert_calendar_events(&conn, &events).unwrap();
+        upsert_calendar_events(&conn, &events, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row("SELECT raw_json FROM events WHERE id = 'e-1'", [], |r| {
@@ -1412,7 +1681,7 @@ mod tests {
             calendar_id: Some("cal-1".to_string()),
             ..Default::default()
         }];
-        upsert_calendar_events(&conn, &events).unwrap();
+        upsert_calendar_events(&conn, &events, None).unwrap();
 
         // Update the event (upsert_calendar_events uses existence check, not timestamp comparison)
         let updated_events = vec![CalendarEvent {
@@ -1431,7 +1700,7 @@ mod tests {
             calendar_id: Some("cal-1".to_string()),
             ..Default::default()
         }];
-        upsert_calendar_events(&conn, &updated_events).unwrap();
+        upsert_calendar_events(&conn, &updated_events, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row("SELECT raw_json FROM events WHERE id = 'e-1'", [], |r| {
@@ -1472,7 +1741,7 @@ mod tests {
             unlisted_recipes: vec![],
         };
 
-        upsert_recipes(&conn, &response).unwrap();
+        upsert_recipes(&conn, &response, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row("SELECT raw_json FROM recipes WHERE id = 'r-1'", [], |r| {
@@ -1504,7 +1773,7 @@ mod tests {
             shared_recipes: vec![],
             unlisted_recipes: vec![],
         };
-        upsert_recipes(&conn, &response).unwrap();
+        upsert_recipes(&conn, &response, None).unwrap();
 
         // Update with newer timestamp
         let updated_response = GetRecipesResponse {
@@ -1521,7 +1790,7 @@ mod tests {
             shared_recipes: vec![],
             unlisted_recipes: vec![],
         };
-        upsert_recipes(&conn, &updated_response).unwrap();
+        upsert_recipes(&conn, &updated_response, None).unwrap();
 
         let raw_json: Option<String> = conn
             .query_row("SELECT raw_json FROM recipes WHERE id = 'r-1'", [], |r| {
@@ -1565,7 +1834,7 @@ mod tests {
             unlisted_recipes: vec![],
         };
 
-        let stats = upsert_recipes(&conn, &response).unwrap();
+        let stats = upsert_recipes(&conn, &response, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Verify extra_json was persisted
@@ -1729,11 +1998,11 @@ mod tests {
             ..Default::default()
         }];
 
-        let stats = upsert_templates(&conn, &templates).unwrap();
+        let stats = upsert_templates(&conn, &templates, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
         // Re-sync the same template — this must not fail
-        let stats = upsert_templates(&conn, &templates).unwrap();
+        let stats = upsert_templates(&conn, &templates, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.unchanged, 1);
     }
@@ -1749,10 +2018,10 @@ mod tests {
             ..Default::default()
         }];
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
-        let stats = upsert_documents(&conn, &docs).unwrap();
+        let stats = upsert_documents(&conn, &docs, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.unchanged, 1);
     }
@@ -1774,10 +2043,10 @@ mod tests {
             unlisted_recipes: vec![],
         };
 
-        let stats = upsert_recipes(&conn, &response).unwrap();
+        let stats = upsert_recipes(&conn, &response, None).unwrap();
         assert_eq!(stats.inserted, 1);
 
-        let stats = upsert_recipes(&conn, &response).unwrap();
+        let stats = upsert_recipes(&conn, &response, None).unwrap();
         assert_eq!(stats.inserted, 0);
         assert_eq!(stats.unchanged, 1);
     }

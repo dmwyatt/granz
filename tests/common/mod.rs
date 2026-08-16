@@ -67,7 +67,16 @@ fn create_test_tables(conn: &Connection) {
             people_json TEXT,
             google_calendar_event_json TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
+        );
+
+        CREATE TABLE accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL UNIQUE,
+            granola_user_id TEXT,
+            email TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL
         );
 
         CREATE TABLE transcript_utterances (
@@ -90,7 +99,8 @@ fn create_test_tables(conn: &Connection) {
             email TEXT,
             company_name TEXT,
             job_title TEXT,
-            extra_json TEXT
+            extra_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE events (
@@ -103,7 +113,8 @@ fn create_test_tables(conn: &Connection) {
             conference_data_json TEXT,
             description TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE calendars (
@@ -113,7 +124,8 @@ fn create_test_tables(conn: &Connection) {
             access_role TEXT,
             summary TEXT,
             background_color TEXT,
-            extra_json TEXT
+            extra_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE templates (
@@ -131,7 +143,8 @@ fn create_test_tables(conn: &Connection) {
             deleted_at TEXT,
             chat_suggestions_json TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE recipes (
@@ -147,7 +160,8 @@ fn create_test_tables(conn: &Connection) {
             user_id TEXT,
             workspace_id TEXT,
             extra_json TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            source_account_id TEXT
         );
 
         CREATE TABLE document_people (
@@ -291,7 +305,11 @@ fn create_test_tables(conn: &Connection) {
         END;
 
         -- Set schema version via user_version pragma (used by rusqlite_migration)
-        PRAGMA user_version = 14;
+        -- to the version this schema mirrors. Trailing behind the latest
+        -- migration only works while every later migration is idempotent
+        -- against this schema; v017's ALTER TABLE ADD COLUMN is not, so keep
+        -- this current when adding migrations.
+        PRAGMA user_version = 17;
         "#,
     )
     .unwrap();

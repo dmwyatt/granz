@@ -90,6 +90,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
     eprintln!("[grans] Starting full sync from Granola API...");
 
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_record::record_source_account(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     // Sync each entity type
@@ -97,7 +98,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
 
     // Documents
     eprintln!("[grans] Syncing documents...");
-    match sync_documents_with_client(conn, &client, dry_run) {
+    match sync_documents_with_client(conn, &client, dry_run, source_account.as_deref()) {
         Ok(stats) => {
             total_stats.documents = stats;
             eprintln!(
@@ -110,7 +111,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
 
     // People
     eprintln!("[grans] Syncing people...");
-    match sync_people_with_client(conn, &client, dry_run) {
+    match sync_people_with_client(conn, &client, dry_run, source_account.as_deref()) {
         Ok(stats) => {
             total_stats.people = stats;
             eprintln!(
@@ -123,7 +124,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
 
     // Calendar events
     eprintln!("[grans] Syncing calendar events...");
-    match sync_calendars_with_client(conn, &client, dry_run) {
+    match sync_calendars_with_client(conn, &client, dry_run, source_account.as_deref()) {
         Ok(stats) => {
             total_stats.events = stats;
             eprintln!(
@@ -136,7 +137,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
 
     // Templates
     eprintln!("[grans] Syncing templates...");
-    match sync_templates_with_client(conn, &client, dry_run) {
+    match sync_templates_with_client(conn, &client, dry_run, source_account.as_deref()) {
         Ok(stats) => {
             total_stats.templates = stats;
             eprintln!(
@@ -149,7 +150,7 @@ fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputM
 
     // Recipes
     eprintln!("[grans] Syncing recipes...");
-    match sync_recipes_with_client(conn, &client, dry_run) {
+    match sync_recipes_with_client(conn, &client, dry_run, source_account.as_deref()) {
         Ok(stats) => {
             total_stats.recipes = stats;
             eprintln!(
@@ -249,6 +250,7 @@ fn sync_documents(
 ) -> Result<()> {
     debug!("sync_documents (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_record::record_source_account(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching documents from API...");
@@ -265,7 +267,7 @@ fn sync_documents(
             errors: 0,
         }
     } else {
-        upsert_documents(conn, &documents)?
+        upsert_documents(conn, &documents, source_account.as_deref())?
     };
 
     print_sync_stats("documents", &stats, dry_run, mode);
@@ -281,6 +283,7 @@ fn sync_documents_with_client(
     conn: &Connection,
     client: &ApiClient,
     dry_run: bool,
+    source_account: Option<&str>,
 ) -> Result<SyncStats> {
     let documents = client.get_documents()?;
 
@@ -293,7 +296,7 @@ fn sync_documents_with_client(
         });
     }
 
-    upsert_documents(conn, &documents)
+    upsert_documents(conn, &documents, source_account)
 }
 
 fn sync_people(
@@ -304,6 +307,7 @@ fn sync_people(
 ) -> Result<()> {
     debug!("sync_people (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_record::record_source_account(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching people from API...");
@@ -320,7 +324,7 @@ fn sync_people(
             errors: 0,
         }
     } else {
-        upsert_people(conn, &people)?
+        upsert_people(conn, &people, source_account.as_deref())?
     };
 
     print_sync_stats("people", &stats, dry_run, mode);
@@ -336,6 +340,7 @@ fn sync_people_with_client(
     conn: &Connection,
     client: &ApiClient,
     dry_run: bool,
+    source_account: Option<&str>,
 ) -> Result<SyncStats> {
     let people = client.get_people()?;
 
@@ -348,7 +353,7 @@ fn sync_people_with_client(
         });
     }
 
-    upsert_people(conn, &people)
+    upsert_people(conn, &people, source_account)
 }
 
 fn sync_calendars(
@@ -359,6 +364,7 @@ fn sync_calendars(
 ) -> Result<()> {
     debug!("sync_calendars (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_record::record_source_account(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching calendar events from API...");
@@ -372,7 +378,12 @@ fn sync_calendars(
         if let Some(calendars_selected) = selected.calendars_selected {
             let enabled = selected.enabled_calendars.unwrap_or_default();
             if !dry_run {
-                upsert_calendars_from_selection(conn, &calendars_selected, &enabled)?;
+                upsert_calendars_from_selection(
+                    conn,
+                    &calendars_selected,
+                    &enabled,
+                    source_account.as_deref(),
+                )?;
             }
         }
     }
@@ -385,7 +396,7 @@ fn sync_calendars(
             errors: 0,
         }
     } else {
-        upsert_calendar_events(conn, &events)?
+        upsert_calendar_events(conn, &events, source_account.as_deref())?
     };
 
     print_sync_stats("calendar events", &stats, dry_run, mode);
@@ -401,6 +412,7 @@ fn sync_calendars_with_client(
     conn: &Connection,
     client: &ApiClient,
     dry_run: bool,
+    source_account: Option<&str>,
 ) -> Result<SyncStats> {
     // Fetch events
     let events = client.refresh_calendar_events()?;
@@ -410,7 +422,12 @@ fn sync_calendars_with_client(
         if let Some(calendars_selected) = selected.calendars_selected {
             let enabled = selected.enabled_calendars.unwrap_or_default();
             if !dry_run {
-                upsert_calendars_from_selection(conn, &calendars_selected, &enabled)?;
+                upsert_calendars_from_selection(
+                    conn,
+                    &calendars_selected,
+                    &enabled,
+                    source_account,
+                )?;
             }
         }
     }
@@ -424,7 +441,7 @@ fn sync_calendars_with_client(
         });
     }
 
-    upsert_calendar_events(conn, &events)
+    upsert_calendar_events(conn, &events, source_account)
 }
 
 fn sync_templates(
@@ -435,6 +452,7 @@ fn sync_templates(
 ) -> Result<()> {
     debug!("sync_templates (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_record::record_source_account(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching templates from API...");
@@ -451,7 +469,7 @@ fn sync_templates(
             errors: 0,
         }
     } else {
-        upsert_templates(conn, &templates)?
+        upsert_templates(conn, &templates, source_account.as_deref())?
     };
 
     print_sync_stats("templates", &stats, dry_run, mode);
@@ -467,6 +485,7 @@ fn sync_templates_with_client(
     conn: &Connection,
     client: &ApiClient,
     dry_run: bool,
+    source_account: Option<&str>,
 ) -> Result<SyncStats> {
     let templates = client.get_templates()?;
 
@@ -479,7 +498,7 @@ fn sync_templates_with_client(
         });
     }
 
-    upsert_templates(conn, &templates)
+    upsert_templates(conn, &templates, source_account)
 }
 
 fn sync_recipes(
@@ -490,6 +509,7 @@ fn sync_recipes(
 ) -> Result<()> {
     debug!("sync_recipes (dry_run={})", dry_run);
     let token = crate::api::resolve_token(token)?;
+    let source_account = super::account_record::record_source_account(conn, &token, dry_run)?;
     let client = ApiClient::new(token)?;
 
     let spinner = create_spinner("Fetching recipes from API...");
@@ -510,7 +530,7 @@ fn sync_recipes(
             errors: 0,
         }
     } else {
-        upsert_recipes(conn, &response)?
+        upsert_recipes(conn, &response, source_account.as_deref())?
     };
 
     print_sync_stats("recipes", &stats, dry_run, mode);
@@ -526,6 +546,7 @@ fn sync_recipes_with_client(
     conn: &Connection,
     client: &ApiClient,
     dry_run: bool,
+    source_account: Option<&str>,
 ) -> Result<SyncStats> {
     let response = client.get_recipes()?;
 
@@ -544,7 +565,7 @@ fn sync_recipes_with_client(
         });
     }
 
-    upsert_recipes(conn, &response)
+    upsert_recipes(conn, &response, source_account)
 }
 
 // ============================================================================

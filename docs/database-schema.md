@@ -28,6 +28,15 @@ erDiagram
         TEXT summary
         TEXT people_json
         TEXT google_calendar_event_json
+        TEXT source_account_id
+    }
+
+    accounts {
+        INTEGER id PK
+        TEXT account_id
+        TEXT granola_user_id
+        TEXT email
+        TEXT first_seen_at
     }
 
     transcript_utterances {
@@ -53,6 +62,7 @@ erDiagram
         TEXT email
         TEXT company_name
         TEXT job_title
+        TEXT source_account_id
     }
 
     calendars {
@@ -62,6 +72,7 @@ erDiagram
         TEXT access_role
         TEXT summary
         TEXT background_color
+        TEXT source_account_id
     }
 
     events {
@@ -70,6 +81,7 @@ erDiagram
         TEXT start_time
         TEXT end_time
         TEXT calendar_id FK
+        TEXT source_account_id
     }
 
     templates {
@@ -85,6 +97,7 @@ erDiagram
         TEXT created_at
         TEXT updated_at
         TEXT deleted_at
+        TEXT source_account_id
     }
 
     recipes {
@@ -99,6 +112,7 @@ erDiagram
         TEXT deleted_at
         TEXT user_id
         TEXT workspace_id
+        TEXT source_account_id
     }
 
     metadata {
@@ -126,6 +140,19 @@ The core table storing meeting documents from Granola.
 | `summary` | TEXT | AI-generated meeting summary |
 | `people_json` | TEXT | JSON array of attendee data |
 | `google_calendar_event_json` | TEXT | JSON blob of linked calendar event |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under. Stamped on insert only; updates never touch it. Rows stamped at insert are observations; rows stamped by the first-account backfill are an inference (the database is assumed to have been single-account before provenance tracking existed). NULL means the account is unknowable and stays NULL permanently: rows synced with an undecodable token (non-JWT `--token`) after the first account was recorded. Also present on `people`, `calendars`, `events`, `templates`, and `recipes` with identical semantics; `transcript_utterances`, `panels`, `document_people`, and `chunks` derive provenance through `document_id` |
+
+### accounts
+
+Append-only log of every Granola account this database has ever synced from. An account is recorded the first time a sync sees its token; recording the first-ever account also backfills `source_account_id` on all pre-existing rows of every stamped table (later accounts never backfill). Nothing enforces single-account use; data from multiple accounts coexisting is supported by design.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Primary key, autoincrement |
+| `account_id` | TEXT | Stable WorkOS user id from the access token's JWT `sub` claim |
+| `granola_user_id` | TEXT | Granola user UUID from `get-user-info` (distinct from `account_id`) |
+| `email` | TEXT | Account email captured from `get-user-info` when first seen |
+| `first_seen_at` | TEXT | ISO 8601 timestamp of when this account was first seen |
 
 ### transcript_utterances
 
@@ -163,6 +190,7 @@ Contact/person records from Granola.
 | `email` | TEXT | Email address |
 | `company_name` | TEXT | Company/organization |
 | `job_title` | TEXT | Job title |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under; insert-only, see `documents.source_account_id` |
 
 ### calendars
 
@@ -176,6 +204,7 @@ Connected calendar accounts.
 | `access_role` | TEXT | Access level |
 | `summary` | TEXT | Calendar name/description |
 | `background_color` | TEXT | Display color |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under; insert-only, see `documents.source_account_id` |
 
 ### events
 
@@ -188,6 +217,7 @@ Calendar events linked to calendars.
 | `start_time` | TEXT | ISO 8601 start timestamp |
 | `end_time` | TEXT | ISO 8601 end timestamp |
 | `calendar_id` | TEXT | Foreign key to `calendars.id` |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under; insert-only, see `documents.source_account_id` |
 
 ### templates
 
@@ -207,6 +237,7 @@ Meeting note templates.
 | `created_at` | TEXT | ISO 8601 timestamp |
 | `updated_at` | TEXT | ISO 8601 timestamp |
 | `deleted_at` | TEXT | ISO 8601 timestamp (soft delete) |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under; insert-only, see `documents.source_account_id` |
 
 ### recipes
 
@@ -225,6 +256,7 @@ Automation recipes/integrations.
 | `deleted_at` | TEXT | ISO 8601 timestamp (soft delete) |
 | `user_id` | TEXT | Owner user ID |
 | `workspace_id` | TEXT | Workspace ID |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under; insert-only, see `documents.source_account_id` |
 
 ### metadata
 

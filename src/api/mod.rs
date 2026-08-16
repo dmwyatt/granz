@@ -4,6 +4,7 @@ pub mod credential_store;
 pub mod credentials;
 pub mod granola_auth;
 pub mod identity;
+pub mod jwt;
 // Only macOS decides keychain reads by the caller's code signature, so only
 // macOS needs the ACL rewritten. See `keychain_acl`.
 #[cfg(target_os = "macos")]
