@@ -88,7 +88,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `auth logout` - Remove the stored credentials
 
 **Admin Commands** (maintenance):
-- `admin db` - Database management (clear, info, list, rebuild-fts, rebind)
+- `admin db` - Database management (clear, info, list, rebuild-fts)
 - `admin token` - Print the current Granola API token
 - `benchmark quality` - Measure search quality (FTS or semantic) against a labeled test suite
 
@@ -131,19 +131,17 @@ grans sync panels --retry             # Retry previously failed panel fetches
 2. grans's own stored credentials, from `grans auth login`
 3. The token Granola's desktop app stored locally (not on macOS, see below)
 
-**Account binding:** The first sync binds the database to the Granola account
-the token belongs to, and each document records which account the database was
-bound to when that document first entered it. From then on, syncing with a
-token that belongs to a different account is an error naming both accounts.
-This prevents one account's data from being silently upserted over another's
-(for example, after signing in to the wrong account). When the switch is
-intentional, run `grans admin db rebind` first.
-
-The mismatch is a hard error wherever a token is resolved, including under
-`--dry-run` for `sync` and the `documents`, `people`, `calendars`,
-`templates`, and `recipes` subcommands. Bulk `sync transcripts --dry-run` and
-`sync panels --dry-run` are local-database previews that never resolve a
-token, so for those two the check first applies on the real run.
+**Account provenance:** Account-tied rows (documents, people, calendars,
+events, templates, recipes) record the Granola account they first arrived
+under, and the `accounts` table logs every account the database has ever
+synced from (id, email, first seen). The first time a sync sees a new account
+it records it with a one-time announcement; when that is the first account
+the database has ever seen, all pre-existing rows are stamped as its too.
+Nothing enforces single-account use: data from multiple accounts coexisting
+in one database is supported by design. Updates to an existing row never
+change its recorded account, and rows synced with a token that is not a
+decodable Granola JWT (arbitrary `--token` values) get no source account.
+`grans admin db info` lists the accounts seen.
 
 ### Signing in
 
@@ -490,9 +488,6 @@ grans admin db list
 
 # Rebuild the full-text search indexes from the tables they index
 grans admin db rebuild-fts
-
-# Bind the database to the current token's Granola account
-grans admin db rebind
 ```
 
 `admin db info` ends with a line per full-text index saying whether it still
@@ -501,13 +496,8 @@ agrees with the table it indexes. An index that has drifted makes `grep` and
 healthy, and `admin db rebuild-fts` repairs it by re-deriving each index from
 its source. Nothing is lost and no re-sync is needed.
 
-`admin db rebind` is for switching the database to a different Granola account
-on purpose (for example, after Granola's account-to-account note import). Sync
-refuses to run while the token's account differs from the one the database is
-bound to; rebinding appends a new binding, keeping the old one as history, and
-does not change the account recorded on existing documents. That holds even
-when rebind performs the first-ever bind: existing rows keep no source
-account (only sync's auto-bind backfills them, and only at the first bind).
+`admin db info` also lists every Granola account the database has synced from,
+with the email and first-seen date captured when each was recorded.
 
 ### Dropbox Sync
 
