@@ -136,9 +136,9 @@ fn serialize_recipe_json(recipe: &Recipe) -> RecipeJsonFields {
 /// Upsert documents from the API into the database.
 /// Returns counts of inserted, updated, unchanged.
 ///
-/// `source_account_id` is the account the database is bound to; it is stamped
-/// on inserted rows only. Updates to an existing row never touch it: the
-/// column records which account a row first entered the database under.
+/// `source_account_id` is the account this sync runs as; it is stamped on
+/// inserted rows only. Updates to an existing row never touch it: the column
+/// records the account a row first arrived under.
 pub fn upsert_documents(
     conn: &Connection,
     documents: &[Document],
@@ -387,6 +387,9 @@ pub fn upsert_calendar_events(
 /// Upsert calendars into the database.
 /// Note: The API returns calendars_selected as a map, not full calendar objects.
 /// This function is for storing calendar preferences.
+///
+/// `source_account_id` is stamped on inserted rows only; updates to an
+/// existing row never touch it.
 pub fn upsert_calendars_from_selection(
     conn: &Connection,
     calendars_selected: &std::collections::HashMap<String, bool>,

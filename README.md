@@ -136,7 +136,9 @@ events, templates, recipes) record the Granola account they first arrived
 under, and the `accounts` table logs every account the database has ever
 synced from (id, email, first seen). The first time a sync sees a new account
 it records it with a one-time announcement; when that is the first account
-the database has ever seen, all pre-existing rows are stamped as its too.
+the database has ever seen, all pre-existing rows are also stamped with it,
+an inference that pre-provenance history was single-account (rows stamped at
+insert are observations).
 Nothing enforces single-account use: data from multiple accounts coexisting
 in one database is supported by design. Updates to an existing row never
 change its recorded account, and rows synced with a token that is not a

@@ -140,7 +140,7 @@ The core table storing meeting documents from Granola.
 | `summary` | TEXT | AI-generated meeting summary |
 | `people_json` | TEXT | JSON array of attendee data |
 | `google_calendar_event_json` | TEXT | JSON blob of linked calendar event |
-| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under. Stamped on insert only; updates never touch it. NULL means the account is unknowable and stays NULL permanently: rows synced with an undecodable token (non-JWT `--token`) after the first account was recorded. Also present on `people`, `calendars`, `events`, `templates`, and `recipes` with identical semantics; `transcript_utterances`, `panels`, `document_people`, and `chunks` derive provenance through `document_id` |
+| `source_account_id` | TEXT | Account (JWT `sub`) this row first arrived under. Stamped on insert only; updates never touch it. Rows stamped at insert are observations; rows stamped by the first-account backfill are an inference (the database is assumed to have been single-account before provenance tracking existed). NULL means the account is unknowable and stays NULL permanently: rows synced with an undecodable token (non-JWT `--token`) after the first account was recorded. Also present on `people`, `calendars`, `events`, `templates`, and `recipes` with identical semantics; `transcript_utterances`, `panels`, `document_people`, and `chunks` derive provenance through `document_id` |
 
 ### accounts
 
