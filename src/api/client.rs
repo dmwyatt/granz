@@ -10,7 +10,8 @@ use super::types::{
     ApiPanel, GetDocumentPanelsRequest, GetDocumentsRequest, GetDocumentsResponse,
     GetPanelTemplatesRequest, GetPeopleRequest, GetRecipesRequest, GetRecipesResponse,
     GetSelectedCalendarsRequest, GetSelectedCalendarsResponse, GetTranscriptRequest,
-    RefreshCalendarEventsRequest, RefreshCalendarEventsResponse, TranscriptResponse,
+    GetUserInfoRequest, RefreshCalendarEventsRequest, RefreshCalendarEventsResponse,
+    TranscriptResponse, UserInfoResponse,
 };
 use crate::models::{CalendarEvent, Document, PanelTemplate, Person, TranscriptUtterance};
 
@@ -333,6 +334,16 @@ impl ApiClient {
     }
 
     // ========================================================================
+    // User Info Methods
+    // ========================================================================
+
+    /// Fetch the authenticated user's identity (Granola user id, email)
+    pub fn get_user_info(&self) -> Result<UserInfoResponse, ApiError> {
+        let request = GetUserInfoRequest::default();
+        self.post_v1("get-user-info", &request)
+    }
+
+    // ========================================================================
     // Recipe Methods
     // ========================================================================
 
@@ -423,6 +434,30 @@ mod tests {
         let request = GetRecipesRequest::default();
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn test_user_info_request_serialization() {
+        let request = GetUserInfoRequest::default();
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn test_user_info_response_deserialization() {
+        // Response carries many more fields; only id and email are kept.
+        let json = r#"{
+            "id": "0c9c0d5e-0000-0000-0000-000000000000",
+            "email": "user@example.com",
+            "user_metadata": {"name": "Test User"},
+            "workspace_ids": ["ws-1"]
+        }"#;
+        let info: UserInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            info.id.as_deref(),
+            Some("0c9c0d5e-0000-0000-0000-000000000000")
+        );
+        assert_eq!(info.email.as_deref(), Some("user@example.com"));
     }
 
     #[test]

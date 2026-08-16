@@ -114,6 +114,27 @@ pub struct GetRecipesResponse {
 }
 
 // ============================================================================
+// User Info Request/Response
+// ============================================================================
+
+/// Request body for fetching the authenticated user (empty object)
+#[derive(Debug, Serialize, Default)]
+pub struct GetUserInfoRequest {}
+
+/// Response from get-user-info.
+///
+/// The API returns much more (workspace ids, metadata, timestamps); only the
+/// fields used for account binding are kept.
+#[derive(Debug, Deserialize)]
+pub struct UserInfoResponse {
+    /// Granola user UUID. Distinct from the JWT `sub` (the WorkOS user id).
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+// ============================================================================
 // Panel Types (API-specific — structurally different from model Panel)
 // ============================================================================
 
