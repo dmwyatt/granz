@@ -28,6 +28,15 @@ erDiagram
         TEXT summary
         TEXT people_json
         TEXT google_calendar_event_json
+        TEXT source_account_id
+    }
+
+    accounts {
+        INTEGER id PK
+        TEXT account_id
+        TEXT granola_user_id
+        TEXT email
+        TEXT bound_at
     }
 
     transcript_utterances {
@@ -126,6 +135,19 @@ The core table storing meeting documents from Granola.
 | `summary` | TEXT | AI-generated meeting summary |
 | `people_json` | TEXT | JSON array of attendee data |
 | `google_calendar_event_json` | TEXT | JSON blob of linked calendar event |
+| `source_account_id` | TEXT | Account (JWT `sub`) the database was bound to when this row first entered it. Stamped on insert only; updates never touch it. NULL only on rows that predate the first bind of a database migrated to v017 |
+
+### accounts
+
+Which Granola account the database is bound to. Append-only history: the active binding is the row with the highest `id`, and rebinding (`grans admin db rebind`) appends rather than overwrites. Sync refuses to run when the current token's account differs from the active binding. The first-ever bind backfills `documents.source_account_id` on all existing rows.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Primary key, autoincrement |
+| `account_id` | TEXT | Stable WorkOS user id from the access token's JWT `sub` claim |
+| `granola_user_id` | TEXT | Granola user UUID from `get-user-info` (distinct from `account_id`) |
+| `email` | TEXT | Account email captured from `get-user-info` at bind time |
+| `bound_at` | TEXT | ISO 8601 timestamp of when this binding was created |
 
 ### transcript_utterances
 
