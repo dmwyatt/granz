@@ -58,6 +58,17 @@ pub(super) fn ensure_account_binding(
     token: &str,
     dry_run: bool,
 ) -> Result<Option<String>> {
+    ensure_account_binding_with(conn, token, dry_run, fetch_email)
+}
+
+/// [`ensure_account_binding`] with the mismatch-path email lookup injected,
+/// so the enforcement logic is testable without live HTTP.
+fn ensure_account_binding_with(
+    conn: &Connection,
+    token: &str,
+    dry_run: bool,
+    lookup_email: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>> {
     let sub = jwt::decode_sub(token);
     if sub.is_none() {
         debug!("token has no decodable JWT identity; skipping account binding check");
@@ -68,7 +79,7 @@ pub(super) fn ensure_account_binding(
         BindingDecision::Proceed(sub) => Ok(Some(sub)),
         BindingDecision::NeedsFirstBind(sub) => first_bind(conn, token, &sub).map(Some),
         BindingDecision::Mismatch { binding, sub } => {
-            let current_email = fetch_email(token);
+            let current_email = lookup_email(token);
             Err(anyhow!(mismatch_message(
                 &binding,
                 &sub,
@@ -112,10 +123,20 @@ fn first_bind(conn: &Connection, token: &str, sub: &str) -> Result<String> {
 /// failing either way; a lookup failure only degrades the message to the
 /// raw WorkOS id.
 fn fetch_email(token: &str) -> Option<String> {
-    ApiClient::new(token.to_string())
-        .ok()
-        .and_then(|client| client.get_user_info().ok())
-        .and_then(|info| info.email)
+    let client = match ApiClient::new(token.to_string()) {
+        Ok(client) => client,
+        Err(e) => {
+            debug!("mismatch email lookup: could not build API client: {}", e);
+            return None;
+        }
+    };
+    match client.get_user_info() {
+        Ok(info) => info.email,
+        Err(e) => {
+            debug!("mismatch email lookup: get-user-info failed: {}", e);
+            None
+        }
+    }
 }
 
 /// Format the hard error for a token that belongs to a different account
@@ -134,6 +155,69 @@ fn mismatch_message(binding: &ActiveBinding, sub: &str, current_email: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::test_fixtures::build_test_db;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use serde_json::json;
+
+    /// Build an unsigned JWT whose payload carries the given `sub`.
+    fn make_jwt(sub: &str) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(json!({ "sub": sub }).to_string());
+        format!("{}.{}.fake-signature", header, payload)
+    }
+
+    fn bound_db(account_id: &str, email: &str) -> rusqlite::Connection {
+        let conn = build_test_db(&json!({
+            "documents": {
+                "doc-1": {"id": "doc-1", "title": "First"}
+            }
+        }));
+        conn.execute(
+            "INSERT INTO accounts (account_id, granola_user_id, email, bound_at)
+             VALUES (?1, 'uuid-1', ?2, '2026-08-01T00:00:00Z')",
+            rusqlite::params![account_id, email],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn mismatched_token_is_a_hard_error_naming_both_accounts() {
+        let conn = bound_db("user_01AAA", "old@example.com");
+        let token = make_jwt("user_01BBB");
+
+        let err = ensure_account_binding_with(&conn, &token, false, |_| {
+            Some("new@example.com".to_string())
+        })
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("old@example.com (user_01AAA)"));
+        assert!(msg.contains("new@example.com (user_01BBB)"));
+        assert!(msg.contains("grans admin db rebind"));
+    }
+
+    #[test]
+    fn mismatched_token_errors_under_dry_run_too() {
+        let conn = bound_db("user_01AAA", "old@example.com");
+        let token = make_jwt("user_01BBB");
+
+        let err = ensure_account_binding_with(&conn, &token, true, |_| None).unwrap_err();
+        assert!(err.to_string().contains("user_01BBB"));
+    }
+
+    #[test]
+    fn matching_token_proceeds_without_an_email_lookup() {
+        let conn = bound_db("user_01AAA", "old@example.com");
+        let token = make_jwt("user_01AAA");
+
+        let stamped = ensure_account_binding_with(&conn, &token, false, |_| {
+            panic!("email lookup must not run on a match")
+        })
+        .unwrap();
+        assert_eq!(stamped.as_deref(), Some("user_01AAA"));
+    }
 
     fn binding(account_id: &str, email: Option<&str>) -> ActiveBinding {
         ActiveBinding {
