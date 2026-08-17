@@ -73,15 +73,31 @@ fn main() -> Result<()> {
     }
 
     // Sync command (from Granola API)
-    if let Commands::Sync { action, dry_run } = &cli.command {
+    if let Commands::Sync {
+        action,
+        all,
+        retry,
+        dry_run,
+    } = &cli.command
+    {
         let conn = get_connection(cli.db.as_deref())?;
-        commands::sync_granola::run(
-            &conn,
-            action,
-            *dry_run,
-            token_override.as_deref(),
-            ctx.output_mode,
-        )?;
+        if *all {
+            commands::sync_pipeline::run_complete_sync(
+                &conn,
+                *retry,
+                *dry_run,
+                token_override.as_deref(),
+                ctx.output_mode,
+            )?;
+        } else {
+            commands::sync_granola::run(
+                &conn,
+                action,
+                *dry_run,
+                token_override.as_deref(),
+                ctx.output_mode,
+            )?;
+        }
         return Ok(());
     }
 

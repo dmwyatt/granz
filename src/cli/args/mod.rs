@@ -237,9 +237,18 @@ pub enum Commands {
     Info,
 
     /// Sync data from Granola API
+    #[command(args_conflicts_with_subcommands = true)]
     Sync {
         #[command(subcommand)]
         action: Option<SyncAction>,
+
+        /// Complete sync: entities, then transcripts, then panels, then embeddings
+        #[arg(long)]
+        all: bool,
+
+        /// Retry documents that previously failed (transcript and panel legs)
+        #[arg(long, requires = "all")]
+        retry: bool,
 
         /// Show what would be done without making changes
         #[arg(long, global = true)]
@@ -450,7 +459,7 @@ pub enum EmbedAction {
 // === Sync Subcommands ===
 
 /// Default delay between per-document API requests, shared by the transcript
-/// and panel sync legs.
+/// and panel sync legs and the `sync --all` pipeline.
 pub const DEFAULT_SYNC_DELAY_MS: u64 = 1500;
 
 #[derive(Subcommand, Debug, Clone)]
