@@ -4,7 +4,32 @@ use std::path::PathBuf;
 
 use assert_cmd::Command;
 use rusqlite::Connection;
+use rusqlite_migration::{M, Migrations};
 use tempfile::TempDir;
+
+/// The real migration files, verbatim. There is no lib target, so tests
+/// cannot call `db::migrations`; replaying the same SQL through the same
+/// crate keeps the test schema definitionally identical to production,
+/// including the `user_version` pragma rusqlite_migration maintains.
+const MIGRATION_SQL: &[&str] = &[
+    include_str!("../../src/db/migrations/v001_initial_schema.sql"),
+    include_str!("../../src/db/migrations/v002_capture_missing_fields.sql"),
+    include_str!("../../src/db/migrations/v003_utterance_metadata.sql"),
+    include_str!("../../src/db/migrations/v004_make_title_not_null.sql"),
+    include_str!("../../src/db/migrations/v005_transcript_sync_log.sql"),
+    include_str!("../../src/db/migrations/v006_panels.sql"),
+    include_str!("../../src/db/migrations/v007_transcript_utterance_index.sql"),
+    include_str!("../../src/db/migrations/v008_panel_chat_url.sql"),
+    include_str!("../../src/db/migrations/v009_document_raw_json.sql"),
+    include_str!("../../src/db/migrations/v010_rename_audio_source_to_source.sql"),
+    include_str!("../../src/db/migrations/v011_raw_json_templates_recipes_events.sql"),
+    include_str!("../../src/db/migrations/v012_rename_is_primary_to_primary.sql"),
+    include_str!("../../src/db/migrations/v013_api_snapshot.sql"),
+    include_str!("../../src/db/migrations/v014_utterance_speaker_name.sql"),
+    include_str!("../../src/db/migrations/v015_fts_triggers.sql"),
+    include_str!("../../src/db/migrations/v016_titles_fts.sql"),
+    include_str!("../../src/db/migrations/v017_account_provenance.sql"),
+];
 
 /// A self-contained test environment with a test database and isolated data directory.
 pub struct TestEnv {
@@ -22,8 +47,8 @@ impl TestEnv {
 
         // Parse the state JSON and insert into database
         let state: serde_json::Value = serde_json::from_str(state_json).unwrap();
-        let conn = Connection::open(&db_path).unwrap();
-        create_test_tables(&conn);
+        let mut conn = Connection::open(&db_path).unwrap();
+        apply_real_migrations(&mut conn);
         insert_test_data(&conn, &state);
 
         TestEnv { dir, db_path }
@@ -51,268 +76,33 @@ impl TestEnv {
     }
 }
 
-fn create_test_tables(conn: &Connection) {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE documents (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            deleted_at TEXT,
-            doc_type TEXT,
-            notes_plain TEXT,
-            notes_markdown TEXT,
-            summary TEXT,
-            people_json TEXT,
-            google_calendar_event_json TEXT,
-            extra_json TEXT,
-            raw_json TEXT,
-            source_account_id TEXT
-        );
+/// Build the schema by replaying the real migrations, exactly as
+/// `db::migrations::open_and_migrate` would on a fresh database.
+fn apply_real_migrations(conn: &mut Connection) {
+    // include_str! makes a deleted or renamed migration a compile error, but
+    // a newly added file is invisible until listed above. Count the files on
+    // disk so that gap fails loudly instead of drifting.
+    let on_disk = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/migrations"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                == Some("sql")
+        })
+        .count();
+    assert_eq!(
+        MIGRATION_SQL.len(),
+        on_disk,
+        "MIGRATION_SQL is out of sync with src/db/migrations; add the new include_str! entry"
+    );
 
-        CREATE TABLE accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id TEXT NOT NULL UNIQUE,
-            granola_user_id TEXT,
-            email TEXT NOT NULL,
-            first_seen_at TEXT NOT NULL
-        );
-
-        CREATE TABLE transcript_utterances (
-            id TEXT PRIMARY KEY,
-            document_id TEXT NOT NULL,
-            start_timestamp TEXT,
-            end_timestamp TEXT,
-            text TEXT,
-            transcript_source TEXT NOT NULL DEFAULT 'cache',
-            source TEXT,
-            is_final INTEGER,
-            api_snapshot TEXT,
-            speaker_name TEXT,
-            FOREIGN KEY (document_id) REFERENCES documents(id)
-        );
-
-        CREATE TABLE people (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            email TEXT,
-            company_name TEXT,
-            job_title TEXT,
-            extra_json TEXT,
-            source_account_id TEXT
-        );
-
-        CREATE TABLE events (
-            id TEXT PRIMARY KEY,
-            summary TEXT,
-            start_time TEXT,
-            end_time TEXT,
-            calendar_id TEXT,
-            attendees_json TEXT,
-            conference_data_json TEXT,
-            description TEXT,
-            extra_json TEXT,
-            raw_json TEXT,
-            source_account_id TEXT
-        );
-
-        CREATE TABLE calendars (
-            id TEXT PRIMARY KEY,
-            provider TEXT,
-            "primary" INTEGER,
-            access_role TEXT,
-            summary TEXT,
-            background_color TEXT,
-            extra_json TEXT,
-            source_account_id TEXT
-        );
-
-        CREATE TABLE templates (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            category TEXT,
-            symbol TEXT,
-            color TEXT,
-            description TEXT,
-            is_granola INTEGER,
-            owner_id TEXT,
-            sections_json TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            deleted_at TEXT,
-            chat_suggestions_json TEXT,
-            extra_json TEXT,
-            raw_json TEXT,
-            source_account_id TEXT
-        );
-
-        CREATE TABLE recipes (
-            id TEXT PRIMARY KEY,
-            slug TEXT,
-            visibility TEXT,
-            publisher_slug TEXT,
-            creator_name TEXT,
-            config_json TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            deleted_at TEXT,
-            user_id TEXT,
-            workspace_id TEXT,
-            extra_json TEXT,
-            raw_json TEXT,
-            source_account_id TEXT
-        );
-
-        CREATE TABLE document_people (
-            document_id TEXT NOT NULL,
-            email TEXT,
-            full_name TEXT,
-            role TEXT NOT NULL,
-            source TEXT NOT NULL,
-            FOREIGN KEY (document_id) REFERENCES documents(id)
-        );
-
-        CREATE TABLE metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-
-        -- Embedding tables (merged from embeddings.db)
-        CREATE TABLE embedding_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-
-        CREATE TABLE chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_type TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            document_id TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(source_type, source_id)
-        );
-
-        CREATE TABLE embeddings (
-            chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-            vector BLOB NOT NULL
-        );
-
-        CREATE TABLE transcript_sync_log (
-            document_id TEXT PRIMARY KEY REFERENCES documents(id),
-            status TEXT NOT NULL,
-            last_attempted_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE TABLE panels (
-            id TEXT PRIMARY KEY,
-            document_id TEXT NOT NULL REFERENCES documents(id),
-            title TEXT,
-            content_json TEXT,
-            content_markdown TEXT,
-            original_content_json TEXT,
-            template_slug TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            deleted_at TEXT,
-            extra_json TEXT,
-            chat_url TEXT,
-            api_snapshot TEXT
-        );
-
-        CREATE INDEX idx_transcript_utterances_document ON transcript_utterances(document_id);
-
-        CREATE INDEX idx_transcript_utterances_speaker_name ON transcript_utterances(speaker_name);
-
-        CREATE INDEX idx_panels_document_id ON panels(document_id);
-
-        CREATE TABLE panel_sync_log (
-            document_id TEXT PRIMARY KEY REFERENCES documents(id),
-            status TEXT NOT NULL,
-            last_attempted_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE INDEX idx_chunks_document ON chunks(document_id);
-        CREATE INDEX idx_chunks_source_type ON chunks(source_type);
-
-        CREATE VIRTUAL TABLE transcript_fts USING fts5(
-            text,
-            content='transcript_utterances',
-            content_rowid='rowid'
-        );
-
-        CREATE VIRTUAL TABLE notes_fts USING fts5(
-            notes_plain,
-            notes_markdown,
-            content='documents',
-            content_rowid='rowid'
-        );
-
-        CREATE VIRTUAL TABLE titles_fts USING fts5(
-            title,
-            content='documents',
-            content_rowid='rowid'
-        );
-
-        CREATE VIRTUAL TABLE panels_fts USING fts5(
-            content_markdown,
-            content='panels',
-            content_rowid='rowid'
-        );
-
-        -- Must mirror v015_fts_triggers.sql and v016_titles_fts.sql. Without
-        -- these, rows inserted below
-        -- land in the source tables and never reach the index, so every search
-        -- assertion in tests/ would be testing an empty index.
-        CREATE TRIGGER transcript_utterances_ai AFTER INSERT ON transcript_utterances BEGIN
-            INSERT INTO transcript_fts(rowid, text) VALUES (new.rowid, new.text);
-        END;
-        CREATE TRIGGER transcript_utterances_ad AFTER DELETE ON transcript_utterances BEGIN
-            INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES('delete', old.rowid, old.text);
-        END;
-        CREATE TRIGGER transcript_utterances_au AFTER UPDATE ON transcript_utterances BEGIN
-            INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES('delete', old.rowid, old.text);
-            INSERT INTO transcript_fts(rowid, text) VALUES (new.rowid, new.text);
-        END;
-
-        CREATE TRIGGER panels_ai AFTER INSERT ON panels BEGIN
-            INSERT INTO panels_fts(rowid, content_markdown) VALUES (new.rowid, new.content_markdown);
-        END;
-        CREATE TRIGGER panels_ad AFTER DELETE ON panels BEGIN
-            INSERT INTO panels_fts(panels_fts, rowid, content_markdown)
-                VALUES('delete', old.rowid, old.content_markdown);
-        END;
-        CREATE TRIGGER panels_au AFTER UPDATE ON panels BEGIN
-            INSERT INTO panels_fts(panels_fts, rowid, content_markdown)
-                VALUES('delete', old.rowid, old.content_markdown);
-            INSERT INTO panels_fts(rowid, content_markdown) VALUES (new.rowid, new.content_markdown);
-        END;
-
-        CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
-            INSERT INTO titles_fts(rowid, title) VALUES (new.rowid, new.title);
-        END;
-        CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
-            INSERT INTO titles_fts(titles_fts, rowid, title) VALUES('delete', old.rowid, old.title);
-        END;
-        CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
-            INSERT INTO titles_fts(titles_fts, rowid, title) VALUES('delete', old.rowid, old.title);
-            INSERT INTO titles_fts(rowid, title) VALUES (new.rowid, new.title);
-        END;
-
-        -- Set schema version via user_version pragma (used by rusqlite_migration)
-        -- to the version this schema mirrors. Trailing behind the latest
-        -- migration only works while every later migration is idempotent
-        -- against this schema; v017's ALTER TABLE ADD COLUMN is not, so keep
-        -- this current when adding migrations.
-        PRAGMA user_version = 17;
-        "#,
-    )
-    .unwrap();
+    Migrations::new(MIGRATION_SQL.iter().copied().map(M::up).collect())
+        .to_latest(conn)
+        .unwrap();
 }
 
 fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
@@ -540,8 +330,8 @@ fn insert_test_data(conn: &Connection, state: &serde_json::Value) {
         }
     }
 
-    // transcript_fts and panels_fts are already populated: the triggers in
-    // create_test_tables indexed each row as it was inserted, which is the same
+    // transcript_fts and panels_fts are already populated: the triggers
+    // installed by v015 indexed each row as it was inserted, which is the same
     // path production takes. Rebuilding them here would paper over a broken
     // trigger, which is the mistake #85 documents.
     //
