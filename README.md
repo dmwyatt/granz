@@ -145,6 +145,12 @@ change its recorded account, and rows synced with a token that is not a
 decodable Granola JWT (arbitrary `--token` values) get no source account.
 `grans admin db info` lists the accounts seen.
 
+If a document sync fetches zero documents while the local database is
+populated, sync warns and names the account it synced as: that pattern
+usually means the account's notes moved elsewhere (Granola's
+account-to-account import empties the old account) and grans is still
+signed in as the old one.
+
 ### Signing in
 
 ```bash
