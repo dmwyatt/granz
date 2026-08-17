@@ -66,9 +66,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Auth commands (login, status, logout) don't need a database
+    // Auth commands (login, status, logout). Status reads the accounts log
+    // for the account email, so it takes the db path; none of them need a
+    // live connection.
     if let Commands::Auth { action } = &cli.command {
-        commands::auth::run(action, &ctx.tz)?;
+        commands::auth::run(action, &ctx.tz, cli.db.as_deref())?;
         return Ok(());
     }
 

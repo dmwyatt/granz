@@ -84,7 +84,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 
 **Auth Commands** (Granola sign-in):
 - `auth login` - Sign in to Granola and store credentials for grans
-- `auth status` - Show whether grans has its own session, and its expiry
+- `auth status` - Show whether grans has its own session, which account it belongs to, and its expiry
 - `auth logout` - Remove the stored credentials
 
 **Admin Commands** (maintenance):
@@ -150,12 +150,18 @@ change its recorded account, and rows synced with a token that is not a
 decodable Granola JWT (arbitrary `--token` values) get no source account.
 `grans admin db info` lists the accounts seen.
 
+If a document sync fetches zero documents while the local database is
+populated, sync warns and names the account it synced as: that pattern
+usually means the account's notes moved elsewhere (Granola's
+account-to-account import empties the old account) and grans is still
+signed in as the old one.
+
 ### Signing in
 
 ```bash
 grans auth login              # Sign in and store credentials for grans
 grans auth login --provider microsoft
-grans auth status             # Show whether grans has a session, and its expiry
+grans auth status             # Show the session: account, storage, expiry
 grans auth logout             # Remove the stored credentials
 ```
 

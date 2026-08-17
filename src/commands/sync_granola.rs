@@ -9,6 +9,7 @@ use rusqlite::Connection;
 
 use crate::api::ApiClient;
 use crate::cli::args::SyncAction;
+use crate::db::accounts;
 use crate::db::sync::{
     self, SyncStats, upsert_calendar_events, upsert_calendars_from_selection, upsert_documents,
     upsert_people, upsert_recipes, upsert_templates,
@@ -263,6 +264,7 @@ fn sync_documents(
     spinner.finish_and_clear();
     debug!("Fetched {} documents from API", documents.len());
     eprintln!("[grans] Fetched {} documents", documents.len());
+    warn_if_source_account_empty(conn, documents.len(), source_account.as_deref());
 
     let stats = if dry_run {
         SyncStats {
@@ -291,6 +293,7 @@ fn sync_documents_with_client(
     source_account: Option<&str>,
 ) -> Result<SyncStats> {
     let documents = client.get_documents()?;
+    warn_if_source_account_empty(conn, documents.len(), source_account);
 
     if dry_run {
         return Ok(SyncStats {
@@ -576,6 +579,132 @@ fn sync_recipes_with_client(
 // ============================================================================
 // Output helpers
 // ============================================================================
+
+/// The empty-account tripwire: a warning when the API returned no documents
+/// at all while the local database is populated. That combination is the
+/// signature of syncing as an account whose notes moved elsewhere (Granola's
+/// account-to-account import empties the old account), which otherwise reads
+/// as an ordinary "0 inserted, 0 updated" sync forever.
+///
+/// Returns the warning line, or None when the sync looks normal.
+///
+/// Evaluating it must never fail a sync, so [`warn_if_source_account_empty`]
+/// is the caller: it prints a hit and only logs evaluation errors.
+fn empty_account_warning(
+    conn: &Connection,
+    fetched: usize,
+    source_account: Option<&str>,
+) -> Result<Option<String>> {
+    if fetched > 0 {
+        return Ok(None);
+    }
+
+    let local: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
+    if local == 0 {
+        return Ok(None);
+    }
+
+    let account = match source_account {
+        Some(sub) => match accounts::email_for(conn, sub)? {
+            Some(email) => accounts::account_label(&email, sub),
+            None => sub.to_string(),
+        },
+        None => "the current account".to_string(),
+    };
+
+    Ok(Some(format!(
+        "Warning: {} returned no documents at all, but this database holds {}. \
+         If you recently switched Granola accounts, run `grans auth login` to \
+         sign in as the new one.",
+        account, local
+    )))
+}
+
+/// Print the empty-account warning when it applies. A diagnostic must not
+/// fail the sync, so evaluation errors are logged rather than propagated.
+fn warn_if_source_account_empty(conn: &Connection, fetched: usize, source_account: Option<&str>) {
+    match empty_account_warning(conn, fetched, source_account) {
+        Ok(Some(warning)) => eprintln!("[grans] {}", warning),
+        Ok(None) => {}
+        Err(e) => debug!("could not evaluate the empty-account warning: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::accounts;
+    use crate::db::test_fixtures::build_test_db;
+    use serde_json::json;
+
+    fn populated_db() -> Connection {
+        build_test_db(&json!({
+            "documents": {
+                "doc-1": {"id": "doc-1", "title": "First"},
+                "doc-2": {"id": "doc-2", "title": "Second"}
+            }
+        }))
+    }
+
+    #[test]
+    fn no_warning_when_documents_were_fetched() {
+        let conn = populated_db();
+
+        let warning = empty_account_warning(&conn, 42, Some("user_01AAA")).unwrap();
+
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn no_warning_when_the_local_database_is_empty_too() {
+        // A brand-new user with no meetings: zero documents is plausible,
+        // not suspicious.
+        let conn = build_test_db(&json!({}));
+
+        let warning = empty_account_warning(&conn, 0, Some("user_01AAA")).unwrap();
+
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn zero_fetched_against_a_populated_db_warns_and_names_the_account() {
+        let conn = populated_db();
+        accounts::record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com").unwrap();
+
+        let warning = empty_account_warning(&conn, 0, Some("user_01AAA"))
+            .unwrap()
+            .expect("this sync pattern must warn");
+
+        assert!(warning.contains("a@example.com (user_01AAA)"));
+        assert!(warning.contains("2"));
+        assert!(warning.contains("grans auth login"));
+    }
+
+    #[test]
+    fn unrecorded_account_is_named_by_id_alone() {
+        let conn = populated_db();
+
+        let warning = empty_account_warning(&conn, 0, Some("user_01ZZZ"))
+            .unwrap()
+            .expect("this sync pattern must warn");
+
+        assert!(warning.contains("user_01ZZZ"));
+        assert!(warning.contains("grans auth login"));
+    }
+
+    #[test]
+    fn unknown_account_still_warns() {
+        // An undecodable token (arbitrary --token value) has no identity,
+        // but the zero-against-populated pattern is suspicious regardless.
+        let conn = populated_db();
+
+        let warning = empty_account_warning(&conn, 0, None)
+            .unwrap()
+            .expect("this sync pattern must warn");
+
+        assert!(warning.contains("grans auth login"));
+    }
+}
 
 fn print_sync_stats(entity: &str, stats: &SyncStats, dry_run: bool, mode: OutputMode) {
     match mode {
