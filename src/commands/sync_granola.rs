@@ -85,7 +85,12 @@ pub fn run(
 }
 
 /// Sync all entity types
-fn sync_all(conn: &Connection, dry_run: bool, token: Option<&str>, mode: OutputMode) -> Result<()> {
+pub(super) fn sync_all(
+    conn: &Connection,
+    dry_run: bool,
+    token: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     debug!("Starting full sync (dry_run={})", dry_run);
     eprintln!("[grans] Starting full sync from Granola API...");
 

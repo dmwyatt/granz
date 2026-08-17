@@ -104,6 +104,12 @@ pub(crate) fn execution_providers() -> Vec<ort::execution_providers::ExecutionPr
     providers
 }
 
+/// Whether this binary was built with a hardware execution provider
+/// (cuda/directml/coreml). When false, embedding runs on CPU.
+pub(crate) fn has_hardware_provider() -> bool {
+    !execution_providers().is_empty()
+}
+
 impl FastEmbedModel {
     pub fn new() -> Result<Self> {
         set_hf_cache_dir()?;
