@@ -449,6 +449,10 @@ pub enum EmbedAction {
 
 // === Sync Subcommands ===
 
+/// Default delay between per-document API requests, shared by the transcript
+/// and panel sync legs.
+pub const DEFAULT_SYNC_DELAY_MS: u64 = 1500;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum SyncAction {
     /// Sync documents (meetings) from Granola API
@@ -469,7 +473,7 @@ pub enum SyncAction {
         since: Option<String>,
 
         /// Delay between API requests in milliseconds
-        #[arg(long, default_value = "1500")]
+        #[arg(long, default_value_t = DEFAULT_SYNC_DELAY_MS)]
         delay_ms: u64,
 
         /// Retry documents that previously failed or had no transcript
@@ -504,7 +508,7 @@ pub enum SyncAction {
         since: Option<String>,
 
         /// Delay between API requests in milliseconds
-        #[arg(long, default_value = "1500")]
+        #[arg(long, default_value_t = DEFAULT_SYNC_DELAY_MS)]
         delay_ms: u64,
 
         /// Retry documents that previously failed or had no panels
