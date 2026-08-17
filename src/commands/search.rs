@@ -20,6 +20,7 @@ use crate::models::Document;
 use crate::output::format::OutputMode;
 use crate::query::dates::DateRange;
 use crate::query::filter::{DEFAULT_SEARCH_TARGETS, SearchTarget, targets_to_flag_value};
+use crate::query::rerank::RejectedByScore;
 
 /// Filter values that affect the match count, kept so the grep cross-link
 /// can reproduce that count. Dates and the meeting filter are echoed as the
@@ -150,13 +151,14 @@ pub fn search(
     let ordered =
         crate::query::rerank::order_candidates(conn, query, &ranking, reranker, opts.min_score)?;
 
-    let ids: Vec<String> = ordered.iter().map(|(id, _)| id.clone()).collect();
+    let ids: Vec<String> = ordered.docs.iter().map(|(id, _)| id.clone()).collect();
     let docs = crate::db::meetings::get_meetings_by_ids(conn, &ids)?;
     let mut doc_by_id: std::collections::HashMap<String, Document> = docs
         .into_iter()
         .filter_map(|d| d.id.clone().map(|id| (id, d)))
         .collect();
     let ordered_docs: Vec<(Document, Option<f32>)> = ordered
+        .docs
         .into_iter()
         .filter_map(|(id, score)| doc_by_id.remove(&id).map(|doc| (doc, score)))
         .collect();
@@ -183,8 +185,33 @@ pub fn search(
         opts.limit,
     )?;
 
-    render_ranked_meeting_list(&shaped, query, ranking.keyword_total, &opts, ctx);
+    render_ranked_meeting_list(
+        &shaped,
+        query,
+        ranking.keyword_total,
+        ordered.rejected,
+        &opts,
+        ctx,
+    );
     Ok(())
+}
+
+/// The line shown when nothing survives to display. A `min_score` that
+/// rejected candidates gets named along with the best score it turned
+/// away, so a too-high threshold never reads as a query nothing matched.
+fn no_matches_line(
+    query: &str,
+    min_score: Option<f32>,
+    rejected: Option<RejectedByScore>,
+) -> String {
+    match (min_score, rejected) {
+        (Some(min), Some(r)) => format!(
+            "No matches for \"{}\" at --min-score {} ({} candidate(s) scored below it; \
+             best was {:.2}).",
+            query, min, r.count, r.best
+        ),
+        _ => format!("No matches for \"{}\".", query),
+    }
 }
 
 /// Header for ranked results: claims only what is shown, never a total.
@@ -242,6 +269,7 @@ fn render_ranked_meeting_list(
     shaped: &[crate::query::shape::ShapedMeeting],
     query: &str,
     keyword_total: usize,
+    rejected: Option<RejectedByScore>,
     opts: &SearchOptions,
     ctx: &RunContext,
 ) {
@@ -259,7 +287,7 @@ fn render_ranked_meeting_list(
         }
         OutputMode::Tty => {
             if shaped.is_empty() {
-                println!("No matches for \"{}\".", query);
+                println!("{}", no_matches_line(query, opts.min_score, rejected));
             } else {
                 println!("{}\n", ranked_header(shaped.len(), query));
                 print_shaped_cards(shaped, ctx);
@@ -308,6 +336,43 @@ mod tests {
         let mut echo = FilterEcho::default();
         f(&mut echo);
         echo
+    }
+
+    #[test]
+    fn no_matches_line_names_the_threshold_that_emptied_the_results() {
+        // Without this the user cannot tell a too-high threshold from a
+        // query nothing matched, and the fix for each is different.
+        let line = no_matches_line(
+            "quarterly planning",
+            Some(0.9),
+            Some(RejectedByScore {
+                count: 12,
+                best: 0.41,
+            }),
+        );
+        assert_eq!(
+            line,
+            "No matches for \"quarterly planning\" at --min-score 0.9 \
+             (12 candidate(s) scored below it; best was 0.41)."
+        );
+    }
+
+    #[test]
+    fn no_matches_line_stays_plain_without_a_threshold() {
+        assert_eq!(
+            no_matches_line("kumquat", None, None),
+            "No matches for \"kumquat\"."
+        );
+    }
+
+    #[test]
+    fn no_matches_line_stays_plain_when_the_threshold_rejected_nothing() {
+        // An empty result set with a threshold that dropped nothing is an
+        // empty result set, and saying otherwise would misdirect.
+        assert_eq!(
+            no_matches_line("kumquat", Some(0.5), None),
+            "No matches for \"kumquat\"."
+        );
     }
 
     #[test]
