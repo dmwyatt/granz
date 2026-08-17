@@ -23,8 +23,8 @@ cargo build --release --features coreml   # macOS Apple Silicon
 ## Quick Start
 
 ```bash
-# Sync your data from Granola (requires being logged into Granola app)
-grans sync
+# Sync everything from Granola (requires being logged into Granola app)
+grans sync --all
 
 # Now you can query your meetings
 grans list
@@ -97,7 +97,12 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 Sync your data from the Granola API to your local database.
 
 ```bash
-# Full sync (all data types)
+# Complete sync: entities, then transcripts, then panels, then embeddings.
+# Transcript and panel backfill costs ~1.5s per missing document.
+grans sync --all
+grans sync --all --retry          # Also re-attempt previously failed documents
+
+# Quick entity sync (documents, people, calendars, templates, recipes)
 grans sync
 
 # Sync specific data types
@@ -344,7 +349,7 @@ grans embed clear --count 10
 grans embed clear --yes && grans embed --yes
 ```
 
-Embeddings are built by this command or during `grans sync --embed`; search only reads them. Run one of the two after syncing new content to make it searchable semantically.
+Embeddings are built by this command, by `grans sync --all`, or during `grans sync transcripts --embed`; search only reads them. Run one of these after syncing new content to make it searchable semantically.
 
 ### List Meetings
 
@@ -522,16 +527,14 @@ Once you've done this work on one machine, Dropbox sync lets you share the resul
 **Initial setup (on your primary machine):**
 
 ```bash
-# 1. Sync all data including transcripts from Granola API
-grans sync
+# 1. Sync everything from the Granola API, including transcripts,
+#    panels, and embeddings (slow first time)
+grans sync --all
 
-# 2. Build embeddings (slow first time)
-grans embed -y
-
-# 3. Connect to Dropbox (one-time OAuth)
+# 2. Connect to Dropbox (one-time OAuth)
 grans dropbox init
 
-# 4. Upload your database
+# 3. Upload your database
 grans dropbox push
 ```
 
@@ -552,7 +555,7 @@ grans search "deployment"
 
 ```bash
 # After syncing new data on your primary machine
-grans sync
+grans sync --all
 grans dropbox push
 
 # On other machines

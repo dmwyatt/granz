@@ -138,7 +138,9 @@ Migrations live in `src/db/migrations/` using `rusqlite_migration`. To add a sch
    M::up(include_str!("v00X_description.sql")),
    ```
 4. Update `let total = N;` count in `open_and_migrate()`
-5. Update `tests/common/mod.rs` `create_test_tables()` to match new schema
+5. Add the migration's `include_str!` entry to `MIGRATION_SQL` in
+   `tests/common/mod.rs` (the integration tests replay the real migration
+   files; a drift guard fails every `TestEnv` if the entry is missing)
 6. Add migration tests in `src/db/migrations/mod.rs`
 
 Schema version is tracked via SQLite's `PRAGMA user_version`. The system auto-backs up the database before applying migrations.

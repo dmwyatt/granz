@@ -435,3 +435,57 @@ fn sync_transcripts_positional_allows_dry_run() {
         _ => panic!("expected sync subcommand"),
     }
 }
+
+#[test]
+fn sync_all_flag_parses() {
+    let cli = Cli::try_parse_from(["grans", "sync", "--all"]).unwrap();
+    match &cli.command {
+        Commands::Sync {
+            action, all, retry, ..
+        } => {
+            assert!(action.is_none());
+            assert!(*all);
+            assert!(!*retry);
+        }
+        _ => panic!("expected sync subcommand"),
+    }
+}
+
+#[test]
+fn sync_all_allows_retry() {
+    let cli = Cli::try_parse_from(["grans", "sync", "--all", "--retry"]).unwrap();
+    match &cli.command {
+        Commands::Sync { all, retry, .. } => {
+            assert!(*all);
+            assert!(*retry);
+        }
+        _ => panic!("expected sync subcommand"),
+    }
+}
+
+#[test]
+fn sync_retry_requires_all() {
+    let result = Cli::try_parse_from(["grans", "sync", "--retry"]);
+    assert!(result.is_err(), "--retry without --all should be rejected");
+}
+
+#[test]
+fn sync_all_conflicts_with_subcommand() {
+    let result = Cli::try_parse_from(["grans", "sync", "--all", "transcripts"]);
+    assert!(
+        result.is_err(),
+        "--all combined with an entity subcommand should be rejected"
+    );
+}
+
+#[test]
+fn sync_all_allows_dry_run() {
+    let cli = Cli::try_parse_from(["grans", "sync", "--all", "--dry-run"]).unwrap();
+    match &cli.command {
+        Commands::Sync { all, dry_run, .. } => {
+            assert!(*all);
+            assert!(*dry_run);
+        }
+        _ => panic!("expected sync subcommand"),
+    }
+}
