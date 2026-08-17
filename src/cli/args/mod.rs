@@ -664,7 +664,11 @@ pub enum AuthAction {
         #[arg(long)]
         refresh_token_stdin: bool,
     },
-    /// Show whether grans has its own Granola session
+    /// Show whether grans has its own Granola session, and which account it is
+    ///
+    /// The account email comes from the local accounts log when this database
+    /// has synced from the account before; otherwise one get-user-info API
+    /// call fetches it.
     Status,
     /// Remove grans's stored credentials
     Logout,

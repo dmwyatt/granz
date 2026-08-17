@@ -1,14 +1,18 @@
 //! `grans auth` — manage grans's own Granola session.
 
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{FixedOffset, TimeZone, Utc};
+use log::debug;
 
 use crate::api::credential_store::CredentialStore;
 use crate::api::credentials::GranolaCredentials;
 use crate::api::granola_auth::{self, Provider};
+use crate::api::{ApiClient, jwt, resolve_token};
 use crate::cli::args::{AuthAction, AuthProvider};
+use crate::db::accounts::account_label;
 use crate::pkce::PkceChallenge;
 
 impl From<AuthProvider> for Provider {
@@ -21,13 +25,13 @@ impl From<AuthProvider> for Provider {
 }
 
 /// Run `grans auth` subcommands.
-pub fn run(action: &AuthAction, tz: &FixedOffset) -> Result<()> {
+pub fn run(action: &AuthAction, tz: &FixedOffset, db_path: Option<&Path>) -> Result<()> {
     match action {
         AuthAction::Login {
             provider,
             refresh_token_stdin,
         } => login(*provider, *refresh_token_stdin),
-        AuthAction::Status => status(tz),
+        AuthAction::Status => status(tz, db_path),
         AuthAction::Logout => logout(),
     }
 }
@@ -154,7 +158,7 @@ fn print_callback_instructions() {
     println!();
 }
 
-fn status(tz: &FixedOffset) -> Result<()> {
+fn status(tz: &FixedOffset, db_path: Option<&Path>) -> Result<()> {
     let (store, stored) = CredentialStore::open()?;
 
     let Some(credentials) = stored else {
@@ -165,6 +169,22 @@ fn status(tz: &FixedOffset) -> Result<()> {
     };
 
     println!("Signed in.");
+
+    let cached_sub = credentials
+        .access_token
+        .as_deref()
+        .and_then(jwt::decode_sub);
+    let account = describe_account(
+        cached_sub.as_deref(),
+        |sub| stored_account_email(db_path, sub),
+        remote_identity,
+    );
+    println!("  Account:     {}", account);
+
+    // The network fallback refreshes an expired access token and persists
+    // the result, so re-read before describing expiry.
+    let credentials = store.load()?.unwrap_or(credentials);
+
     println!("  Credentials: {}", store.describe());
 
     if let Some(session_id) = &credentials.session_id {
@@ -178,6 +198,100 @@ fn status(tz: &FixedOffset) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Identity learned from the network fallback: the `sub` decoded from the
+/// resolved token and the email get-user-info reported.
+struct RemoteIdentity {
+    sub: Option<String>,
+    email: Option<String>,
+}
+
+/// Describe which Granola account the session belongs to.
+///
+/// Offline first: the cached access token's JWT `sub` joined against the
+/// local accounts log. Only when the email is not known locally does this
+/// fall back to `fetch_remote` (one get-user-info call). Every failure
+/// degrades to showing what is known rather than erroring: status must
+/// still report on a machine that is offline or has never synced.
+fn describe_account(
+    cached_sub: Option<&str>,
+    local_email: impl Fn(&str) -> Option<String>,
+    fetch_remote: impl FnOnce() -> Result<RemoteIdentity>,
+) -> String {
+    if let Some(sub) = cached_sub {
+        if let Some(email) = local_email(sub) {
+            return account_label(&email, sub);
+        }
+    }
+
+    match fetch_remote() {
+        Ok(remote) => {
+            let sub = remote.sub.as_deref().or(cached_sub);
+            match (remote.email, sub) {
+                (Some(email), Some(sub)) => account_label(&email, sub),
+                (Some(email), None) => email,
+                (None, Some(sub)) => {
+                    format!("{} (email unknown: get-user-info returned none)", sub)
+                }
+                (None, None) => "unknown (the token carries no identity and get-user-info \
+                                 returned no email)"
+                    .to_string(),
+            }
+        }
+        Err(e) => match cached_sub {
+            Some(sub) => format!("{} (email unknown: {:#})", sub, e),
+            None => format!("unknown ({:#})", e),
+        },
+    }
+}
+
+/// Email the local accounts log records for this account, or None when the
+/// database, its accounts table, or the account itself is absent. A miss is
+/// never an error, it just falls through to the network path: status must
+/// still report on a machine that has never synced.
+fn stored_account_email(db_path: Option<&Path>, sub: &str) -> Option<String> {
+    let path = match db_path {
+        Some(path) => path.to_path_buf(),
+        None => match crate::db::connection::default_db_path() {
+            Ok(path) => path,
+            Err(e) => {
+                debug!("no database path to read the accounts log from: {}", e);
+                return None;
+            }
+        },
+    };
+
+    let conn = match rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(e) => {
+            debug!("accounts log unavailable at {}: {}", path.display(), e);
+            return None;
+        }
+    };
+
+    match crate::db::accounts::email_for(&conn, sub) {
+        Ok(email) => email,
+        Err(e) => {
+            debug!("accounts log unreadable: {}", e);
+            None
+        }
+    }
+}
+
+/// Resolve the stored session to a live access token and ask Granola whose
+/// it is. Refreshes (and persists) the token when the cached one expired.
+fn remote_identity() -> Result<RemoteIdentity> {
+    let token = resolve_token(None)?;
+    let sub = jwt::decode_sub(&token);
+    let info = ApiClient::new(token)?.get_user_info()?;
+    Ok(RemoteIdentity {
+        sub,
+        email: info.email,
+    })
 }
 
 /// Describe the access token's freshness without revealing any of it.
@@ -235,6 +349,79 @@ mod tests {
             expires_at,
             session_id: None,
         }
+    }
+
+    // --- describe_account ---
+
+    fn no_local(_sub: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn account_known_locally_never_touches_the_network() {
+        let described = describe_account(
+            Some("user_01AAA"),
+            |sub| (sub == "user_01AAA").then(|| "a@example.com".to_string()),
+            || panic!("must not fetch remotely when the email is known locally"),
+        );
+
+        assert_eq!(described, "a@example.com (user_01AAA)");
+    }
+
+    #[test]
+    fn local_miss_falls_back_to_the_network() {
+        let described = describe_account(Some("user_01AAA"), no_local, || {
+            Ok(RemoteIdentity {
+                sub: Some("user_01AAA".to_string()),
+                email: Some("a@example.com".to_string()),
+            })
+        });
+
+        assert_eq!(described, "a@example.com (user_01AAA)");
+    }
+
+    #[test]
+    fn network_failure_still_shows_the_cached_id() {
+        let described = describe_account(Some("user_01AAA"), no_local, || {
+            Err(anyhow::anyhow!("network unreachable"))
+        });
+
+        assert!(described.contains("user_01AAA"));
+        assert!(described.contains("network unreachable"));
+    }
+
+    #[test]
+    fn no_cached_token_resolves_identity_remotely() {
+        let described = describe_account(None, no_local, || {
+            Ok(RemoteIdentity {
+                sub: Some("user_01BBB".to_string()),
+                email: Some("b@example.com".to_string()),
+            })
+        });
+
+        assert_eq!(described, "b@example.com (user_01BBB)");
+    }
+
+    #[test]
+    fn nothing_resolvable_reports_unknown_with_the_reason() {
+        let described =
+            describe_account(None, no_local, || Err(anyhow::anyhow!("refresh rejected")));
+
+        assert!(described.starts_with("unknown"));
+        assert!(described.contains("refresh rejected"));
+    }
+
+    #[test]
+    fn emailless_remote_identity_shows_the_id_it_has() {
+        let described = describe_account(Some("user_01AAA"), no_local, || {
+            Ok(RemoteIdentity {
+                sub: Some("user_01AAA".to_string()),
+                email: None,
+            })
+        });
+
+        assert!(described.contains("user_01AAA"));
+        assert!(described.contains("email unknown"));
     }
 
     #[test]

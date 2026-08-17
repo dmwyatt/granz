@@ -7,7 +7,7 @@
 //! under which account.
 
 use anyhow::Result;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 /// Tables carrying a `source_account_id` column. Everything else that is
 /// account-tied hangs off `documents` and derives provenance through
@@ -38,6 +38,17 @@ pub struct AccountRecord {
 /// Human-readable account label: the email with the WorkOS id alongside.
 pub fn account_label(email: &str, account_id: &str) -> String {
     format!("{} ({})", email, account_id)
+}
+
+/// Email recorded for an account, or None when the log has no such account.
+pub fn email_for(conn: &Connection, account_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT email FROM accounts WHERE account_id = ?1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// Whether this account has been recorded in the log before.
@@ -167,6 +178,25 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn email_for_returns_the_recorded_email() {
+        let conn = db_with_rows();
+        record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com").unwrap();
+
+        assert_eq!(
+            email_for(&conn, "user_01AAA").unwrap(),
+            Some("a@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn email_for_returns_none_for_an_unrecorded_account() {
+        let conn = db_with_rows();
+        record_account(&conn, "user_01AAA", Some("uuid-1"), "a@example.com").unwrap();
+
+        assert_eq!(email_for(&conn, "user_01ZZZ").unwrap(), None);
     }
 
     #[test]
