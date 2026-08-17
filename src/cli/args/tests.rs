@@ -73,6 +73,41 @@ fn search_min_score_parses() {
 }
 
 #[test]
+fn search_min_score_accepts_the_whole_probability_range() {
+    for value in ["0", "0.0", "1", "1.0", "0.5"] {
+        let result = Cli::try_parse_from(["grans", "search", "q", "--min-score", value]);
+        assert!(result.is_ok(), "--min-score {value} should parse");
+    }
+}
+
+#[test]
+fn search_min_score_rejects_values_outside_the_probability_range() {
+    // Rerank scores are sigmoid probabilities, so a threshold outside
+    // [0, 1] can only reject every candidate. Failing at parse time beats
+    // an empty result set that reads like an empty corpus.
+    // `--min-score=<v>` rather than a separate value: clap reads a leading
+    // `-0.1` as a flag before any value parser sees it.
+    for value in ["5", "-0.1", "1.1", "nan", "inf"] {
+        let err = Cli::try_parse_from(["grans", "search", "q", &format!("--min-score={value}")])
+            .expect_err(&format!("--min-score {value} should be rejected"));
+        assert!(
+            err.to_string().contains("between 0.0 and 1.0"),
+            "error for {value} should name the valid range, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn search_min_score_rejects_non_numbers() {
+    let err = Cli::try_parse_from(["grans", "search", "q", "--min-score", "high"])
+        .expect_err("--min-score high should be rejected");
+    assert!(
+        err.to_string().contains("not a number"),
+        "error should say the value is not a number, got: {err}"
+    );
+}
+
+#[test]
 fn search_min_score_conflicts_with_fast() {
     // Only the rerank stage produces the relevance score --min-score
     // thresholds, and --fast skips that stage.
