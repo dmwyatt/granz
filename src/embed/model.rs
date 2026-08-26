@@ -110,6 +110,19 @@ pub(crate) fn has_hardware_provider() -> bool {
     !execution_providers().is_empty()
 }
 
+/// Whether a CPU embedding run is worth warning about.
+///
+/// It is not on macOS, even though macOS does embed on CPU. The only
+/// hardware provider Apple Silicon offers is CoreML, and CoreML loses to
+/// the CPU on this model (see the `coreml` feature note in Cargo.toml), so
+/// release builds leave it off on purpose. Pointing a macOS user at the
+/// GPU build features would be advice to go build a slower binary. A macOS
+/// user who opted into `--features coreml` anyway is excluded by the
+/// hardware-provider check and gets no warning either.
+pub(crate) fn should_warn_cpu_only() -> bool {
+    !has_hardware_provider() && !cfg!(target_os = "macos")
+}
+
 impl FastEmbedModel {
     pub fn new() -> Result<Self> {
         set_hf_cache_dir()?;

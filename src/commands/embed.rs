@@ -562,7 +562,7 @@ pub fn run_after_sync(conn: &Connection, mode: OutputMode) -> Result<()> {
             "[grans] Building embeddings for {} chunks...",
             format_number(status.pending_chunks)
         );
-        if !embed::model::has_hardware_provider() {
+        if embed::model::should_warn_cpu_only() {
             eprintln!(
                 "[grans] Note: CPU-only build; embedding runs ~25x slower than a GPU build \
                  (see README for GPU build features)."
