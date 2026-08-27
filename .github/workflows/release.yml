@@ -85,11 +85,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      # No hardware execution provider here, deliberately. CoreML is the only
+      # one Apple Silicon offers and it loses to the CPU on nomic-embed-text-v1.5
+      # (it claims 470 of 1192 nodes across 73 partitions, so inference
+      # ping-pongs between CoreML and CPU). See the `coreml` feature note in
+      # Cargo.toml and #142; do not add --features coreml back without numbers.
       - name: Build
         env:
           GRANS_BUILD_DATE: ${{ needs.version.outputs.calver }}
           GRANS_BUILD_SHA: ${{ needs.version.outputs.sha_short }}
-        run: cargo build --profile ci-release --target aarch64-apple-darwin --features coreml
+        run: cargo build --profile ci-release --target aarch64-apple-darwin
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

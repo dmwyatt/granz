@@ -17,8 +17,15 @@ cargo build --release
 # With GPU acceleration for semantic search:
 cargo build --release --features directml # Windows (any GPU, recommended)
 cargo build --release --features cuda     # NVIDIA (requires CUDA toolkit + cuDNN)
-cargo build --release --features coreml   # macOS Apple Silicon
 ```
+
+On macOS, build plain — the CPU is the fastest option grans has on Apple Silicon.
+There is a `coreml` feature, but CoreML is *slower* than the CPU on
+nomic-embed-text-v1.5 (it supports only 470 of the model's 1,192 graph nodes and
+splits them across 73 partitions, so inference spends its time copying tensors back
+and forth rather than computing). Release builds ship without it. Finding a macOS
+path that actually beats the CPU is tracked in
+[#142](https://github.com/dmwyatt/granz/issues/142).
 
 ## Quick Start
 
