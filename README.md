@@ -733,6 +733,10 @@ grans update --wait
 grans update --wait --timeout 300
 ```
 
+Waiting for a build counts as agreeing to install it, so grans installs the
+finished release without asking again. Without a wait, it still confirms before
+downloading.
+
 **Private Repositories**: For private repositories, grans will prompt to use your `gh` CLI credentials if available. For non-interactive/scripted usage:
 
 ```bash

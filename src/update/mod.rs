@@ -3,6 +3,8 @@
 pub mod download;
 pub mod github;
 pub mod platform;
+#[cfg(test)]
+pub mod test_support;
 pub mod wait;
 
 use thiserror::Error;

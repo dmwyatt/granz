@@ -10,7 +10,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::update::download::{
     current_binary_hash, download_asset, replace_binary, verify_checksum,
 };
-use crate::update::github::{BuildStatus, Release, find_asset};
+use crate::update::github::{
+    BuildStatus, GitHubApi, RealGitHubApi, Release, WorkflowRun, find_asset,
+};
 use crate::update::platform::asset_name;
 use crate::update::wait::{WaitConfig, display_build_info, wait_for_build};
 use crate::update::{UpdateError, get_github_token_from_env, get_github_token_from_gh_cli};
@@ -28,6 +30,26 @@ fn create_spinner(message: &str) -> ProgressBar {
     pb
 }
 
+/// How `grans update` was invoked, as far as the build-status path cares.
+#[derive(Debug, Clone, Copy)]
+pub struct UpdateOptions {
+    /// Report what is available, install nothing.
+    pub check_only: bool,
+    /// Wait out an in-progress build without asking (`--wait`).
+    pub wait_for_build: bool,
+    /// Give up on an in-progress build after this long.
+    pub timeout_secs: u64,
+}
+
+/// The latest release, plus what it took to get it.
+pub struct ReleaseFetch {
+    pub release: Release,
+    /// The token the successful calls used, if any.
+    pub token: Option<String>,
+    /// Whether we sat through an in-progress build to reach this release.
+    pub waited_for_build: bool,
+}
+
 /// Run the update command.
 pub fn run(
     check_only: bool,
@@ -39,19 +61,23 @@ pub fn run(
     println!("Current version: {}", current_version);
     println!();
 
+    let options = UpdateOptions {
+        check_only,
+        wait_for_build: wait_for_build_flag,
+        timeout_secs,
+    };
+
     // Get token from environment if available, or from --use-gh-auth flag
     let mut token = get_initial_token(use_gh_auth);
 
     let spinner = create_spinner("Checking build status...");
 
     // Try to check build status and fetch release, prompting for auth if needed
-    let (release, token) = fetch_with_auth_fallback(
-        &mut token,
-        check_only,
-        wait_for_build_flag,
-        timeout_secs,
-        &spinner,
-    )?;
+    let ReleaseFetch {
+        release,
+        token,
+        waited_for_build,
+    } = fetch_with_auth_fallback(&mut token, options, &spinner)?;
 
     spinner.finish_and_clear();
 
@@ -90,14 +116,7 @@ pub fn run(
         return Ok(());
     }
 
-    // Prompt for confirmation
-    print!("\nDownload and install? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    if !input.trim().eq_ignore_ascii_case("y") {
+    if !confirm_install(&RealPromptProvider, waited_for_build)? {
         println!("Update cancelled.");
         return Ok(());
     }
@@ -128,6 +147,20 @@ pub fn run(
     Ok(())
 }
 
+/// Ask before installing, and return whether to go ahead.
+///
+/// Waiting out an in-progress build is itself the go-ahead: the user asked for
+/// that release by name and sat through the build for it, so asking again just
+/// makes `--wait` unusable in a script, where the answer reads as EOF.
+fn confirm_install<P: PromptProvider>(prompt_provider: &P, waited_for_build: bool) -> Result<bool> {
+    if waited_for_build {
+        println!("\nInstalling the build you waited for.");
+        return Ok(true);
+    }
+
+    prompt_provider.prompt_yes_no("\nDownload and install? [y/N] ")
+}
+
 /// Get initial token from environment or --use-gh-auth flag.
 ///
 /// Does NOT prompt the user - that happens later if needed.
@@ -154,35 +187,32 @@ fn get_initial_token(use_gh_auth: bool) -> Option<String> {
 /// prompts for gh CLI auth and retries.
 fn fetch_with_auth_fallback(
     token: &mut Option<String>,
-    check_only: bool,
-    wait_for_build_flag: bool,
-    timeout_secs: u64,
+    options: UpdateOptions,
     spinner: &ProgressBar,
-) -> Result<(Release, Option<String>)> {
-    use crate::update::github::RealGitHubApi;
+) -> Result<ReleaseFetch> {
     fetch_with_auth_fallback_impl(
         &RealGitHubApi,
         &RealAuthProvider,
         &RealPromptProvider,
         token,
-        check_only,
-        wait_for_build_flag,
-        timeout_secs,
+        options,
         spinner,
     )
 }
 
 /// Handle the result of a build status check.
-fn handle_build_status_result(
+///
+/// Returns whether we waited for an in-progress build to finish.
+fn handle_build_status_result<G: GitHubApi, P: PromptProvider>(
+    github: &G,
+    prompt_provider: &P,
     result: Result<BuildStatus, UpdateError>,
     token: Option<&str>,
-    check_only: bool,
-    wait_flag: bool,
-    timeout_secs: u64,
-) -> Result<()> {
+    options: UpdateOptions,
+) -> Result<bool> {
     match result {
         Ok(BuildStatus::InProgress(ref run)) => {
-            handle_in_progress_build(run, check_only, wait_flag, timeout_secs, token)?;
+            return handle_in_progress_build(github, prompt_provider, run, options, token);
         }
         Ok(BuildStatus::Completed(_) | BuildStatus::Idle) => {
             // No active build, continue normally
@@ -199,7 +229,7 @@ fn handle_build_status_result(
             );
         }
         Err(e) => {
-            if wait_flag {
+            if options.wait_for_build {
                 println!(
                     "{}: Could not check build status: {}",
                     "Warning".yellow(),
@@ -209,46 +239,42 @@ fn handle_build_status_result(
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Handle an in-progress build: display info and optionally wait.
-fn handle_in_progress_build(
-    run: &crate::update::github::WorkflowRun,
-    check_only: bool,
-    wait_flag: bool,
-    timeout_secs: u64,
+///
+/// Returns whether we waited for the build to finish.
+fn handle_in_progress_build<G: GitHubApi, P: PromptProvider>(
+    github: &G,
+    prompt_provider: &P,
+    run: &WorkflowRun,
+    options: UpdateOptions,
     token: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     display_build_info(run);
 
-    if check_only {
+    if options.check_only {
         // Just report, don't wait or prompt
-        return Ok(());
+        return Ok(false);
     }
 
-    if wait_flag {
+    let waiting = if options.wait_for_build {
         // Auto-wait (for scripts)
         println!();
-        let config = WaitConfig::default().with_timeout(timeout_secs);
-        wait_for_build(token, &config)?;
+        true
     } else {
-        // Interactive: prompt user
-        print!("\nWould you like to wait for it to complete? [y/N] ");
-        io::stdout().flush()?;
+        prompt_provider.prompt_yes_no("\nWould you like to wait for it to complete? [y/N] ")?
+    };
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if input.trim().eq_ignore_ascii_case("y") {
-            let config = WaitConfig::default().with_timeout(timeout_secs);
-            wait_for_build(token, &config)?;
-        } else {
-            println!("Continuing without waiting...");
-        }
+    if !waiting {
+        println!("Continuing without waiting...");
+        return Ok(false);
     }
 
-    Ok(())
+    let config = WaitConfig::default().with_timeout(options.timeout_secs);
+    wait_for_build(github, token, &config)?;
+    Ok(true)
 }
 
 fn display_release_info(release: &Release, asset: &crate::update::github::Asset) {
@@ -333,8 +359,6 @@ impl PromptProvider for RealPromptProvider {
     }
 }
 
-use crate::update::github::GitHubApi;
-
 /// Core auth flow logic, extracted for testability.
 ///
 /// Tries API calls without auth first (for public repos).
@@ -344,11 +368,9 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
     auth_provider: &A,
     prompt_provider: &P,
     token: &mut Option<String>,
-    check_only: bool,
-    wait_for_build_flag: bool,
-    timeout_secs: u64,
+    options: UpdateOptions,
     spinner: &ProgressBar,
-) -> Result<(Release, Option<String>)> {
+) -> Result<ReleaseFetch> {
     // Try build status check first
     let build_status_result = github.check_build_status(token.as_deref());
 
@@ -356,7 +378,7 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
     let needs_auth =
         matches!(&build_status_result, Err(UpdateError::GitHubApi(msg)) if msg.contains("404"));
 
-    if needs_auth && token.is_none() {
+    let waited_for_build = if needs_auth && token.is_none() {
         // Suspend spinner for interactive auth prompt
         let new_token =
             spinner.suspend(|| prompt_for_gh_auth_impl(auth_provider, prompt_provider))?;
@@ -367,16 +389,16 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
             // Suspend spinner for build status handling (may prompt to wait)
             spinner.suspend(|| {
                 handle_build_status_result(
+                    github,
+                    prompt_provider,
                     retry_result,
                     token.as_deref(),
-                    check_only,
-                    wait_for_build_flag,
-                    timeout_secs,
+                    options,
                 )
-            })?;
+            })?
         } else {
             // User declined auth, continue without (will likely fail on release fetch)
-            if wait_for_build_flag {
+            if options.wait_for_build {
                 spinner.suspend(|| {
                     println!(
                         "{}: Could not check build status without authentication.",
@@ -385,24 +407,29 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
                     println!("The --wait flag may not work.");
                 });
             }
+            false
         }
     } else {
         // No auth needed or we already have a token - handle the result
         spinner.suspend(|| {
             handle_build_status_result(
+                github,
+                prompt_provider,
                 build_status_result,
                 token.as_deref(),
-                check_only,
-                wait_for_build_flag,
-                timeout_secs,
+                options,
             )
-        })?;
-    }
+        })?
+    };
 
     // Now fetch release
     spinner.set_message("Checking for updates...");
     match github.fetch_latest_release(token.as_deref()) {
-        Ok(release) => Ok((release, token.clone())),
+        Ok(release) => Ok(ReleaseFetch {
+            release,
+            token: token.clone(),
+            waited_for_build,
+        }),
         Err(UpdateError::NotFound { has_token: false }) if token.is_none() => {
             // Suspend spinner for interactive auth prompt
             let new_token =
@@ -410,7 +437,11 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
             if let Some(new_token) = new_token {
                 *token = Some(new_token);
                 let release = github.fetch_latest_release(token.as_deref())?;
-                Ok((release, token.clone()))
+                Ok(ReleaseFetch {
+                    release,
+                    token: token.clone(),
+                    waited_for_build,
+                })
             } else {
                 Err(anyhow::anyhow!(
                     "Release not found. If this is a private repository, either:\n  \
@@ -444,9 +475,21 @@ fn prompt_for_gh_auth_impl<A: AuthProvider, P: PromptProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::github::{Asset, BuildStatus, GitHubApi, Release, WorkflowRun};
+    use crate::update::github::{Asset, BuildStatus, Release};
+    use crate::update::test_support::{
+        MockGitHubApi, completed_run, in_progress_run, not_found_error, test_release,
+    };
     use indicatif::ProgressBar;
     use std::cell::{Cell, RefCell};
+
+    /// The options a plain `grans update --check` runs with.
+    fn check_only_options() -> UpdateOptions {
+        UpdateOptions {
+            check_only: true,
+            wait_for_build: false,
+            timeout_secs: 600,
+        }
+    }
 
     #[test]
     fn test_display_release_info_does_not_panic() {
@@ -471,54 +514,6 @@ mod tests {
     }
 
     // Mock implementations for testing
-
-    use std::collections::VecDeque;
-
-    struct MockGitHubApi {
-        build_status_responses: RefCell<VecDeque<Result<BuildStatus, UpdateError>>>,
-        release_responses: RefCell<VecDeque<Result<Release, UpdateError>>>,
-        build_status_calls: Cell<usize>,
-        release_calls: Cell<usize>,
-    }
-
-    impl MockGitHubApi {
-        fn new(
-            build_status_responses: Vec<Result<BuildStatus, UpdateError>>,
-            release_responses: Vec<Result<Release, UpdateError>>,
-        ) -> Self {
-            Self {
-                build_status_responses: RefCell::new(build_status_responses.into()),
-                release_responses: RefCell::new(release_responses.into()),
-                build_status_calls: Cell::new(0),
-                release_calls: Cell::new(0),
-            }
-        }
-    }
-
-    impl GitHubApi for MockGitHubApi {
-        fn fetch_latest_release(
-            &self,
-            _token: Option<&str>,
-        ) -> crate::update::UpdateResult<Release> {
-            self.release_calls.set(self.release_calls.get() + 1);
-            self.release_responses
-                .borrow_mut()
-                .pop_front()
-                .expect("Unexpected call to fetch_latest_release")
-        }
-
-        fn check_build_status(
-            &self,
-            _token: Option<&str>,
-        ) -> crate::update::UpdateResult<BuildStatus> {
-            self.build_status_calls
-                .set(self.build_status_calls.get() + 1);
-            self.build_status_responses
-                .borrow_mut()
-                .pop_front()
-                .expect("Unexpected call to check_build_status")
-        }
-    }
 
     struct MockAuthProvider {
         token: Option<String>,
@@ -557,31 +552,10 @@ mod tests {
         }
     }
 
-    fn make_test_release() -> Release {
-        Release {
-            tag_name: "v2025.1.30".to_string(),
-            name: Some("2025.1.30 (abc1234)".to_string()),
-            body: None,
-            published_at: Some("2025-01-30T12:00:00Z".to_string()),
-            assets: vec![],
-        }
-    }
-
-    fn make_in_progress_run() -> WorkflowRun {
-        WorkflowRun {
-            id: 12345,
-            name: Some("Release".to_string()),
-            status: "in_progress".to_string(),
-            conclusion: None,
-            html_url: "https://github.com/test/test/actions/runs/12345".to_string(),
-            created_at: "2025-01-30T12:00:00Z".to_string(),
-        }
-    }
-
     #[test]
     fn test_public_repo_no_auth_needed() {
         // Public repo: both build status and release work without auth
-        let github = MockGitHubApi::new(vec![Ok(BuildStatus::Idle)], vec![Ok(make_test_release())]);
+        let github = MockGitHubApi::new(vec![Ok(BuildStatus::Idle)], vec![Ok(test_release())]);
         let auth = MockAuthProvider { token: None };
         let prompt = MockPromptProvider::new(vec![]);
 
@@ -591,9 +565,7 @@ mod tests {
             &auth,
             &prompt,
             &mut token,
-            true,
-            false,
-            600,
+            check_only_options(),
             &ProgressBar::hidden(),
         );
 
@@ -607,11 +579,8 @@ mod tests {
     fn test_private_repo_auth_required_user_accepts() {
         // Private repo: 404 without auth, succeeds with auth
         let github = MockGitHubApi::new(
-            vec![
-                Err(UpdateError::GitHubApi("HTTP 404: Not Found".to_string())),
-                Ok(BuildStatus::Idle),
-            ],
-            vec![Ok(make_test_release())],
+            vec![Err(not_found_error()), Ok(BuildStatus::Idle)],
+            vec![Ok(test_release())],
         );
         let auth = MockAuthProvider {
             token: Some("test_token".to_string()),
@@ -624,9 +593,7 @@ mod tests {
             &auth,
             &prompt,
             &mut token,
-            true,
-            false,
-            600,
+            check_only_options(),
             &ProgressBar::hidden(),
         );
 
@@ -640,9 +607,7 @@ mod tests {
     fn test_private_repo_auth_required_user_declines() {
         // Private repo: 404 without auth, user declines auth
         let github = MockGitHubApi::new(
-            vec![Err(UpdateError::GitHubApi(
-                "HTTP 404: Not Found".to_string(),
-            ))],
+            vec![Err(not_found_error())],
             vec![Err(UpdateError::NotFound { has_token: false })],
         );
         let auth = MockAuthProvider {
@@ -656,9 +621,7 @@ mod tests {
             &auth,
             &prompt,
             &mut token,
-            true,
-            false,
-            600,
+            check_only_options(),
             &ProgressBar::hidden(),
         );
 
@@ -669,7 +632,7 @@ mod tests {
     #[test]
     fn test_with_preexisting_token() {
         // User already has a token (from env or --use-gh-auth)
-        let github = MockGitHubApi::new(vec![Ok(BuildStatus::Idle)], vec![Ok(make_test_release())]);
+        let github = MockGitHubApi::new(vec![Ok(BuildStatus::Idle)], vec![Ok(test_release())]);
         let auth = MockAuthProvider { token: None };
         let prompt = MockPromptProvider::new(vec![]); // Should not be called
 
@@ -679,9 +642,7 @@ mod tests {
             &auth,
             &prompt,
             &mut token,
-            true,
-            false,
-            600,
+            check_only_options(),
             &ProgressBar::hidden(),
         );
 
@@ -696,10 +657,10 @@ mod tests {
         // Build is in progress, auth required to detect it
         let github = MockGitHubApi::new(
             vec![
-                Err(UpdateError::GitHubApi("HTTP 404: Not Found".to_string())),
-                Ok(BuildStatus::InProgress(make_in_progress_run())),
+                Err(not_found_error()),
+                Ok(BuildStatus::InProgress(in_progress_run())),
             ],
-            vec![Ok(make_test_release())],
+            vec![Ok(test_release())],
         );
         let auth = MockAuthProvider {
             token: Some("test_token".to_string()),
@@ -713,9 +674,7 @@ mod tests {
             &auth,
             &prompt,
             &mut token,
-            true,
-            true,
-            600,
+            check_only_options(),
             &ProgressBar::hidden(),
         );
 
@@ -725,13 +684,165 @@ mod tests {
     }
 
     #[test]
+    fn test_install_is_not_confirmed_again_after_waiting() {
+        let prompt = MockPromptProvider::new(vec![]); // Panics if asked
+
+        assert!(confirm_install(&prompt, true).expect("should proceed"));
+        assert_eq!(prompt.call_count.get(), 0);
+    }
+
+    #[test]
+    fn test_install_is_confirmed_when_we_did_not_wait() {
+        let accepts = MockPromptProvider::new(vec![true]);
+        assert!(confirm_install(&accepts, false).expect("should proceed"));
+        assert_eq!(accepts.call_count.get(), 1);
+
+        let declines = MockPromptProvider::new(vec![false]);
+        assert!(!confirm_install(&declines, false).expect("should not proceed"));
+    }
+
+    /// A build that finishes on the wait loop's first poll, so no sleeping.
+    fn build_finishes_while_waiting() -> MockGitHubApi {
+        MockGitHubApi::new(
+            vec![
+                Ok(BuildStatus::InProgress(in_progress_run())),
+                Ok(BuildStatus::Completed(completed_run())),
+            ],
+            vec![Ok(test_release())],
+        )
+    }
+
+    fn install_options(wait_for_build: bool) -> UpdateOptions {
+        UpdateOptions {
+            check_only: false,
+            wait_for_build,
+            timeout_secs: 600,
+        }
+    }
+
+    #[test]
+    fn test_wait_flag_reports_that_we_waited() {
+        // Regression: --wait used to fall through to the install confirmation,
+        // which reads EOF in a script and cancels the update it just waited for.
+        let github = build_finishes_while_waiting();
+        let auth = MockAuthProvider { token: None };
+        let prompt = MockPromptProvider::new(vec![]); // --wait asks nothing
+
+        let mut token = Some("existing_token".to_string());
+        let fetched = fetch_with_auth_fallback_impl(
+            &github,
+            &auth,
+            &prompt,
+            &mut token,
+            install_options(true),
+            &ProgressBar::hidden(),
+        )
+        .expect("fetch should succeed");
+
+        assert!(fetched.waited_for_build);
+        assert_eq!(prompt.call_count.get(), 0);
+    }
+
+    #[test]
+    fn test_accepting_the_wait_prompt_reports_that_we_waited() {
+        let github = build_finishes_while_waiting();
+        let auth = MockAuthProvider { token: None };
+        let prompt = MockPromptProvider::new(vec![true]); // Yes, wait for it
+
+        let mut token = Some("existing_token".to_string());
+        let fetched = fetch_with_auth_fallback_impl(
+            &github,
+            &auth,
+            &prompt,
+            &mut token,
+            install_options(false),
+            &ProgressBar::hidden(),
+        )
+        .expect("fetch should succeed");
+
+        assert!(fetched.waited_for_build);
+    }
+
+    #[test]
+    fn test_declining_the_wait_prompt_reports_that_we_did_not_wait() {
+        let github = MockGitHubApi::new(
+            vec![Ok(BuildStatus::InProgress(in_progress_run()))],
+            vec![Ok(test_release())],
+        );
+        let auth = MockAuthProvider { token: None };
+        let prompt = MockPromptProvider::new(vec![false]); // No, don't wait
+
+        let mut token = Some("existing_token".to_string());
+        let fetched = fetch_with_auth_fallback_impl(
+            &github,
+            &auth,
+            &prompt,
+            &mut token,
+            install_options(false),
+            &ProgressBar::hidden(),
+        )
+        .expect("fetch should succeed");
+
+        assert!(!fetched.waited_for_build);
+    }
+
+    #[test]
+    fn test_no_build_in_progress_reports_that_we_did_not_wait() {
+        let github = MockGitHubApi::new(vec![Ok(BuildStatus::Idle)], vec![Ok(test_release())]);
+        let auth = MockAuthProvider { token: None };
+        let prompt = MockPromptProvider::new(vec![]);
+
+        let mut token = Some("existing_token".to_string());
+        let fetched = fetch_with_auth_fallback_impl(
+            &github,
+            &auth,
+            &prompt,
+            &mut token,
+            install_options(false),
+            &ProgressBar::hidden(),
+        )
+        .expect("fetch should succeed");
+
+        assert!(!fetched.waited_for_build);
+    }
+
+    #[test]
+    fn test_check_only_never_waits_even_with_the_wait_flag() {
+        let github = MockGitHubApi::new(
+            vec![Ok(BuildStatus::InProgress(in_progress_run()))],
+            vec![Ok(test_release())],
+        );
+        let auth = MockAuthProvider { token: None };
+        let prompt = MockPromptProvider::new(vec![]);
+
+        let mut token = Some("existing_token".to_string());
+        let options = UpdateOptions {
+            check_only: true,
+            wait_for_build: true,
+            timeout_secs: 600,
+        };
+        let fetched = fetch_with_auth_fallback_impl(
+            &github,
+            &auth,
+            &prompt,
+            &mut token,
+            options,
+            &ProgressBar::hidden(),
+        )
+        .expect("fetch should succeed");
+
+        assert!(!fetched.waited_for_build);
+        assert_eq!(github.build_status_calls.get(), 1); // No polling loop
+    }
+
+    #[test]
     fn test_release_fetch_triggers_auth_if_build_status_succeeded() {
         // Build status works without auth, but release fetch requires auth
         let github = MockGitHubApi::new(
             vec![Ok(BuildStatus::Idle)],
             vec![
                 Err(UpdateError::NotFound { has_token: false }),
-                Ok(make_test_release()),
+                Ok(test_release()),
             ],
         );
         let auth = MockAuthProvider {
@@ -745,9 +856,7 @@ mod tests {
             &auth,
             &prompt,
             &mut token,
-            true,
-            false,
-            600,
+            check_only_options(),
             &ProgressBar::hidden(),
         );
 

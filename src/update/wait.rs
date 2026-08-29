@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use super::github::{BuildStatus, WorkflowRun, check_build_status};
+use super::github::{BuildStatus, GitHubApi, WorkflowRun};
 use super::{UpdateError, UpdateResult};
 
 /// Configuration for waiting on a build.
@@ -50,7 +50,11 @@ pub fn display_build_info(run: &WorkflowRun) {
 ///
 /// Returns `Ok(())` if the build completes successfully.
 /// Returns an error if the build fails or times out.
-pub fn wait_for_build(token: Option<&str>, config: &WaitConfig) -> UpdateResult<()> {
+pub fn wait_for_build<G: GitHubApi>(
+    github: &G,
+    token: Option<&str>,
+    config: &WaitConfig,
+) -> UpdateResult<()> {
     let start = Instant::now();
     let poll_duration = Duration::from_secs(config.poll_interval_secs);
     let timeout_duration = Duration::from_secs(config.timeout_secs);
@@ -75,7 +79,7 @@ pub fn wait_for_build(token: Option<&str>, config: &WaitConfig) -> UpdateResult<
         }
 
         // Check current status
-        let status = check_build_status(token)?;
+        let status = github.check_build_status(token)?;
 
         match status {
             BuildStatus::Completed(_) => {
@@ -121,6 +125,15 @@ fn format_timestamp(ts: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::update::test_support::{MockGitHubApi, completed_run, failed_run, in_progress_run};
+
+    /// Poll without sleeping, so a multi-poll test runs instantly.
+    fn immediate_polling() -> WaitConfig {
+        WaitConfig {
+            poll_interval_secs: 0,
+            timeout_secs: 600,
+        }
+    }
 
     #[test]
     fn test_wait_config_default() {
@@ -144,6 +157,46 @@ mod tests {
         assert_eq!(formatted.len(), 19);
         assert!(formatted.contains('-'));
         assert!(formatted.contains(':'));
+    }
+
+    #[test]
+    fn test_wait_for_build_returns_when_the_build_finishes() {
+        let github = MockGitHubApi::build_statuses(vec![
+            Ok(BuildStatus::InProgress(in_progress_run())),
+            Ok(BuildStatus::Completed(completed_run())),
+        ]);
+
+        let result = wait_for_build(&github, None, &immediate_polling());
+
+        assert!(result.is_ok());
+        assert_eq!(github.build_status_calls.get(), 2);
+    }
+
+    #[test]
+    fn test_wait_for_build_reports_a_failed_build() {
+        let github =
+            MockGitHubApi::build_statuses(vec![Ok(BuildStatus::Failed(failed_run("failure")))]);
+
+        let err = wait_for_build(&github, None, &immediate_polling()).unwrap_err();
+
+        assert!(matches!(
+            err,
+            UpdateError::BuildFailed { ref conclusion } if conclusion == "failure"
+        ));
+    }
+
+    #[test]
+    fn test_wait_for_build_times_out() {
+        let github = MockGitHubApi::build_statuses(vec![]);
+
+        let config = WaitConfig {
+            poll_interval_secs: 0,
+            timeout_secs: 0,
+        };
+        let err = wait_for_build(&github, None, &config).unwrap_err();
+
+        assert!(matches!(err, UpdateError::BuildTimeout { .. }));
+        assert_eq!(github.build_status_calls.get(), 0);
     }
 
     #[test]
