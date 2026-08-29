@@ -5,10 +5,19 @@ use anyhow::Result;
 
 use crate::platform;
 
+#[cfg(target_os = "macos")]
+mod gguf;
+#[cfg(target_os = "macos")]
+mod llama;
+#[cfg(not(target_os = "macos"))]
 mod onnx;
 
-/// The embedder production code loads. Its vectors are what
-/// [`MODEL_NAME`] promises regardless of the runtime behind it.
+/// The embedder production code loads: llama.cpp on Metal on macOS, ONNX
+/// Runtime everywhere else. Both produce the vectors [`MODEL_NAME`]
+/// promises, so the runtime is not part of the model-consistency key.
+#[cfg(target_os = "macos")]
+pub use llama::LlamaEmbedModel as ProductionEmbedder;
+#[cfg(not(target_os = "macos"))]
 pub use onnx::FastEmbedModel as ProductionEmbedder;
 
 /// Trait for embedding models.
@@ -22,7 +31,7 @@ pub trait Embedder {
 }
 
 /// Identity of the production embedder, exposed so status checks can compare
-/// stored metadata against it without loading the ONNX model.
+/// stored metadata against it without loading the model.
 pub const MODEL_NAME: &str = "nomic-embed-text-v1.5";
 
 /// The model cache directory (in the platform data directory), created if
@@ -111,15 +120,12 @@ pub(crate) fn has_hardware_provider() -> bool {
 
 /// Whether a CPU embedding run is worth warning about.
 ///
-/// It is not on macOS, even though macOS does embed on CPU. The only
-/// hardware provider Apple Silicon offers is CoreML, and CoreML loses to
-/// the CPU on this model (see the `coreml` feature note in Cargo.toml), so
-/// release builds leave it off on purpose. Pointing a macOS user at the
-/// GPU build features would be advice to go build a slower binary. A macOS
-/// user who opted into `--features coreml` anyway is excluded by the
-/// hardware-provider check and gets no warning either.
+/// macOS embeds through llama.cpp on Metal (see `llama.rs`), so the ONNX
+/// execution providers say nothing about where its embedding runs. Elsewhere
+/// the embedder is ONNX, and it runs on CPU whenever no hardware provider was
+/// compiled in.
 pub(crate) fn should_warn_cpu_only() -> bool {
-    !has_hardware_provider() && !cfg!(target_os = "macos")
+    !cfg!(target_os = "macos") && !has_hardware_provider()
 }
 
 /// Mock embedder for testing — returns deterministic vectors based on text length.
@@ -185,6 +191,12 @@ impl MockEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_never_warns_about_cpu_only_embedding() {
+        assert!(!should_warn_cpu_only());
+    }
 
     #[test]
     fn test_mock_embedder_dimension() {

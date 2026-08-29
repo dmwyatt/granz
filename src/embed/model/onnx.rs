@@ -1,4 +1,6 @@
-//! nomic-embed-text-v1.5 through ONNX Runtime (fastembed).
+//! nomic-embed-text-v1.5 through ONNX Runtime (fastembed), the embedder on
+//! every platform but macOS, which embeds through llama.cpp on Metal (see
+//! `llama.rs`).
 
 use std::cell::RefCell;
 

@@ -57,6 +57,10 @@ codegen-units = 4   # More parallelism (release default is 1)
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The macOS embedder (src/embed/model/llama.rs). Metal is the point; the
+# default features add OpenMP (needs a brew libomp) and llama.cpp's common
+# library, neither of which embedding uses.
+llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["metal"] }
 core-foundation = "0.10.1"
 core-foundation-sys = "0.8.7"
 security-framework = "3.7.0"
