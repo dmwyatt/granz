@@ -39,37 +39,47 @@ const BATCH_TOKENS: usize = 2048;
 /// address.
 const BATCH_SEQS: usize = 64;
 
+self_cell::self_cell!(
+    /// A loaded model and the decode context borrowing it. They must go
+    /// together: the context cannot outlive the model, and both must be
+    /// freed before the process exits, because ggml's Metal device tears
+    /// down at exit and asserts that no buffers are still resident.
+    struct ModelWithContext {
+        owner: LlamaModel,
+        #[not_covariant]
+        dependent: LlamaContext,
+    }
+);
+
 /// Production embedder on macOS.
-///
-/// The model is loaded once per process and lives for its remainder, like
-/// the backend; each instance owns a decode context over it.
 pub struct LlamaEmbedModel {
-    model: &'static LlamaModel,
-    ctx: RefCell<LlamaContext<'static>>,
+    cell: RefCell<ModelWithContext>,
     dim: usize,
 }
 
 impl LlamaEmbedModel {
     pub fn new() -> Result<Self> {
-        let model = model()?;
+        let model = load_model()?;
         let dim = usize::try_from(model.n_embd()).context("model reports a negative n_embd")?;
-        let ctx = model
-            .new_context(backend(), context_params())
-            .context("creating llama.cpp context")?;
+        let cell = ModelWithContext::try_new(model, |model| {
+            model.new_context(backend(), context_params())
+        })
+        .context("creating llama.cpp context")?;
         log::debug!(
             "llama.cpp embedder ready (gpu offload supported: {})",
             backend().supports_gpu_offload()
         );
         Ok(Self {
-            model,
-            ctx: RefCell::new(ctx),
+            cell: RefCell::new(cell),
             dim,
         })
     }
 
     fn tokenize(&self, text: &str) -> Result<Vec<LlamaToken>> {
         let tokens = self
-            .model
+            .cell
+            .borrow()
+            .borrow_owner()
             .str_to_token(text, AddBos::Always)
             .with_context(|| format!("tokenizing {} bytes", text.len()))?;
         Ok(fit_to_max_length(tokens, MAX_LENGTH))
@@ -88,16 +98,11 @@ fn backend() -> &'static LlamaBackend {
     })
 }
 
-fn model() -> Result<&'static LlamaModel> {
-    static MODEL: OnceLock<LlamaModel> = OnceLock::new();
-    if let Some(model) = MODEL.get() {
-        return Ok(model);
-    }
+fn load_model() -> Result<LlamaModel> {
     let path = gguf::ensure_model_file(&gguf::NOMIC_F16)?;
     let params = LlamaModelParams::default().with_n_gpu_layers(1000);
-    let loaded = LlamaModel::load_from_file(backend(), &path, &params)
-        .with_context(|| format!("loading {}", path.display()))?;
-    Ok(MODEL.get_or_init(|| loaded))
+    LlamaModel::load_from_file(backend(), &path, &params)
+        .with_context(|| format!("loading {}", path.display()))
 }
 
 fn context_params() -> LlamaContextParams {
@@ -124,12 +129,13 @@ impl Embedder for LlamaEmbedModel {
             .collect::<Result<Vec<_>>>()?;
         let lens: Vec<usize> = sequences.iter().map(Vec::len).collect();
 
-        let mut ctx = self.ctx.borrow_mut();
-        let mut out = Vec::with_capacity(texts.len());
-        for range in plan_batches(&lens, BATCH_TOKENS, BATCH_SEQS) {
-            out.extend(decode_sequences(&mut ctx, &sequences[range])?);
-        }
-        Ok(out)
+        self.cell.borrow_mut().with_dependent_mut(|_, ctx| {
+            let mut out = Vec::with_capacity(texts.len());
+            for range in plan_batches(&lens, BATCH_TOKENS, BATCH_SEQS) {
+                out.extend(decode_sequences(ctx, &sequences[range])?);
+            }
+            Ok(out)
+        })
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
