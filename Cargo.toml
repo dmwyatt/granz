@@ -7,12 +7,6 @@ edition = "2024"
 default = []
 cuda = ["ort/cuda", "ort/copy-dylibs"]
 directml = ["ort/directml", "ort/copy-dylibs"]
-# Off in release builds and not recommended: CoreML is slower than the CPU on
-# nomic-embed-text-v1.5. Its NeuralNetwork format wants static shapes, and the
-# model's rotary embeddings emit zero-sized dimensions it rejects, so the graph
-# fragments into 73 partitions whose hand-off copies cost more than the compute
-# they save. Kept so #142 can re-measure it against a friendlier export.
-coreml = ["ort/coreml"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -98,22 +98,11 @@ pub(crate) fn execution_providers() -> Vec<ort::execution_providers::ExecutionPr
         );
     }
 
-    #[cfg(feature = "coreml")]
-    {
-        use ort::execution_providers::CoreMLExecutionProvider;
-        providers.push(
-            ort::execution_providers::ExecutionProviderDispatch::from(
-                CoreMLExecutionProvider::default(),
-            )
-            .error_on_failure(),
-        );
-    }
-
     providers
 }
 
 /// Whether this binary was built with a hardware execution provider
-/// (cuda/directml/coreml). When false, embedding runs on CPU.
+/// (cuda/directml). When false, ONNX inference runs on CPU.
 pub(crate) fn has_hardware_provider() -> bool {
     !execution_providers().is_empty()
 }
