@@ -46,8 +46,8 @@ pub struct ReleaseFetch {
     pub release: Release,
     /// The token the successful calls used, if any.
     pub token: Option<String>,
-    /// Whether we sat through an in-progress build to reach this release.
-    pub waited_for_build: bool,
+    /// The build we sat through to reach this release, if we waited at all.
+    pub waited_build: Option<WorkflowRun>,
 }
 
 /// Run the update command.
@@ -76,10 +76,17 @@ pub fn run(
     let ReleaseFetch {
         release,
         token,
-        waited_for_build,
+        waited_build,
     } = fetch_with_auth_fallback(&mut token, options, &spinner)?;
 
     spinner.finish_and_clear();
+
+    // Everything below reads this release: whether we are already up to date,
+    // and which binary to install. If we waited for a build, a release that
+    // predates it answers both questions about the wrong release.
+    if let Some(ref run) = waited_build {
+        ensure_release_came_from_build(&release, run)?;
+    }
 
     // Find asset for this platform
     let expected_asset = asset_name()?;
@@ -116,7 +123,7 @@ pub fn run(
         return Ok(());
     }
 
-    if !confirm_install(&RealPromptProvider, waited_for_build)? {
+    if !confirm_install(&RealPromptProvider, options, waited_build.as_ref())? {
         println!("Update cancelled.");
         return Ok(());
     }
@@ -149,16 +156,61 @@ pub fn run(
 
 /// Ask before installing, and return whether to go ahead.
 ///
-/// Waiting out an in-progress build is itself the go-ahead: the user asked for
-/// that release by name and sat through the build for it, so asking again just
-/// makes `--wait` unusable in a script, where the answer reads as EOF.
-fn confirm_install<P: PromptProvider>(prompt_provider: &P, waited_for_build: bool) -> Result<bool> {
-    if waited_for_build {
+/// Two things answer the question before it is asked. Waiting out an
+/// in-progress build is the user's own go-ahead: they asked for that release
+/// and sat through the build for it. So is `--wait`, whether or not a build
+/// turned out to be running, because it is documented for scripts, and a
+/// prompt there reads EOF and cancels the update the script asked for.
+fn confirm_install<P: PromptProvider>(
+    prompt_provider: &P,
+    options: UpdateOptions,
+    waited_build: Option<&WorkflowRun>,
+) -> Result<bool> {
+    if waited_build.is_some() {
         println!("\nInstalling the build you waited for.");
         return Ok(true);
     }
 
+    if options.wait_for_build {
+        return Ok(true);
+    }
+
     prompt_provider.prompt_yes_no("\nDownload and install? [y/N] ")
+}
+
+/// Check that `release` is the one the build we waited for published.
+///
+/// The release workflow creates the release before the run reports completion,
+/// so anything published before that run even started is a stale answer from
+/// the GitHub API, not the binary that was just built. Nobody watches a wait to
+/// its end, so that case is an error rather than a prompt: quietly installing
+/// some other binary, or reporting "up to date" off a stale release, is the
+/// outcome worth avoiding.
+fn ensure_release_came_from_build(release: &Release, run: &WorkflowRun) -> Result<()> {
+    let published_at = release.published_at.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Release {} has no publish time, so grans cannot tell whether it came from the build it waited for.",
+            release.tag_name
+        )
+    })?;
+
+    let published = parse_github_timestamp(published_at)?;
+    let build_started = parse_github_timestamp(&run.created_at)?;
+
+    if published < build_started {
+        return Err(anyhow::anyhow!(
+            "The latest release ({}, published {}) predates the build that just finished, so it is not the build you waited for. GitHub may not have published it yet; run 'grans update' again in a moment.",
+            release.tag_name,
+            published_at
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_github_timestamp(ts: &str) -> Result<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map_err(|e| anyhow::anyhow!("Could not read GitHub timestamp {:?}: {}", ts, e))
 }
 
 /// Get initial token from environment or --use-gh-auth flag.
@@ -202,14 +254,14 @@ fn fetch_with_auth_fallback(
 
 /// Handle the result of a build status check.
 ///
-/// Returns whether we waited for an in-progress build to finish.
+/// Returns the in-progress build we waited for, if we waited for one.
 fn handle_build_status_result<G: GitHubApi, P: PromptProvider>(
     github: &G,
     prompt_provider: &P,
     result: Result<BuildStatus, UpdateError>,
     token: Option<&str>,
     options: UpdateOptions,
-) -> Result<bool> {
+) -> Result<Option<WorkflowRun>> {
     match result {
         Ok(BuildStatus::InProgress(ref run)) => {
             return handle_in_progress_build(github, prompt_provider, run, options, token);
@@ -239,24 +291,24 @@ fn handle_build_status_result<G: GitHubApi, P: PromptProvider>(
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Handle an in-progress build: display info and optionally wait.
 ///
-/// Returns whether we waited for the build to finish.
+/// Returns the build we waited for, or `None` if we did not wait.
 fn handle_in_progress_build<G: GitHubApi, P: PromptProvider>(
     github: &G,
     prompt_provider: &P,
     run: &WorkflowRun,
     options: UpdateOptions,
     token: Option<&str>,
-) -> Result<bool> {
+) -> Result<Option<WorkflowRun>> {
     display_build_info(run);
 
     if options.check_only {
         // Just report, don't wait or prompt
-        return Ok(false);
+        return Ok(None);
     }
 
     let waiting = if options.wait_for_build {
@@ -269,12 +321,11 @@ fn handle_in_progress_build<G: GitHubApi, P: PromptProvider>(
 
     if !waiting {
         println!("Continuing without waiting...");
-        return Ok(false);
+        return Ok(None);
     }
 
     let config = WaitConfig::default().with_timeout(options.timeout_secs);
-    wait_for_build(github, token, &config)?;
-    Ok(true)
+    wait_for_build(github, token, &config).map_err(Into::into)
 }
 
 fn display_release_info(release: &Release, asset: &crate::update::github::Asset) {
@@ -378,7 +429,7 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
     let needs_auth =
         matches!(&build_status_result, Err(UpdateError::GitHubApi(msg)) if msg.contains("404"));
 
-    let waited_for_build = if needs_auth && token.is_none() {
+    let waited_build = if needs_auth && token.is_none() {
         // Suspend spinner for interactive auth prompt
         let new_token =
             spinner.suspend(|| prompt_for_gh_auth_impl(auth_provider, prompt_provider))?;
@@ -407,7 +458,7 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
                     println!("The --wait flag may not work.");
                 });
             }
-            false
+            None
         }
     } else {
         // No auth needed or we already have a token - handle the result
@@ -428,7 +479,7 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
         Ok(release) => Ok(ReleaseFetch {
             release,
             token: token.clone(),
-            waited_for_build,
+            waited_build,
         }),
         Err(UpdateError::NotFound { has_token: false }) if token.is_none() => {
             // Suspend spinner for interactive auth prompt
@@ -440,7 +491,7 @@ pub fn fetch_with_auth_fallback_impl<G: GitHubApi, A: AuthProvider, P: PromptPro
                 Ok(ReleaseFetch {
                     release,
                     token: token.clone(),
-                    waited_for_build,
+                    waited_build,
                 })
             } else {
                 Err(anyhow::anyhow!(
@@ -683,22 +734,82 @@ mod tests {
         assert_eq!(github.build_status_calls.get(), 2); // Retried with auth
     }
 
+    /// A release published while `in_progress_run()` was running.
+    fn release_published_at(published_at: &str) -> Release {
+        Release {
+            published_at: Some(published_at.to_string()),
+            ..test_release()
+        }
+    }
+
     #[test]
     fn test_install_is_not_confirmed_again_after_waiting() {
         let prompt = MockPromptProvider::new(vec![]); // Panics if asked
 
-        assert!(confirm_install(&prompt, true).expect("should proceed"));
+        let approved = confirm_install(&prompt, install_options(false), Some(&completed_run()))
+            .expect("should proceed");
+
+        assert!(approved);
+        assert_eq!(prompt.call_count.get(), 0);
+    }
+
+    #[test]
+    fn test_the_wait_flag_installs_even_when_no_build_was_running() {
+        // Nothing was building, so there was nothing to wait for, but --wait
+        // still says nobody is at the terminal to answer a prompt.
+        let prompt = MockPromptProvider::new(vec![]); // Panics if asked
+
+        let approved =
+            confirm_install(&prompt, install_options(true), None).expect("should proceed");
+
+        assert!(approved);
         assert_eq!(prompt.call_count.get(), 0);
     }
 
     #[test]
     fn test_install_is_confirmed_when_we_did_not_wait() {
         let accepts = MockPromptProvider::new(vec![true]);
-        assert!(confirm_install(&accepts, false).expect("should proceed"));
+        assert!(confirm_install(&accepts, install_options(false), None).expect("should proceed"));
         assert_eq!(accepts.call_count.get(), 1);
 
         let declines = MockPromptProvider::new(vec![false]);
-        assert!(!confirm_install(&declines, false).expect("should not proceed"));
+        assert!(
+            !confirm_install(&declines, install_options(false), None).expect("should not proceed")
+        );
+    }
+
+    #[test]
+    fn test_a_release_published_during_the_build_is_accepted() {
+        let release = release_published_at("2025-01-30T12:08:00Z");
+
+        ensure_release_came_from_build(&release, &in_progress_run())
+            .expect("release came from the build");
+    }
+
+    #[test]
+    fn test_a_release_older_than_the_build_we_waited_for_is_refused() {
+        // GitHub served a release that predates the run we waited for, so it
+        // cannot be the build's output. Installing it, or reporting "up to
+        // date" from it, would answer for a release the user never asked about.
+        let release = release_published_at("2025-01-29T09:00:00Z");
+
+        let err = ensure_release_came_from_build(&release, &in_progress_run())
+            .expect_err("should refuse the stale release");
+
+        assert!(err.to_string().contains("v2025.1.30"), "{}", err);
+    }
+
+    #[test]
+    fn test_a_release_with_no_publish_time_is_refused_after_waiting() {
+        let release = Release {
+            published_at: None,
+            ..test_release()
+        };
+
+        let err = ensure_release_came_from_build(&release, &in_progress_run())
+            .expect_err("should refuse the unverifiable release");
+
+        assert!(err.to_string().contains("publish"), "{}", err);
     }
 
     /// A build that finishes on the wait loop's first poll, so no sleeping.
@@ -739,7 +850,7 @@ mod tests {
         )
         .expect("fetch should succeed");
 
-        assert!(fetched.waited_for_build);
+        assert!(fetched.waited_build.is_some());
         assert_eq!(prompt.call_count.get(), 0);
     }
 
@@ -760,7 +871,7 @@ mod tests {
         )
         .expect("fetch should succeed");
 
-        assert!(fetched.waited_for_build);
+        assert!(fetched.waited_build.is_some());
     }
 
     #[test]
@@ -783,7 +894,7 @@ mod tests {
         )
         .expect("fetch should succeed");
 
-        assert!(!fetched.waited_for_build);
+        assert!(fetched.waited_build.is_none());
     }
 
     #[test]
@@ -803,7 +914,7 @@ mod tests {
         )
         .expect("fetch should succeed");
 
-        assert!(!fetched.waited_for_build);
+        assert!(fetched.waited_build.is_none());
     }
 
     #[test]
@@ -831,7 +942,7 @@ mod tests {
         )
         .expect("fetch should succeed");
 
-        assert!(!fetched.waited_for_build);
+        assert!(fetched.waited_build.is_none());
         assert_eq!(github.build_status_calls.get(), 1); // No polling loop
     }
 

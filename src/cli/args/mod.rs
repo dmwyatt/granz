@@ -302,7 +302,7 @@ pub enum Commands {
         #[arg(long)]
         use_gh_auth: bool,
 
-        /// Wait for an in-progress build, then install it without confirming (for scripts)
+        /// Install without confirming, waiting first if a release build is in progress (for scripts)
         #[arg(long)]
         wait: bool,
 

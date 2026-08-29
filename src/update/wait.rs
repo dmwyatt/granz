@@ -48,13 +48,14 @@ pub fn display_build_info(run: &WorkflowRun) {
 /// Polls the GitHub Actions API at the configured interval until the build
 /// completes, fails, or times out.
 ///
-/// Returns `Ok(())` if the build completes successfully.
+/// Returns the completed run, or `None` if the build disappeared from the API
+/// while we watched it, which leaves us with nothing to attribute a release to.
 /// Returns an error if the build fails or times out.
 pub fn wait_for_build<G: GitHubApi>(
     github: &G,
     token: Option<&str>,
     config: &WaitConfig,
-) -> UpdateResult<()> {
+) -> UpdateResult<Option<WorkflowRun>> {
     let start = Instant::now();
     let poll_duration = Duration::from_secs(config.poll_interval_secs);
     let timeout_duration = Duration::from_secs(config.timeout_secs);
@@ -82,10 +83,10 @@ pub fn wait_for_build<G: GitHubApi>(
         let status = github.check_build_status(token)?;
 
         match status {
-            BuildStatus::Completed(_) => {
+            BuildStatus::Completed(run) => {
                 pb.finish_and_clear();
                 println!("{} Build completed!", "✓".green().bold());
-                return Ok(());
+                return Ok(Some(run));
             }
             BuildStatus::Failed(run) => {
                 pb.finish_and_clear();
@@ -98,7 +99,7 @@ pub fn wait_for_build<G: GitHubApi>(
             BuildStatus::Idle => {
                 pb.finish_and_clear();
                 println!("No active build found.");
-                return Ok(());
+                return Ok(None);
             }
         }
 
@@ -166,10 +167,21 @@ mod tests {
             Ok(BuildStatus::Completed(completed_run())),
         ]);
 
-        let result = wait_for_build(&github, None, &immediate_polling());
+        let completed =
+            wait_for_build(&github, None, &immediate_polling()).expect("wait should succeed");
 
-        assert!(result.is_ok());
+        assert!(completed.is_some());
         assert_eq!(github.build_status_calls.get(), 2);
+    }
+
+    #[test]
+    fn test_wait_for_build_reports_no_run_when_the_build_disappears() {
+        let github = MockGitHubApi::build_statuses(vec![Ok(BuildStatus::Idle)]);
+
+        let completed =
+            wait_for_build(&github, None, &immediate_polling()).expect("wait should succeed");
+
+        assert!(completed.is_none());
     }
 
     #[test]

@@ -734,8 +734,14 @@ grans update --wait --timeout 300
 ```
 
 Waiting for a build counts as agreeing to install it, so grans installs the
-finished release without asking again. Without a wait, it still confirms before
-downloading.
+finished release without asking again. `--wait` skips the confirmation too, even
+when nothing turned out to be building, since a script has no one to answer it.
+Otherwise grans still confirms before downloading.
+
+After a wait, grans checks that the release it fetched was published by the
+build it waited for. If GitHub hands back an older release, grans stops with an
+error rather than installing a binary you did not wait for; run the command
+again in a moment.
 
 **Private Repositories**: For private repositories, grans will prompt to use your `gh` CLI credentials if available. For non-interactive/scripted usage:
 
