@@ -110,7 +110,7 @@ pub fn search(
     // empty or model-mismatched index yields keyword-only results without
     // paying embedder init (or the one-time model download).
     let embedder = (!index.is_empty())
-        .then(crate::embed::model::FastEmbedModel::new)
+        .then(crate::embed::model::ProductionEmbedder::new)
         .transpose()?;
 
     // The reranker's model load needs nothing retrieval produces, so start

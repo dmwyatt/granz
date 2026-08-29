@@ -496,7 +496,7 @@ fn do_embed(
     mode: OutputMode,
     spec: &EmbedSpec,
 ) -> Result<()> {
-    let embedder = embed::model::FastEmbedModel::new()?;
+    let embedder = embed::model::ProductionEmbedder::new()?;
     let index = embed::ensure_embeddings(conn, &embedder, batch_size, spec)?;
 
     match mode {

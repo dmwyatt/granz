@@ -1,10 +1,15 @@
-use std::cell::RefCell;
 use std::env;
 use std::sync::OnceLock;
 
 use anyhow::Result;
 
 use crate::platform;
+
+mod onnx;
+
+/// The embedder production code loads. Its vectors are what
+/// [`MODEL_NAME`] promises regardless of the runtime behind it.
+pub use onnx::FastEmbedModel as ProductionEmbedder;
 
 /// Trait for embedding models.
 pub trait Embedder {
@@ -19,12 +24,6 @@ pub trait Embedder {
 /// Identity of the production embedder, exposed so status checks can compare
 /// stored metadata against it without loading the ONNX model.
 pub const MODEL_NAME: &str = "nomic-embed-text-v1.5";
-
-/// Production embedder using fastembed (nomic-embed-text-v1.5).
-pub struct FastEmbedModel {
-    model: RefCell<fastembed::TextEmbedding>,
-    dim: usize,
-}
 
 /// The model cache directory (in the platform data directory), created if
 /// missing. Models must cache here rather than in a CWD-relative directory.
@@ -121,61 +120,6 @@ pub(crate) fn has_hardware_provider() -> bool {
 /// hardware-provider check and gets no warning either.
 pub(crate) fn should_warn_cpu_only() -> bool {
     !has_hardware_provider() && !cfg!(target_os = "macos")
-}
-
-impl FastEmbedModel {
-    pub fn new() -> Result<Self> {
-        set_hf_cache_dir()?;
-
-        let providers = execution_providers();
-
-        let mut opts =
-            fastembed::TextInitOptions::new(fastembed::EmbeddingModel::NomicEmbedTextV15)
-                .with_show_download_progress(true)
-                .with_max_length(512);
-
-        if !providers.is_empty() {
-            opts = opts.with_execution_providers(providers);
-        }
-
-        let model = fastembed::TextEmbedding::try_new(opts)?;
-
-        Ok(Self {
-            model: RefCell::new(model),
-            dim: 768,
-        })
-    }
-}
-
-impl Embedder for FastEmbedModel {
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let docs: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
-        let embeddings = self.model.borrow_mut().embed(docs, None)?;
-        Ok(embeddings)
-    }
-
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let results = self
-            .model
-            .borrow_mut()
-            .embed(vec![text.to_string()], None)?;
-        results
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No embedding returned for query"))
-    }
-
-    fn dimension(&self) -> usize {
-        self.dim
-    }
-
-    fn model_name(&self) -> &str {
-        MODEL_NAME
-    }
-
-    fn max_length(&self) -> usize {
-        512
-    }
 }
 
 /// Mock embedder for testing — returns deterministic vectors based on text length.
