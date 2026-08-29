@@ -13,6 +13,9 @@ pub trait GitHubApi {
 
     /// Check the status of the Release workflow.
     fn check_build_status(&self, token: Option<&str>) -> UpdateResult<BuildStatus>;
+
+    /// Fetch one workflow run by id.
+    fn fetch_workflow_run(&self, id: u64, token: Option<&str>) -> UpdateResult<WorkflowRun>;
 }
 
 /// Real GitHub API client that makes HTTP requests.
@@ -26,6 +29,10 @@ impl GitHubApi for RealGitHubApi {
 
     fn check_build_status(&self, token: Option<&str>) -> UpdateResult<BuildStatus> {
         check_build_status(token)
+    }
+
+    fn fetch_workflow_run(&self, id: u64, token: Option<&str>) -> UpdateResult<WorkflowRun> {
+        fetch_workflow_run(id, token)
     }
 }
 
@@ -64,34 +71,59 @@ impl Asset {
 /// If `token` is provided, it will be used for authentication.
 /// Otherwise, an unauthenticated request is made.
 pub fn fetch_latest_release(token: Option<&str>) -> UpdateResult<Release> {
+    let response = send_get(RELEASE_URL, token)?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(UpdateError::NotFound {
+            has_token: token.is_some(),
+        });
+    }
+
+    parse_response(response, "response")
+}
+
+/// Send a GET to the GitHub API, authenticated when a token is on hand.
+fn send_get(url: &str, token: Option<&str>) -> UpdateResult<reqwest::blocking::Response> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("grans/{}", env!("GRANS_VERSION")))
         .build()?;
 
-    let has_token = token.is_some();
-
-    let mut request = client.get(RELEASE_URL);
+    let mut request = client.get(url);
     if let Some(token) = token {
         request = request.header("Authorization", format!("Bearer {}", token));
     }
 
-    let response = request.send()?;
+    Ok(request.send()?)
+}
 
+/// Turn a GitHub API response into `T`, or into an error naming the HTTP status.
+fn parse_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    what: &str,
+) -> UpdateResult<T> {
     let status = response.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Err(UpdateError::NotFound { has_token });
-    }
-
     if !status.is_success() {
         let body = response.text().unwrap_or_default();
         return Err(UpdateError::GitHubApi(format!("HTTP {}: {}", status, body)));
     }
 
-    let release: Release = response
+    response
         .json()
-        .map_err(|e| UpdateError::GitHubApi(format!("Failed to parse response: {}", e)))?;
+        .map_err(|e| UpdateError::GitHubApi(format!("Failed to parse {}: {}", what, e)))
+}
 
-    Ok(release)
+/// Format a GitHub API timestamp (RFC 3339, UTC) for display in local time.
+///
+/// A timestamp that does not parse is shown as GitHub sent it rather than
+/// hidden; it is display text, and the raw form is still readable.
+pub fn format_timestamp(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => ts.to_string(),
+    }
 }
 
 /// Find the asset matching the given name.
@@ -108,6 +140,8 @@ pub struct WorkflowRun {
     pub conclusion: Option<String>,
     pub html_url: String,
     pub created_at: String,
+    /// The commit the run built.
+    pub head_sha: String,
 }
 
 /// Response from GitHub Actions workflow runs API.
@@ -129,63 +163,50 @@ pub enum BuildStatus {
     Failed(WorkflowRun),
 }
 
-const WORKFLOW_RUNS_URL: &str =
-    "https://api.github.com/repos/dmwyatt/granz/actions/runs?branch=main&per_page=5";
-const RELEASE_WORKFLOW_NAME: &str = "Release";
+/// Runs of the Release workflow on main, newest first. Asking for the
+/// workflow's own runs keeps issue-triggered workflows from crowding it out.
+const RELEASE_RUNS_URL: &str = "https://api.github.com/repos/dmwyatt/granz/actions/workflows/release.yml/runs?branch=main&per_page=1";
+const RUN_URL: &str = "https://api.github.com/repos/dmwyatt/granz/actions/runs";
 
-/// Fetch recent workflow runs from GitHub Actions.
+/// Fetch the most recent Release workflow run from GitHub Actions.
 pub fn fetch_workflow_runs(token: Option<&str>) -> UpdateResult<WorkflowRunsResponse> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("grans/{}", env!("GRANS_VERSION")))
-        .build()?;
+    parse_response(send_get(RELEASE_RUNS_URL, token)?, "workflow runs")
+}
 
-    let mut request = client.get(WORKFLOW_RUNS_URL);
-    if let Some(token) = token {
-        request = request.header("Authorization", format!("Bearer {}", token));
-    }
-
-    let response = request.send()?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().unwrap_or_default();
-        return Err(UpdateError::GitHubApi(format!("HTTP {}: {}", status, body)));
-    }
-
-    let runs: WorkflowRunsResponse = response
-        .json()
-        .map_err(|e| UpdateError::GitHubApi(format!("Failed to parse workflow runs: {}", e)))?;
-
-    Ok(runs)
+/// Fetch one workflow run by id.
+pub fn fetch_workflow_run(id: u64, token: Option<&str>) -> UpdateResult<WorkflowRun> {
+    let url = format!("{}/{}", RUN_URL, id);
+    parse_response(send_get(&url, token)?, "workflow run")
 }
 
 /// Check the status of the Release workflow.
 ///
-/// Looks for the most recent Release workflow run and returns its status.
+/// Looks at the most recent Release workflow run and returns its status.
 pub fn check_build_status(token: Option<&str>) -> UpdateResult<BuildStatus> {
     let runs = fetch_workflow_runs(token)?;
 
-    // Find the most recent Release workflow run
-    let release_run = runs
+    Ok(runs
         .workflow_runs
         .into_iter()
-        .find(|run| run.name.as_deref() == Some(RELEASE_WORKFLOW_NAME));
+        .next()
+        .map_or(BuildStatus::Idle, BuildStatus::from_run))
+}
 
-    match release_run {
-        None => Ok(BuildStatus::Idle),
-        Some(run) => {
-            // status can be: queued, in_progress, completed, waiting, pending, requested
-            // conclusion (when completed): success, failure, cancelled, skipped, etc.
-            match run.status.as_str() {
-                "completed" => match run.conclusion.as_deref() {
-                    Some("success") => Ok(BuildStatus::Completed(run)),
-                    _ => Ok(BuildStatus::Failed(run)),
-                },
-                "queued" | "in_progress" | "waiting" | "pending" | "requested" => {
-                    Ok(BuildStatus::InProgress(run))
-                }
-                _ => Ok(BuildStatus::Idle),
+impl BuildStatus {
+    /// Classify a run by the status and conclusion GitHub reports for it.
+    ///
+    /// status can be: queued, in_progress, completed, waiting, pending, requested.
+    /// conclusion (when completed): success, failure, cancelled, skipped, etc.
+    pub fn from_run(run: WorkflowRun) -> Self {
+        match run.status.as_str() {
+            "completed" => match run.conclusion.as_deref() {
+                Some("success") => BuildStatus::Completed(run),
+                _ => BuildStatus::Failed(run),
+            },
+            "queued" | "in_progress" | "waiting" | "pending" | "requested" => {
+                BuildStatus::InProgress(run)
             }
+            _ => BuildStatus::Idle,
         }
     }
 }
@@ -271,7 +292,8 @@ mod tests {
             "status": "in_progress",
             "conclusion": null,
             "html_url": "https://github.com/dmwyatt/granz/actions/runs/12345",
-            "created_at": "2025-01-30T14:23:00Z"
+            "created_at": "2025-01-30T14:23:00Z",
+            "head_sha": "abc1234def5678"
         }"#;
 
         let run: WorkflowRun = serde_json::from_str(json).unwrap();
@@ -292,7 +314,8 @@ mod tests {
                     "status": "completed",
                     "conclusion": "success",
                     "html_url": "https://github.com/dmwyatt/granz/actions/runs/12345",
-                    "created_at": "2025-01-30T14:23:00Z"
+                    "created_at": "2025-01-30T14:23:00Z",
+                    "head_sha": "abc1234def5678"
                 },
                 {
                     "id": 12344,
@@ -300,7 +323,8 @@ mod tests {
                     "status": "completed",
                     "conclusion": "success",
                     "html_url": "https://github.com/dmwyatt/granz/actions/runs/12344",
-                    "created_at": "2025-01-30T14:00:00Z"
+                    "created_at": "2025-01-30T14:00:00Z",
+                    "head_sha": "abc1234def5678"
                 }
             ]
         }"#;
@@ -319,6 +343,7 @@ mod tests {
             conclusion: Some("success".to_string()),
             html_url: "https://example.com".to_string(),
             created_at: "2025-01-30T14:23:00Z".to_string(),
+            head_sha: "abc1234def5678".to_string(),
         };
 
         match BuildStatus::Completed(run.clone()) {
@@ -336,6 +361,7 @@ mod tests {
             conclusion: None,
             html_url: "https://example.com".to_string(),
             created_at: "2025-01-30T14:23:00Z".to_string(),
+            head_sha: "abc1234def5678".to_string(),
         };
 
         match BuildStatus::InProgress(run.clone()) {
@@ -355,9 +381,55 @@ mod tests {
             conclusion: Some("success".to_string()),
             html_url: "https://example.com".to_string(),
             created_at: "2025-01-30T14:23:00Z".to_string(),
+            head_sha: "abc1234def5678".to_string(),
         };
 
         let run2 = run1.clone();
         assert_eq!(BuildStatus::Completed(run1), BuildStatus::Completed(run2));
+    }
+
+    fn run_with(status: &str, conclusion: Option<&str>) -> WorkflowRun {
+        WorkflowRun {
+            id: 1,
+            name: Some("Release".to_string()),
+            status: status.to_string(),
+            conclusion: conclusion.map(str::to_string),
+            html_url: "https://example.com".to_string(),
+            created_at: "2025-01-30T14:23:00Z".to_string(),
+            head_sha: "abc1234def5678".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_from_run_classifies_by_status_and_conclusion() {
+        assert!(matches!(
+            BuildStatus::from_run(run_with("completed", Some("success"))),
+            BuildStatus::Completed(_)
+        ));
+        assert!(matches!(
+            BuildStatus::from_run(run_with("completed", Some("cancelled"))),
+            BuildStatus::Failed(_)
+        ));
+        assert!(matches!(
+            BuildStatus::from_run(run_with("queued", None)),
+            BuildStatus::InProgress(_)
+        ));
+        assert_eq!(
+            BuildStatus::from_run(run_with("mystery", None)),
+            BuildStatus::Idle
+        );
+    }
+
+    #[test]
+    fn test_format_timestamp_shows_local_time() {
+        let formatted = format_timestamp("2025-01-30T14:23:00Z");
+        // Local time, so only the shape is fixed: YYYY-MM-DD HH:MM:SS
+        assert_eq!(formatted.len(), 19);
+        assert_eq!(&formatted[10..11], " ");
+    }
+
+    #[test]
+    fn test_format_timestamp_keeps_unparseable_input() {
+        assert_eq!(format_timestamp("not-a-timestamp"), "not-a-timestamp");
     }
 }
