@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use super::metrics::RankedDoc;
 use crate::cli::args::QualityMode;
 use crate::embed::config::EmbedSpec;
-use crate::embed::model::{Embedder, FastEmbedModel};
+use crate::embed::model::{Embedder, ProductionEmbedder};
 use crate::embed::rerank::{FastEmbedReranker, RerankModel, Reranker};
 use crate::embed::search::SemanticSearchResult;
 use crate::embed::{DEFAULT_BATCH_SIZE, EmbeddingIndex, ensure_embeddings};
@@ -26,17 +26,17 @@ pub enum Retriever<'a> {
         conn: &'a Connection,
     },
     Semantic {
-        embedder: FastEmbedModel,
+        embedder: ProductionEmbedder,
         index: EmbeddingIndex,
     },
     Hybrid {
         conn: &'a Connection,
-        embedder: FastEmbedModel,
+        embedder: ProductionEmbedder,
         index: EmbeddingIndex,
     },
     HybridRerank {
         conn: &'a Connection,
-        embedder: FastEmbedModel,
+        embedder: ProductionEmbedder,
         index: EmbeddingIndex,
         reranker: Box<FastEmbedReranker>,
         ctx: RankingContext,
@@ -55,13 +55,13 @@ impl<'a> Retriever<'a> {
         match mode {
             QualityMode::Fts => Ok(Retriever::Fts { conn }),
             QualityMode::Semantic => {
-                let embedder = FastEmbedModel::new()?;
+                let embedder = ProductionEmbedder::new()?;
                 let spec = EmbedSpec::resolve_stored(conn, embedder.max_length());
                 let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE, &spec)?;
                 Ok(Retriever::Semantic { embedder, index })
             }
             QualityMode::Hybrid => {
-                let embedder = FastEmbedModel::new()?;
+                let embedder = ProductionEmbedder::new()?;
                 let spec = EmbedSpec::resolve_stored(conn, embedder.max_length());
                 let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE, &spec)?;
                 Ok(Retriever::Hybrid {
@@ -71,7 +71,7 @@ impl<'a> Retriever<'a> {
                 })
             }
             QualityMode::RerankJina | QualityMode::RerankBge => {
-                let embedder = FastEmbedModel::new()?;
+                let embedder = ProductionEmbedder::new()?;
                 let spec = EmbedSpec::resolve_stored(conn, embedder.max_length());
                 let index = ensure_embeddings(conn, &embedder, DEFAULT_BATCH_SIZE, &spec)?;
                 let model = match mode {

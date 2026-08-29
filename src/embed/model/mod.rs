@@ -1,10 +1,24 @@
-use std::cell::RefCell;
 use std::env;
 use std::sync::OnceLock;
 
 use anyhow::Result;
 
 use crate::platform;
+
+#[cfg(target_os = "macos")]
+mod gguf;
+#[cfg(target_os = "macos")]
+mod llama;
+#[cfg(not(target_os = "macos"))]
+mod onnx;
+
+/// The embedder production code loads: llama.cpp on Metal on macOS, ONNX
+/// Runtime everywhere else. Both produce the vectors [`MODEL_NAME`]
+/// promises, so the runtime is not part of the model-consistency key.
+#[cfg(target_os = "macos")]
+pub use llama::LlamaEmbedModel as ProductionEmbedder;
+#[cfg(not(target_os = "macos"))]
+pub use onnx::FastEmbedModel as ProductionEmbedder;
 
 /// Trait for embedding models.
 pub trait Embedder {
@@ -17,17 +31,13 @@ pub trait Embedder {
 }
 
 /// Identity of the production embedder, exposed so status checks can compare
-/// stored metadata against it without loading the ONNX model.
+/// stored metadata against it without loading the model.
 pub const MODEL_NAME: &str = "nomic-embed-text-v1.5";
 
-/// Production embedder using fastembed (nomic-embed-text-v1.5).
-pub struct FastEmbedModel {
-    model: RefCell<fastembed::TextEmbedding>,
-    dim: usize,
-}
-
-/// The model cache directory (in the platform data directory), created if
-/// missing. Models must cache here rather than in a CWD-relative directory.
+/// The ONNX model cache directory (in the platform data directory), created
+/// if missing. Models must cache here rather than in a CWD-relative
+/// directory. The reranker uses it on every platform; the embedder only where
+/// it is ONNX.
 pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
     let cache_dir = platform::data_dir()?.join("fastembed_cache");
     std::fs::create_dir_all(&cache_dir)?;
@@ -90,92 +100,23 @@ pub(crate) fn execution_providers() -> Vec<ort::execution_providers::ExecutionPr
         );
     }
 
-    #[cfg(feature = "coreml")]
-    {
-        use ort::execution_providers::CoreMLExecutionProvider;
-        providers.push(
-            ort::execution_providers::ExecutionProviderDispatch::from(
-                CoreMLExecutionProvider::default(),
-            )
-            .error_on_failure(),
-        );
-    }
-
     providers
 }
 
 /// Whether this binary was built with a hardware execution provider
-/// (cuda/directml/coreml). When false, embedding runs on CPU.
+/// (cuda/directml). When false, ONNX inference runs on CPU.
 pub(crate) fn has_hardware_provider() -> bool {
     !execution_providers().is_empty()
 }
 
 /// Whether a CPU embedding run is worth warning about.
 ///
-/// It is not on macOS, even though macOS does embed on CPU. The only
-/// hardware provider Apple Silicon offers is CoreML, and CoreML loses to
-/// the CPU on this model (see the `coreml` feature note in Cargo.toml), so
-/// release builds leave it off on purpose. Pointing a macOS user at the
-/// GPU build features would be advice to go build a slower binary. A macOS
-/// user who opted into `--features coreml` anyway is excluded by the
-/// hardware-provider check and gets no warning either.
+/// macOS embeds through llama.cpp on Metal (see `llama.rs`), so the ONNX
+/// execution providers say nothing about where its embedding runs. Elsewhere
+/// the embedder is ONNX, and it runs on CPU whenever no hardware provider was
+/// compiled in.
 pub(crate) fn should_warn_cpu_only() -> bool {
-    !has_hardware_provider() && !cfg!(target_os = "macos")
-}
-
-impl FastEmbedModel {
-    pub fn new() -> Result<Self> {
-        set_hf_cache_dir()?;
-
-        let providers = execution_providers();
-
-        let mut opts =
-            fastembed::TextInitOptions::new(fastembed::EmbeddingModel::NomicEmbedTextV15)
-                .with_show_download_progress(true)
-                .with_max_length(512);
-
-        if !providers.is_empty() {
-            opts = opts.with_execution_providers(providers);
-        }
-
-        let model = fastembed::TextEmbedding::try_new(opts)?;
-
-        Ok(Self {
-            model: RefCell::new(model),
-            dim: 768,
-        })
-    }
-}
-
-impl Embedder for FastEmbedModel {
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let docs: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
-        let embeddings = self.model.borrow_mut().embed(docs, None)?;
-        Ok(embeddings)
-    }
-
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let results = self
-            .model
-            .borrow_mut()
-            .embed(vec![text.to_string()], None)?;
-        results
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No embedding returned for query"))
-    }
-
-    fn dimension(&self) -> usize {
-        self.dim
-    }
-
-    fn model_name(&self) -> &str {
-        MODEL_NAME
-    }
-
-    fn max_length(&self) -> usize {
-        512
-    }
+    !cfg!(target_os = "macos") && !has_hardware_provider()
 }
 
 /// Mock embedder for testing — returns deterministic vectors based on text length.
@@ -241,6 +182,12 @@ impl MockEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_never_warns_about_cpu_only_embedding() {
+        assert!(!should_warn_cpu_only());
+    }
 
     #[test]
     fn test_mock_embedder_dimension() {

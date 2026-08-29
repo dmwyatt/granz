@@ -41,7 +41,7 @@ aggregates them and its name survives changes to the matrix.
 ```bash
 cargo check                    # Type-check without building (fast iteration)
 cargo build                    # Debug build
-cargo build --release          # Release build
+cargo build --release          # Release build (add --features directml on Windows for GPU embedding)
 cargo test --no-fail-fast      # Run all tests -- see below, plain `cargo test` does not
 cargo test <module>::tests     # Run tests for a specific module, e.g. cargo test db::meetings::tests
 cargo test <test_name>         # Run a single test by name
@@ -58,6 +58,13 @@ coverage.
 On Windows, run tests from PowerShell rather than Git Bash. Git Bash prepends
 its coreutils to PATH, so PATH-sensitive tests pass there and fail on a GitHub
 Actions windows runner.
+
+The embedder is platform-selected in `src/embed/model/mod.rs`: macOS builds
+`llama.rs` (llama.cpp on Metal, compiled from source by `llama-cpp-sys-2`, so a
+macOS build needs `cmake`), every other platform builds `onnx.rs` (fastembed).
+Neither is a cargo feature; a macOS build cannot be checked from Windows and
+vice versa, so a change to either file is verified only on that platform's CI
+leg or a real machine of that platform.
 
 A pre-commit hook (local, in the shared `.git/hooks`) rejects commits whose
 staged Rust files are unformatted; run `cargo fmt` before committing.

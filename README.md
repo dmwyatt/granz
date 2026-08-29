@@ -14,18 +14,16 @@ Or build from source:
 cargo build --release
 # Binary at target/release/grans
 
-# With GPU acceleration for semantic search:
+# With GPU acceleration for semantic search (Windows and Linux):
 cargo build --release --features directml # Windows (any GPU, recommended)
 cargo build --release --features cuda     # NVIDIA (requires CUDA toolkit + cuDNN)
 ```
 
-On macOS, build plain — the CPU is the fastest option grans has on Apple Silicon.
-There is a `coreml` feature, but CoreML is *slower* than the CPU on
-nomic-embed-text-v1.5 (it supports only 470 of the model's 1,192 graph nodes and
-splits them across 73 partitions, so inference spends its time copying tensors back
-and forth rather than computing). Release builds ship without it. Finding a macOS
-path that actually beats the CPU is tracked in
-[#142](https://github.com/dmwyatt/granz/issues/142).
+On macOS, build plain. Embedding there goes through llama.cpp on Metal, which
+is selected by platform rather than by a cargo feature, so there is nothing to
+enable. Building from source needs the Xcode Command Line Tools and `cmake`
+(`brew install cmake`), since llama.cpp is compiled into the binary. The
+reranker still runs through ONNX Runtime on the CPU on every platform.
 
 ## Quick Start
 
@@ -325,7 +323,7 @@ The JSON envelopes differ where the contracts do: grep JSON reports `total_meeti
 
 The semantic half of search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads, and search skips the embedding model entirely when there are no embeddings to search. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results), or when they were built with an outdated chunking strategy. Each warning says to run `grans embed`; searching itself never blocks.
+A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads, and search skips the embedding model entirely when there are no embeddings to search. On macOS the embedding model is the f16 GGUF of the same weights, run by llama.cpp on Metal; elsewhere it is the ONNX export, run by ONNX Runtime. The two produce interchangeable vectors, so a database embedded on one platform searches correctly on the other, and syncing it via Dropbox to a Mac (or from one) never triggers a re-embed. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results), or when they were built with an outdated chunking strategy. Each warning says to run `grans embed`; searching itself never blocks.
 
 When an upgrade changes the embedding model, the next `grans embed` detects the stale embeddings and rebuilds them all. This full rebuild is a one-time cost and can take a while on large databases.
 
