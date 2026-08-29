@@ -34,8 +34,10 @@ pub trait Embedder {
 /// stored metadata against it without loading the model.
 pub const MODEL_NAME: &str = "nomic-embed-text-v1.5";
 
-/// The model cache directory (in the platform data directory), created if
-/// missing. Models must cache here rather than in a CWD-relative directory.
+/// The ONNX model cache directory (in the platform data directory), created
+/// if missing. Models must cache here rather than in a CWD-relative
+/// directory. The reranker uses it on every platform; the embedder only where
+/// it is ONNX.
 pub(crate) fn hf_cache_dir() -> Result<std::path::PathBuf> {
     let cache_dir = platform::data_dir()?.join("fastembed_cache");
     std::fs::create_dir_all(&cache_dir)?;
