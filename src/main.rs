@@ -33,7 +33,12 @@ fn main() -> Result<()> {
         timeout,
     } = &cli.command
     {
-        commands::update::run(*check, *use_gh_auth, *wait, *timeout)?;
+        commands::update::run(commands::update::UpdateOptions {
+            check_only: *check,
+            use_gh_auth: *use_gh_auth,
+            wait_for_build: *wait,
+            timeout_secs: *timeout,
+        })?;
         return Ok(());
     }
 

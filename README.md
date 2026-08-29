@@ -738,10 +738,16 @@ finished release without asking again. `--wait` skips the confirmation too, even
 when nothing turned out to be building, since a script has no one to answer it.
 Otherwise grans still confirms before downloading.
 
-After a wait, grans checks that the release it fetched was published by the
-build it waited for. If GitHub hands back an older release, grans stops with an
-error rather than installing a binary you did not wait for; run the command
-again in a moment.
+After a wait, grans installs only the release that build published: it polls
+the build it showed you by id, then matches the commit the build made against
+the commit in the release title. GitHub can keep serving the previous release
+for a short while after a build finishes, so grans keeps asking for up to two
+minutes before giving up with an error rather than installing a binary you did
+not wait for.
+
+Because `--wait` installs unattended, it stops with an error rather than
+proceeding when it cannot check the build status (rate-limited, or auth
+declined), since it could not otherwise tell whether a build was running.
 
 **Private Repositories**: For private repositories, grans will prompt to use your `gh` CLI credentials if available. For non-interactive/scripted usage:
 

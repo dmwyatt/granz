@@ -1,6 +1,7 @@
 //! Self-update module for downloading and installing new releases from GitHub.
 
 pub mod download;
+pub mod fetch;
 pub mod github;
 pub mod platform;
 #[cfg(test)]
@@ -71,6 +72,11 @@ pub enum UpdateError {
 
     #[error("Build failed with conclusion: {conclusion}")]
     BuildFailed { conclusion: String },
+
+    #[error(
+        "The latest release ({tag}) is not the output of the build that just finished (commit {sha}). GitHub is still serving the previous release; run 'grans update' again in a moment."
+    )]
+    ReleaseNotFromBuild { tag: String, sha: String },
 
     #[error(transparent)]
     Http(#[from] reqwest::Error),
