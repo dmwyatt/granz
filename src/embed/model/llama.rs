@@ -15,6 +15,7 @@ use std::ops::Range;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use llama_cpp_2::LogOptions;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -89,12 +90,13 @@ impl LlamaEmbedModel {
 fn backend() -> &'static LlamaBackend {
     static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
     BACKEND.get_or_init(|| {
-        let mut backend = LlamaBackend::init()
-            .expect("llama backend is initialized exactly once, through this OnceLock");
-        // Left on, llama.cpp prints the whole model card and every buffer
-        // allocation to stderr on load.
-        backend.void_logs();
-        backend
+        // Silenced before init, not after: the Metal device announces
+        // itself (GPU family, feature flags, working-set size) on stderr
+        // during init itself, and model load would then add the whole
+        // model card. Nothing in grans subscribes to tracing anyway.
+        llama_cpp_2::send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+        LlamaBackend::init()
+            .expect("llama backend is initialized exactly once, through this OnceLock")
     })
 }
 
