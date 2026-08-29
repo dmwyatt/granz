@@ -202,6 +202,9 @@ pub fn search(
 /// The line shown when nothing survives to display. A `min_score` that
 /// rejected candidates gets named along with the best score it turned
 /// away, so a too-high threshold never reads as a query nothing matched.
+/// Both numbers print at full precision: rounding the best score can push
+/// it to or past the threshold on screen, which reads as a result that
+/// should have been kept.
 fn no_matches_line(
     query: &str,
     min_score: Option<f32>,
@@ -210,7 +213,7 @@ fn no_matches_line(
     match (min_score, rejected) {
         (Some(min), Some(r)) => format!(
             "No matches for \"{}\" at --min-score {} ({} candidate(s) scored below it; \
-             best was {:.2}).",
+             best was {}).",
             query, min, r.count, r.best
         ),
         _ => format!("No matches for \"{}\".", query),
@@ -357,6 +360,27 @@ mod tests {
             line,
             "No matches for \"quarterly planning\" at --min-score 0.9 \
              (12 candidate(s) scored below it; best was 0.41)."
+        );
+    }
+
+    #[test]
+    fn no_matches_line_prints_a_best_score_that_cannot_read_as_passing() {
+        // Rounded to two decimals, a best of 0.4996 printed as "0.50"
+        // against a 0.5 threshold, reading as though it should have been
+        // kept. Both numbers print at full precision so the line cannot
+        // contradict itself.
+        let line = no_matches_line(
+            "quarterly planning",
+            Some(0.5),
+            Some(RejectedByScore {
+                count: 3,
+                best: 0.4996,
+            }),
+        );
+        assert_eq!(
+            line,
+            "No matches for \"quarterly planning\" at --min-score 0.5 \
+             (3 candidate(s) scored below it; best was 0.4996)."
         );
     }
 
