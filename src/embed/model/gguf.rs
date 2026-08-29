@@ -49,7 +49,9 @@ pub(super) fn ensure_model_file(spec: &GgufSpec) -> Result<PathBuf> {
 /// Resolve `spec` inside `dir`, calling `fetch` to fill a temporary file when
 /// the final one is missing. The final name only appears once the transfer
 /// has been verified, so an interrupted or corrupt download can never be
-/// mistaken for the model.
+/// mistaken for the model. The temporary file has a unique name, so two
+/// processes downloading at once cannot interleave writes into one file, and
+/// it is deleted on every path except the rename into place.
 pub(super) fn ensure_in_dir(
     spec: &GgufSpec,
     dir: &Path,
@@ -60,13 +62,13 @@ pub(super) fn ensure_in_dir(
         return Ok(path);
     }
 
-    let part = dir.join(format!("{}.part", spec.file_name));
-    let transfer = fetch(&part)?;
-    if let Err(e) = check_transfer(&transfer, spec) {
-        let _ = fs::remove_file(&part);
-        return Err(e);
-    }
-    fs::rename(&part, &path)?;
+    let part = tempfile::Builder::new()
+        .prefix(spec.file_name)
+        .suffix(".part")
+        .tempfile_in(dir)?;
+    let transfer = fetch(part.path())?;
+    check_transfer(&transfer, spec)?;
+    part.persist(&path)?;
     Ok(path)
 }
 
@@ -185,7 +187,7 @@ mod tests {
         let path = ensure_in_dir(&spec, dir.path(), write_hello).unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"hello");
-        assert!(!dir.path().join("hello.gguf.part").exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -199,8 +201,44 @@ mod tests {
         let err = ensure_in_dir(&spec, dir.path(), write_hello).unwrap_err();
 
         assert!(err.to_string().contains("hashed to"), "{err}");
-        assert!(!dir.path().join("hello.gguf").exists());
-        assert!(!dir.path().join("hello.gguf.part").exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_fetch_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = hello_spec();
+
+        let err = ensure_in_dir(&spec, dir.path(), |part| {
+            fs::write(part, b"hel")?;
+            bail!("connection reset")
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("connection reset"), "{err}");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn concurrent_fetches_write_distinct_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = hello_spec();
+        let mut first_part = None;
+
+        ensure_in_dir(&spec, dir.path(), |part| {
+            first_part = Some(part.to_path_buf());
+            let second = ensure_in_dir(&spec, dir.path(), |inner| {
+                assert_ne!(inner, part, "both fetches were handed the same file");
+                write_hello(inner)
+            })?;
+            assert_eq!(fs::read(second)?, b"hello");
+            write_hello(part)
+        })
+        .unwrap();
+
+        assert!(first_part.is_some());
+        assert_eq!(fs::read(dir.path().join(spec.file_name)).unwrap(), b"hello");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
