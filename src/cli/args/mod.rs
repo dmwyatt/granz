@@ -9,6 +9,18 @@ fn parse_speaker_selector(s: &str) -> Result<SpeakerSelector, String> {
     })
 }
 
+/// Reranker scores are sigmoid probabilities, so a threshold outside
+/// [0, 1] (or a NaN, which no comparison admits) can only reject every
+/// candidate. Refusing it here beats an empty result set that reads like
+/// an empty corpus.
+fn parse_min_score(s: &str) -> Result<f32, String> {
+    let score: f32 = s.parse().map_err(|_| "not a number".to_string())?;
+    if !(0.0..=1.0).contains(&score) {
+        return Err("must be between 0.0 and 1.0 (reranker scores are probabilities)".to_string());
+    }
+    Ok(score)
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "grans", version = env!("GRANS_VERSION"), about = "Query your Granola meeting notes")]
 pub struct Cli {
@@ -71,7 +83,7 @@ pub enum Commands {
         fast: bool,
 
         /// Minimum reranker relevance score (0-1)
-        #[arg(long, conflicts_with = "fast")]
+        #[arg(long, conflicts_with = "fast", value_parser = parse_min_score)]
         min_score: Option<f32>,
 
         /// Maximum match snippets shown per meeting in search results

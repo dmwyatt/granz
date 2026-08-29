@@ -132,36 +132,76 @@ pub fn rerank_hybrid(
     )
 }
 
-/// Ranked (id, score) pairs for the fused candidates of a hybrid ranking.
-/// With a reranker the cross-encoder decides the order and supplies the
-/// score; without one the fusion order stands and no score is attached,
-/// since RRF ranks are not comparable across queries. `min_score` applies
-/// to rerank scores only.
+/// The candidates a `min_score` threshold removed. `best` is the highest
+/// score among them: the value a threshold has to drop below to admit
+/// anything at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RejectedByScore {
+    pub count: usize,
+    pub best: f32,
+}
+
+/// Ranked candidates, plus what a `min_score` threshold took out of them.
+pub struct OrderedCandidates {
+    /// Ranked (id, score) pairs. The score is None when the rerank stage
+    /// was skipped, since RRF ranks are not comparable across queries.
+    pub docs: Vec<(String, Option<f32>)>,
+    /// What `min_score` rejected, when it rejected anything. Empty `docs`
+    /// alongside a `Some` here means the threshold emptied the results,
+    /// which is a different fact than the query matching nothing.
+    pub rejected: Option<RejectedByScore>,
+}
+
+/// Split reranked candidates on a `min_score` threshold, summarizing what
+/// falls below it.
+fn split_on_min_score(
+    reranked: Vec<RerankedDoc>,
+    min: f32,
+) -> (Vec<RerankedDoc>, Option<RejectedByScore>) {
+    let (kept, dropped): (Vec<_>, Vec<_>) = reranked.into_iter().partition(|d| d.score >= min);
+    let summary = (!dropped.is_empty()).then(|| RejectedByScore {
+        count: dropped.len(),
+        best: dropped.iter().map(|d| d.score).fold(f32::MIN, f32::max),
+    });
+    (kept, summary)
+}
+
+/// Order the fused candidates of a hybrid ranking. With a reranker the
+/// cross-encoder decides the order and supplies the score; without one the
+/// fusion order stands and no score is attached. `min_score` applies to
+/// rerank scores only.
 pub fn order_candidates(
     conn: &Connection,
     query: &str,
     ranking: &HybridRanking,
     reranker: Option<&dyn Reranker>,
     min_score: Option<f32>,
-) -> Result<Vec<(String, Option<f32>)>> {
+) -> Result<OrderedCandidates> {
     let Some(reranker) = reranker else {
-        return Ok(ranking
-            .fused
-            .iter()
-            .map(|d| (d.document_id.clone(), None))
-            .collect());
+        return Ok(OrderedCandidates {
+            docs: ranking
+                .fused
+                .iter()
+                .map(|d| (d.document_id.clone(), None))
+                .collect(),
+            rejected: None,
+        });
     };
 
     let ctx = RankingContext::load(conn)?;
     let cfg = RankingConfig::default();
-    let mut reranked = rerank_hybrid(conn, reranker, query, ranking, &ctx, &cfg)?;
-    if let Some(min) = min_score {
-        reranked.retain(|d| d.score >= min);
-    }
-    Ok(reranked
-        .into_iter()
-        .map(|d| (d.document_id, Some(d.score)))
-        .collect())
+    let reranked = rerank_hybrid(conn, reranker, query, ranking, &ctx, &cfg)?;
+    let (kept, rejected) = match min_score {
+        Some(min) => split_on_min_score(reranked, min),
+        None => (reranked, None),
+    };
+    Ok(OrderedCandidates {
+        docs: kept
+            .into_iter()
+            .map(|d| (d.document_id, Some(d.score)))
+            .collect(),
+        rejected,
+    })
 }
 
 #[cfg(test)]
@@ -535,8 +575,9 @@ mod tests {
 
         let ordered = order_candidates(&conn, "kumquat", &ranking, None, Some(0.9)).unwrap();
 
+        assert_eq!(ordered.rejected, None);
         assert_eq!(
-            ordered,
+            ordered.docs,
             vec![
                 ("doc-none".to_string(), None),
                 ("doc-title".to_string(), None),
@@ -553,7 +594,7 @@ mod tests {
             order_candidates(&conn, "kumquat", &ranking, Some(&MockReranker), None).unwrap();
 
         assert_eq!(
-            ordered,
+            ordered.docs,
             vec![
                 ("doc-chunk".to_string(), Some(2.0)),
                 ("doc-title".to_string(), Some(1.0)),
@@ -570,11 +611,41 @@ mod tests {
             order_candidates(&conn, "kumquat", &ranking, Some(&MockReranker), Some(0.5)).unwrap();
 
         assert_eq!(
-            ordered,
+            ordered.docs,
             vec![
                 ("doc-chunk".to_string(), Some(2.0)),
                 ("doc-title".to_string(), Some(1.0)),
             ]
         );
+    }
+
+    #[test]
+    fn order_candidates_reports_what_min_score_rejected() {
+        // The caller needs the count and the best rejected score to tell
+        // "your threshold was too high" from "nothing matched".
+        let (conn, ranking) = order_candidates_fixture();
+
+        let ordered =
+            order_candidates(&conn, "kumquat", &ranking, Some(&MockReranker), Some(1.5)).unwrap();
+
+        assert_eq!(ordered.docs.len(), 1);
+        assert_eq!(
+            ordered.rejected,
+            Some(RejectedByScore {
+                count: 2,
+                best: 1.0
+            })
+        );
+    }
+
+    #[test]
+    fn order_candidates_reports_nothing_rejected_when_all_candidates_clear() {
+        let (conn, ranking) = order_candidates_fixture();
+
+        let ordered =
+            order_candidates(&conn, "kumquat", &ranking, Some(&MockReranker), Some(0.0)).unwrap();
+
+        assert_eq!(ordered.docs.len(), 3);
+        assert_eq!(ordered.rejected, None);
     }
 }
