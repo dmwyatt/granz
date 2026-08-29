@@ -110,16 +110,19 @@ pub fn search(
     // empty or model-mismatched index yields keyword-only results without
     // paying embedder init (or the one-time model download).
     let embedder = (!index.is_empty())
-        .then(crate::embed::model::FastEmbedModel::new)
+        .then(crate::embed::model::ProductionEmbedder::new)
         .transpose()?;
 
     // The reranker's model load needs nothing retrieval produces, so start
     // it here and let embedding and retrieval run in front of it. Spawning
     // before the embedder init above hides the load just as completely but
     // races the embedder for the one-time ONNX runtime init, slowing
-    // embedder init by ~70ms (placement A/B in #82's PR). Only statement
-    // order and this comment keep the spawn after the embedder; moving it
-    // up still compiles and passes, it just pays that contention again.
+    // embedder init by ~70ms (placement A/B in #82's PR). That contention
+    // exists only where the embedder is ONNX (everything but macOS, where
+    // it is llama.cpp and the reranker alone uses ONNX); measuring no
+    // regression from an earlier spawn on a Mac says nothing about the
+    // other platforms. Only statement order and this comment keep the
+    // spawn after the embedder; moving it up still compiles and passes.
     let pending_reranker = opts
         .rerank
         .then(|| {
