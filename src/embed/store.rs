@@ -42,6 +42,14 @@ pub fn get_stored_chunks(conn: &Connection) -> Result<Vec<StoredChunk>> {
     Ok(chunks)
 }
 
+/// Count the chunk rows physically stored, whichever model wrote them.
+/// Callers that delete rows want this; callers that ask what the current
+/// model can search want `get_embedding_status`.
+pub fn count_stored_chunks(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
 /// Insert a chunk and its embedding vector.
 /// Note: For production use, prefer `insert_chunks_with_embeddings_batch` for better performance.
 #[allow(dead_code)]
@@ -520,6 +528,27 @@ mod tests {
 
         let vectors = load_all_vectors(&conn).unwrap();
         assert!(vectors.is_empty());
+    }
+
+    #[test]
+    fn count_stored_chunks_counts_every_row() {
+        let conn = test_db();
+        assert_eq!(count_stored_chunks(&conn).unwrap(), 0);
+
+        for i in 0..3 {
+            let chunk = Chunk {
+                source_type: ChunkSourceType::TranscriptWindow,
+                source_id: format!("doc1:w{}", i),
+                document_id: "doc1".to_string(),
+                text: format!("chunk {}", i),
+                content_hash: hash_content(&format!("chunk {}", i)),
+                metadata: None,
+                header: None,
+            };
+            insert_chunk_with_embedding(&conn, &chunk, &[1.0]).unwrap();
+        }
+
+        assert_eq!(count_stored_chunks(&conn).unwrap(), 3);
     }
 
     #[test]

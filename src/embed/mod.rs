@@ -70,7 +70,13 @@ pub struct ChunkSizeStats {
 pub struct EmbeddingStatus {
     /// Total number of chunks that should exist (from transcripts).
     pub total_chunks: usize,
-    /// Number of chunks already embedded.
+    /// Number of chunk rows physically present in the database, whichever
+    /// model wrote them. This is what `grans embed clear` deletes. It
+    /// diverges from `embedded_chunks` whenever stored rows are unusable:
+    /// after a model change (all of them), when a source's content changed
+    /// (the stale row), or when a source was deleted (an orphan).
+    pub stored_chunks: usize,
+    /// Number of chunks embedded and usable by the current model.
     pub embedded_chunks: usize,
     /// Number of chunks that need embedding (new or changed).
     pub pending_chunks: usize,
@@ -179,9 +185,11 @@ pub fn calculate_chunk_size_stats(conn: &Connection) -> Result<Option<ChunkSizeS
 }
 
 /// Get embedding status without triggering embedding.
-/// Returns counts of total, embedded, pending, and orphaned chunks from all sources.
+/// Returns counts of total, stored, embedded, pending, and orphaned chunks
+/// from all sources.
 /// `current_model` identifies the embedder that will be used; stored embeddings
-/// from a different model are unusable and reported as pending.
+/// from a different model are unusable and reported as pending, so
+/// `embedded_chunks` is a usability count and `stored_chunks` the physical one.
 /// `spec` is the resolved embedding spec the caller intends to embed with.
 pub fn get_embedding_status(
     conn: &Connection,
@@ -270,6 +278,7 @@ pub fn get_embedding_status(
 
     Ok(EmbeddingStatus {
         total_chunks: desired_chunks.len(),
+        stored_chunks: stored.len(),
         embedded_chunks: desired_chunks.len() - pending_count,
         pending_chunks: pending_count,
         orphaned_chunks: orphan_ids.len(),
@@ -1641,5 +1650,36 @@ mod tests {
         assert_eq!(status.pending_chunks, status.total_chunks);
         assert_eq!(status.embedded_chunks, 0);
         assert_eq!(status.pending_by_type.total(), status.total_chunks);
+    }
+
+    #[test]
+    fn test_embedding_status_counts_stored_rows_after_model_change() {
+        // `embedded_chunks` answers "usable by the current model" and drops
+        // to 0 here; `stored_chunks` answers "physically in the database"
+        // and must still see the rows, or callers that delete them (#35)
+        // have nothing honest to read.
+        let conn = setup_test_db();
+        insert_utterances(
+            &conn,
+            "doc1",
+            &[
+                "Hello world, this is a test with enough content to meet minimum chunk size requirements.",
+            ],
+        );
+
+        let embedder = MockEmbedder::default();
+        ensure_embeddings(
+            &conn,
+            &embedder,
+            DEFAULT_BATCH_SIZE,
+            &config::EmbedSpec::default_for(512),
+        )
+        .unwrap();
+
+        let status =
+            get_embedding_status(&conn, "other-model", &config::EmbedSpec::default_for(512))
+                .unwrap();
+        assert_eq!(status.embedded_chunks, 0);
+        assert_eq!(status.stored_chunks, status.total_chunks);
     }
 }
