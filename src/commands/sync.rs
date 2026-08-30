@@ -6,12 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use log::debug;
 
 use chrono::FixedOffset;
 
 use crate::cli::args::DropboxAction;
 use crate::db::integrity::check_pulled_database;
-use crate::db::wal::{checkpoint_file, replace_database};
+use crate::db::wal::{checkpoint_file, discard, replace_database};
 use crate::output::format::{OutputMode, format_size};
 use crate::output::progress::create_spinner;
 use crate::pkce::PkceChallenge;
@@ -122,6 +123,8 @@ fn push(force: bool) -> Result<()> {
 
     // Both the upload and the hash that decides whether to upload read the
     // database file on its own, so it has to hold the whole database first.
+    // Unlike the pull side, there is no way to carry on without this: uploading
+    // an unflattened file would put an incomplete database on Dropbox.
     checkpoint_file(&db_path)?;
 
     let synced_hash = push_file(
@@ -138,7 +141,7 @@ fn push(force: bool) -> Result<()> {
     upload_metadata(&client, &metadata)?;
 
     // Record what both sides now hold, so the next sync can tell which one moved.
-    config.last_synced_hash = Some(synced_hash);
+    config.record_sync(synced_hash);
     config.last_push_time = Some(current_timestamp());
     config.save()?;
     println!("\nPush complete!");
@@ -225,11 +228,6 @@ fn pull(force: bool) -> Result<()> {
     // Get local database path
     let db_path = crate::db::connection::default_db_path()?;
 
-    // Deciding whether the local copy has changes Dropbox lacks means hashing
-    // the database file, which is only the whole database once it is
-    // checkpointed.
-    checkpoint_file(&db_path)?;
-
     // Pull database
     if client.get_metadata(REMOTE_DB_PATH)?.is_some() {
         let synced_hash = pull_file(
@@ -238,11 +236,14 @@ fn pull(force: bool) -> Result<()> {
             REMOTE_DB_PATH,
             "database",
             force,
-            config.last_synced_hash.as_deref(),
+            // What the local file held when it last agreed with Dropbox, which
+            // is not the hash Dropbox holds once a local rewrite that changed
+            // no data (the journal mode conversion) has moved the file on.
+            config.local_reference(),
         )?;
 
         // Record what both sides now hold, so the next sync can tell which one moved.
-        config.last_synced_hash = Some(synced_hash);
+        config.record_sync(synced_hash);
         config.last_pull_time = Some(current_timestamp());
         config.save()?;
         println!("\nPull complete!");
@@ -280,10 +281,7 @@ fn pull_file(
                 path: remote_path.to_string(),
             })?;
 
-    let local_hash = local_path
-        .exists()
-        .then(|| hash_file(local_path))
-        .transpose()?;
+    let local_hash = local_content_hash(local_path, force);
 
     match decide(expected_hash, local_hash.as_deref(), last_synced) {
         TransferDecision::UpToDate => {
@@ -329,15 +327,53 @@ fn pull_file(
         },
     );
 
-    match downloaded {
+    let installed = downloaded.and_then(|()| replace_database(&temp_path, local_path));
+
+    match installed {
         Ok(()) => {
-            replace_database(&temp_path, local_path)?;
             println!("  Downloaded to {}", local_path.display());
             Ok(expected_hash.to_string())
         }
+        // Every way the download can fail to become the local database ends
+        // here, installing included: a several hundred megabyte temp file left
+        // behind is removed by nothing, not even `db clear --all`.
         Err(e) => {
-            let _ = std::fs::remove_file(&temp_path);
+            discard(&temp_path);
             Err(e)
+        }
+    }
+}
+
+/// The content hash of the local database, when one can be established.
+///
+/// `None` means the answer is unknown, not that the file is absent. A local
+/// database too broken to open is the usual reason to be pulling in the first
+/// place, so nothing about reading it may abort the command that would replace
+/// it. Under `--force` the answer changes no decision, and hashing hundreds of
+/// megabytes to ignore the result is worth skipping.
+fn local_content_hash(local_path: &Path, force: bool) -> Option<String> {
+    if force {
+        return None;
+    }
+
+    // The hash has to cover whatever is still in the write-ahead log, since
+    // that is part of the database Dropbox is being compared against. A file
+    // that cannot be checkpointed is still worth hashing: the bytes are what
+    // they are, and a hash matching neither side stops the pull just as a
+    // conflict would.
+    if let Err(e) = checkpoint_file(local_path) {
+        debug!(
+            "{} was not checkpointed before hashing: {:#}",
+            local_path.display(),
+            e
+        );
+    }
+
+    match hash_file(local_path) {
+        Ok(hash) => Some(hash),
+        Err(e) => {
+            debug!("could not hash {}: {}", local_path.display(), e);
+            None
         }
     }
 }
@@ -522,6 +558,39 @@ mod tests {
         let ts = current_timestamp();
         // Should be after 2025-01-01
         assert!(ts > 1735689600);
+    }
+
+    /// The file a pull exists to replace is often one that will not open. Its
+    /// hash is still readable, and nothing about reading it may abort the
+    /// command before the download starts.
+    #[test]
+    fn a_local_file_that_is_not_a_database_still_hashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let corrupt = dir.path().join("grans.db");
+        std::fs::write(&corrupt, b"this is not a SQLite database").unwrap();
+
+        assert!(local_content_hash(&corrupt, false).is_some());
+    }
+
+    #[test]
+    fn an_absent_local_database_has_no_hash() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        assert_eq!(
+            local_content_hash(&dir.path().join("nothing.db"), false),
+            None
+        );
+    }
+
+    /// Under --force the answer changes no decision, so hundreds of megabytes
+    /// are not read to produce it.
+    #[test]
+    fn forcing_skips_hashing_the_local_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("grans.db");
+        std::fs::write(&local, b"contents").unwrap();
+
+        assert_eq!(local_content_hash(&local, true), None);
     }
 
     #[test]
