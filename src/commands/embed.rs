@@ -23,13 +23,20 @@ pub fn run(
     mode: OutputMode,
     overrides: &EmbedOverrides,
 ) -> Result<()> {
-    let spec =
-        EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS).with_overrides(overrides)?;
     match action {
-        Some(EmbedAction::Status) => show_status(conn, mode, &spec),
-        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode, &spec),
-        None => embed_with_prompt(conn, yes, batch_size, mode, &spec),
+        // Clearing deletes rows and never reads the chunking scheme, so it
+        // resolves no spec: a stored scheme that fails validation is
+        // exactly what a user runs `clear` to get out from under.
+        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode),
+        Some(EmbedAction::Status) => show_status(conn, mode, &resolve_spec(conn, overrides)?),
+        None => embed_with_prompt(conn, yes, batch_size, mode, &resolve_spec(conn, overrides)?),
     }
+}
+
+/// The spec to embed or report with: the stored scheme, then the hidden
+/// experiment flags, then validation.
+fn resolve_spec(conn: &Connection, overrides: &EmbedOverrides) -> Result<EmbedSpec> {
+    EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS).with_overrides(overrides)
 }
 
 /// Show embedding status without triggering embedding.
@@ -54,6 +61,7 @@ fn print_status_json(status: &EmbeddingStatus, spec: &EmbedSpec) {
         },
         "chunking_changed_warning": status.chunking_changed_warning,
         "total_chunks": status.total_chunks,
+        "stored_chunks": status.stored_chunks,
         "embedded_chunks": status.embedded_chunks,
         "pending_chunks": status.pending_chunks,
         "orphaned_chunks": status.orphaned_chunks,
@@ -143,6 +151,15 @@ fn print_status_tty(status: &EmbeddingStatus, spec: &EmbedSpec) {
     }
     println!();
 
+    // Rows in the database, which equal the usable ones in the steady
+    // state. Worth a line only when they don't, because the difference is
+    // stale rows that `grans embed clear` would delete.
+    if status.stored_chunks != status.embedded_chunks {
+        println!(
+            "Stored:    {} chunks in the database",
+            format_number(status.stored_chunks)
+        );
+    }
     println!(
         "Embedded:  {} chunks",
         format_number(status.embedded_chunks)
@@ -269,11 +286,13 @@ fn clear_embeddings(
     count: Option<usize>,
     yes: bool,
     mode: OutputMode,
-    spec: &EmbedSpec,
 ) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
+    // A physical delete counts physical rows. `embed status` reports a
+    // model-aware `embedded_chunks` that drops to 0 after a model change
+    // while every row is still there, so clear must not read that.
+    let stored = embed::store::count_stored_chunks(conn)?;
 
-    if status.embedded_chunks == 0 && status.orphaned_chunks == 0 {
+    if stored == 0 {
         match mode {
             OutputMode::Json => {
                 println!(
@@ -292,8 +311,8 @@ fn clear_embeddings(
         return Ok(());
     }
 
-    let to_clear = count.unwrap_or(status.embedded_chunks);
-    let actual_clear = to_clear.min(status.embedded_chunks);
+    let to_clear = count.unwrap_or(stored);
+    let actual_clear = to_clear.min(stored);
 
     // Prompt unless --yes or non-TTY
     if !yes && mode == OutputMode::Tty {
@@ -303,8 +322,10 @@ fn clear_embeddings(
                 format_number(actual_clear)
             );
         } else {
-            let total = status.embedded_chunks + status.orphaned_chunks;
-            eprintln!("\nThis will clear all {} embeddings.", format_number(total));
+            eprintln!(
+                "\nThis will clear all {} embeddings.",
+                format_number(stored)
+            );
         }
         eprint!("Proceed? [y/N] ");
         io::stderr().flush()?;
@@ -321,7 +342,7 @@ fn clear_embeddings(
         embed::store::delete_recent_chunks(conn, n)?
     } else {
         embed::wipe_all_embeddings(conn)?;
-        status.embedded_chunks + status.orphaned_chunks
+        stored
     };
 
     match mode {
@@ -600,27 +621,42 @@ mod tests {
         conn
     }
 
-    /// A database fully embedded under the production model name, without
-    /// loading the production model: embed with the mock, then relabel.
-    /// Content hashes don't involve the model, so the status check sees
-    /// nothing pending and the already-embedded short-circuits fire.
-    fn setup_fully_embedded_db() -> Connection {
-        let conn = setup_test_db();
+    /// One document with a single utterance long enough to chunk.
+    fn insert_doc_with_utterance(conn: &Connection, i: usize) {
         conn.execute(
-            "INSERT INTO documents (id, title, created_at) VALUES ('doc1', 'Doc', '2025-01-01T00:00:00Z')",
-            [],
+            "INSERT INTO documents (id, title, created_at) VALUES (?1, 'Doc', '2025-01-01T00:00:00Z')",
+            [format!("doc{}", i)],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text)
-             VALUES ('u1', 'doc1', '2025-01-01T10:00:00Z',
+             VALUES (?1, ?2, '2025-01-01T10:00:00Z',
                      'This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.')",
-            [],
+            [format!("u{}", i), format!("doc{}", i)],
         )
         .unwrap();
+    }
+
+    /// `docs` documents embedded with the mock embedder. The stored model
+    /// name stays the mock's, which never matches `MODEL_NAME`, so this is
+    /// the model-changed state: every row is stored but unusable.
+    fn setup_embedded_db(docs: usize) -> Connection {
+        let conn = setup_test_db();
+        for i in 0..docs {
+            insert_doc_with_utterance(&conn, i);
+        }
         let embedder = MockEmbedder::default();
         let spec = EmbedSpec::default_for(512);
         embed::ensure_embeddings(&conn, &embedder, embed::DEFAULT_BATCH_SIZE, &spec).unwrap();
+        conn
+    }
+
+    /// The same database relabeled to the production model name, without
+    /// loading the production model. Content hashes don't involve the
+    /// model, so the status check sees nothing pending and the
+    /// already-embedded short-circuits fire.
+    fn setup_fully_embedded_db() -> Connection {
+        let conn = setup_embedded_db(1);
         conn.execute(
             "UPDATE embedding_metadata SET value = ?1 WHERE key = 'model_name'",
             [embed::model::MODEL_NAME],
@@ -707,6 +743,65 @@ mod tests {
 
         assert_eq!(chunk_count(&conn), 0);
         assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
+    }
+
+    #[test]
+    fn clear_removes_embeddings_written_by_a_stale_model() {
+        // Regression for #35: `clear` read `embedded_chunks`, which counts
+        // chunks usable by the *current* model, as if it counted rows in
+        // the table. After a model change that count is 0 while every row
+        // is still there, so clear reported "No embeddings to clear" and
+        // deleted nothing.
+        let conn = setup_embedded_db(3);
+        let spec = EmbedSpec::default_for(512);
+        let status = embed::get_embedding_status(&conn, embed::model::MODEL_NAME, &spec).unwrap();
+        assert!(status.model_changed_warning);
+        assert_eq!(status.embedded_chunks, 0);
+        assert!(chunk_count(&conn) > 0);
+
+        clear_embeddings(&conn, None, true, OutputMode::Json).unwrap();
+
+        assert_eq!(chunk_count(&conn), 0);
+    }
+
+    #[test]
+    fn clear_count_removes_that_many_stale_model_embeddings() {
+        // Same collision on the `--count` path: both the default and the
+        // cap came from `embedded_chunks`, so `--count N` capped to 0.
+        let conn = setup_embedded_db(3);
+        let before = chunk_count(&conn);
+        assert!(before >= 2);
+
+        clear_embeddings(&conn, Some(2), true, OutputMode::Json).unwrap();
+
+        assert_eq!(chunk_count(&conn), before - 2);
+    }
+
+    #[test]
+    fn clear_survives_an_unresolvable_stored_chunking_scheme() {
+        // Clearing is a physical delete, so it must not depend on the
+        // chunking spec resolving. A database whose stored scheme fails
+        // validation is exactly the one a user reaches for `clear` to fix.
+        let conn = setup_embedded_db(2);
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_metadata (key, value)
+             VALUES ('chunking_target_tokens', '0')",
+            [],
+        )
+        .unwrap();
+        assert!(chunk_count(&conn) > 0);
+
+        run(
+            &conn,
+            Some(&EmbedAction::Clear { count: None }),
+            true,
+            embed::DEFAULT_BATCH_SIZE,
+            OutputMode::Json,
+            &EmbedOverrides::default(),
+        )
+        .unwrap();
+
+        assert_eq!(chunk_count(&conn), 0);
     }
 
     #[test]
