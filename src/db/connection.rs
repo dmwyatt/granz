@@ -1,8 +1,9 @@
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::debug;
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 
 use crate::db::migrations;
 
@@ -17,66 +18,58 @@ use crate::db::migrations;
 /// still surfacing a genuinely stuck process instead of hanging on it.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Apply the settings every grans connection needs, at open.
+/// Open a database, creating an empty one if the file is not there.
 ///
-/// Every path that opens the database goes through here, so a connection can
-/// never be handed out without them.
-pub fn apply_pragmas(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    enable_wal(conn)?;
-    Ok(())
+/// Only the migration path should create a database: everywhere else, a missing
+/// file is a fact worth reporting rather than something to paper over with an
+/// empty schema.
+pub(crate) fn open_or_create(path: &Path) -> Result<Connection> {
+    open(path, OpenFlags::default())
 }
 
-/// Apply the settings a read-only connection can take.
-///
-/// The journal mode is a property of the file, so a reader inherits whichever
-/// one the file was left in and cannot change it. Asking a read-only connection
-/// to move a database to WAL is an error, and a database pulled from a machine
-/// running an older grans is exactly the case that would hit it.
-pub fn apply_read_only_pragmas(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    Ok(())
+/// Open a database that already exists, for reading and writing.
+pub fn open_existing(path: &Path) -> Result<Connection> {
+    open(path, OpenFlags::default() & !OpenFlags::SQLITE_OPEN_CREATE)
 }
 
-/// Put the database in write-ahead logging mode.
+/// Open a database that already exists, for reading only.
 ///
-/// Under a rollback journal a commit has to lock the whole file, so a `grans
-/// sync` writing while a `grans search` reads fails with "database is locked"
-/// however long it is willing to wait: SQLite returns busy without consulting
-/// the busy handler when waiting could deadlock the two. WAL lets one writer
-/// and any number of readers work at once, which is the shape of every
-/// collision grans has.
-///
-/// The mode lives in the database file, so this changes anything only the first
-/// time. A filesystem that cannot support WAL leaves the database in the mode it
-/// already had rather than failing the command over it.
-fn enable_wal(conn: &Connection) -> Result<()> {
-    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-
-    if mode != "wal" {
-        debug!("database stayed in {} journal mode rather than WAL", mode);
-    }
-
-    Ok(())
+/// What the read-only paths want: reporting on a database must not write to it,
+/// convert its journal mode, or run a migration as a side effect of being asked
+/// for a row count.
+pub fn open_read_only(path: &Path) -> Result<Connection> {
+    open(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
 }
 
-/// Open an existing database without running migrations.
+/// The one place in grans that builds a `Connection`.
 ///
-/// For the read-mostly paths that report on a database rather than use it: they
-/// have no business triggering a migration, and its pre-migration backup, as a
-/// side effect of being asked for a row count. Opening without `CREATE` keeps
-/// them from conjuring an empty database when the file has gone.
-pub fn open_existing(path: &std::path::Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    apply_pragmas(&conn)?;
+/// Every connection needs the busy timeout, and a helper that can be bypassed
+/// is a helper that will be: the next `Connection::open` written anywhere else
+/// would silently get none of this, which is the bug class this module exists
+/// to close.
+fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
+    let conn = Connection::open_with_flags(path, flags)
+        .with_context(|| format!("opening the database at {}", path.display()))?;
+
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .context("setting the database busy timeout")?;
+
     Ok(conn)
 }
 
-/// Open an existing database for reading only.
-pub fn open_read_only(path: &std::path::Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    apply_read_only_pragmas(&conn)?;
-    Ok(conn)
+/// Whether an open failed because there is no database at that path.
+///
+/// Opening without `CREATE` is how a caller asks "is one there?" without the
+/// check-then-act gap of testing for the file first.
+pub fn is_missing_database(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<rusqlite::Error>()
+        .and_then(|e| e.sqlite_error_code())
+        .is_some_and(|code| code == ErrorCode::CannotOpen)
 }
 
 /// Get the default database path.

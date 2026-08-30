@@ -56,7 +56,7 @@ impl SyncMetadata {
 
         let index_db = if let Some(path) = db_path {
             if path.exists() {
-                let conn = crate::db::connection::open_existing(path)?;
+                let conn = crate::db::connection::open_read_only(path)?;
                 Some(IndexDbStats::from_db(&conn)?)
             } else {
                 None

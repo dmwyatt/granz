@@ -7,8 +7,11 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use log::debug;
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
+
+use crate::sync::journal::SyncedDatabase;
 
 /// All migrations, in order. Each migration brings the schema from version N to N+1.
 /// The `user_version` pragma is used automatically by rusqlite_migration to track
@@ -40,10 +43,7 @@ fn migrations() -> Migrations<'static> {
 pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
     let db_exists = db_path.exists();
 
-    let mut conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
-    crate::db::connection::apply_pragmas(&conn)
-        .with_context(|| format!("Failed to configure database at {}", db_path.display()))?;
+    let mut conn = crate::db::connection::open_or_create(db_path)?;
 
     let m = migrations();
 
@@ -77,7 +77,49 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
     m.to_latest(&mut conn)
         .context("Failed to apply database migrations")?;
 
+    convert_journal_mode(&conn, db_path);
+
     Ok(conn)
+}
+
+/// Move an existing database to write-ahead logging, once.
+///
+/// This belongs beside the migrations rather than in every open: it rewrites
+/// the file, and this is the path that already owns "back up, then change the
+/// file". Every other open inherits whichever mode the file is in.
+///
+/// Nothing here may fail the command. The conversion improves a database that
+/// already works, and every grans command comes through this path; a database
+/// busy with another command stays as it is and the next command tries again.
+fn convert_journal_mode(conn: &Connection, db_path: &Path) {
+    match crate::db::wal::journal_mode(conn) {
+        Ok(mode) if mode == "wal" => return,
+        Ok(_) => {}
+        Err(e) => {
+            debug!("could not read the journal mode: {:#}", e);
+            return;
+        }
+    }
+
+    // The conversion rewrites the file header, which changes the content hash
+    // Dropbox sync identifies the local database by. Capture the record's view
+    // of the file first, so it can follow the file rather than report a
+    // conflict over a change the user did not make.
+    let record = SyncedDatabase::capture(db_path);
+
+    match crate::db::wal::convert_to_wal(conn) {
+        Ok(true) => {
+            if let Err(e) = record.follow(db_path) {
+                eprintln!(
+                    "[grans] Warning: the database moved to write-ahead logging but the Dropbox \
+                     sync record could not be updated ({:#}). A pull may report a conflict.",
+                    e
+                );
+            }
+        }
+        Ok(false) => {}
+        Err(e) => debug!("journal mode left alone: {:#}", e),
+    }
 }
 
 /// Get the current schema version from the database.
@@ -94,22 +136,18 @@ pub fn get_schema_version(conn: &Connection) -> Result<usize> {
     })
 }
 
-/// Create a backup of the database file before migrations.
+/// Snapshot the database before applying migrations.
 ///
-/// The copy is of the database file alone, so the write-ahead log has to be
-/// folded into it first: otherwise the backup taken to protect a database is
-/// missing whatever was committed since the last checkpoint.
+/// `VACUUM INTO` writes a consistent single-file copy from inside a read
+/// transaction: it needs no exclusive access, and it covers whatever is still
+/// in the write-ahead log. A plain file copy would miss the log, and folding
+/// the log in first would let a backup fail because another grans command
+/// happened to be mid-transaction, on the path every command takes.
 fn backup_database(conn: &Connection, db_path: &Path) -> Result<()> {
-    if !db_path.exists() {
-        return Ok(()); // Nothing to backup
-    }
-
-    crate::db::wal::checkpoint(conn)?;
-
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let backup_path = db_path.with_extension(format!("db.backup.{}", timestamp));
 
-    std::fs::copy(db_path, &backup_path)
+    conn.execute("VACUUM INTO ?1", [backup_path.to_string_lossy()])
         .with_context(|| format!("Failed to backup database to {}", backup_path.display()))?;
 
     eprintln!("[grans] Backed up database to {}", backup_path.display());
@@ -207,25 +245,30 @@ mod tests {
         assert_eq!(backup_count, 0);
     }
 
-    /// The backup is a copy of the database file, and in WAL mode that file is
-    /// only the whole database once the log has been folded into it. A backup
-    /// taken to protect the data before a migration must not be the one thing
-    /// missing it.
+    /// The backup has to cover what is still in the write-ahead log, and it has
+    /// to be takeable while another grans command is reading. Folding the log
+    /// into the file first would do the former at the cost of the latter: a
+    /// truncating checkpoint reports busy under an open read transaction
+    /// (verified on SQLite 3.51.1), and this runs on the path every command
+    /// takes.
     #[test]
-    fn a_backup_carries_writes_still_in_the_write_ahead_log() {
+    fn a_backup_carries_the_log_and_survives_a_concurrent_reader() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_and_migrate(&db_path).unwrap();
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(mode, "wal");
+        assert_eq!(crate::db::wal::journal_mode(&conn).unwrap(), "wal");
         conn.execute(
             "INSERT INTO metadata (key, value) VALUES ('uncheckpointed', 'yes')",
             [],
         )
         .unwrap();
+
+        let reader = crate::db::connection::open_existing(&db_path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))
+            .unwrap();
 
         backup_database(&conn, &db_path).unwrap();
 
@@ -244,6 +287,37 @@ mod tests {
             )
             .expect("the backup should carry the write");
         assert_eq!(value, "yes");
+    }
+
+    /// The conversion sits on the path every command takes, so it reports
+    /// nothing upwards: a database another command is busy with keeps the mode
+    /// it has, and the command that could not convert it still runs.
+    #[test]
+    fn a_busy_database_opens_without_converting() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let owner = open_and_migrate(&db_path).unwrap();
+        let mode: String = owner
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(owner);
+
+        let reader = crate::db::connection::open_existing(&db_path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))
+            .unwrap();
+
+        let conn = crate::db::connection::open_existing(&db_path).unwrap();
+        // Waiting out the real timeout would cost this test fifteen seconds to
+        // reach the same answer.
+        conn.busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+
+        convert_journal_mode(&conn, &db_path);
+
+        assert_eq!(crate::db::wal::journal_mode(&conn).unwrap(), "delete");
     }
 
     #[test]

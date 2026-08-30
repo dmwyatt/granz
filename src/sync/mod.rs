@@ -3,6 +3,7 @@
 pub mod config;
 pub mod content_hash;
 pub mod dropbox;
+pub mod journal;
 pub mod metadata;
 pub mod oauth;
 pub mod reconcile;
