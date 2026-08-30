@@ -7,15 +7,26 @@
 //! replace or clear the file.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use log::debug;
 use rusqlite::{Connection, ErrorCode};
 
-use crate::db::connection::{is_missing_database, open_existing};
+use crate::db::connection::{is_missing_database, open_existing, set_busy_timeout};
 
 /// The files SQLite keeps beside a database in WAL mode.
 const SIDECAR_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
+
+/// How long the one-time conversion waits for a database another connection is
+/// using.
+///
+/// Long enough to ride out a brief write, short enough not to be noticed. The
+/// conversion is opportunistic and sits on the path every command takes, so at
+/// the standard busy timeout a database held by a long sync cost every command
+/// the full fifteen seconds before carrying on (measured: 16.5s for `grans
+/// list` against a held read transaction).
+const CONVERSION_WAIT: Duration = Duration::from_millis(200);
 
 /// Move a database to write-ahead logging, reporting whether it moved.
 ///
@@ -34,6 +45,17 @@ const SIDECAR_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
 /// of the tool while a sync runs. A busy database stays in the mode it has and
 /// the next command tries again.
 pub fn convert_to_wal(conn: &Connection) -> Result<bool> {
+    conn.busy_timeout(CONVERSION_WAIT)
+        .context("shortening the busy timeout for the journal mode conversion")?;
+
+    let outcome = attempt_conversion(conn);
+    set_busy_timeout(conn)?;
+
+    outcome
+}
+
+/// The conversion itself, with the shortened wait already in place.
+fn attempt_conversion(conn: &Connection) -> Result<bool> {
     match conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0)) {
         Ok(mode) if mode == "wal" => Ok(true),
         Ok(mode) => {
@@ -423,16 +445,20 @@ mod tests {
             .unwrap();
 
         let conn = open_existing(&db_path).unwrap();
-        // Waiting out the real timeout would cost this test fifteen seconds to
-        // reach the same answer.
-        conn.busy_timeout(std::time::Duration::from_millis(50))
-            .unwrap();
+        let start = std::time::Instant::now();
 
         assert!(
             !convert_to_wal(&conn).unwrap(),
             "a busy database cannot move"
         );
+
         assert_eq!(journal_mode(&conn).unwrap(), "delete");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the conversion must give up rather than make the command wait out \
+             the busy timeout, took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

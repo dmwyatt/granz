@@ -56,10 +56,19 @@ fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, flags)
         .with_context(|| format!("opening the database at {}", path.display()))?;
 
-    conn.busy_timeout(BUSY_TIMEOUT)
-        .context("setting the database busy timeout")?;
+    set_busy_timeout(&conn)?;
 
     Ok(conn)
+}
+
+/// Put the standard busy timeout back on a connection.
+///
+/// For the one caller that lowers it: the journal mode conversion, which has to
+/// give up quickly rather than making every command wait out a lock it does not
+/// need.
+pub fn set_busy_timeout(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .context("setting the database busy timeout")
 }
 
 /// Whether an open failed because there is no database at that path.

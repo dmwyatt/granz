@@ -310,14 +310,17 @@ mod tests {
             .unwrap();
 
         let conn = crate::db::connection::open_existing(&db_path).unwrap();
-        // Waiting out the real timeout would cost this test fifteen seconds to
-        // reach the same answer.
-        conn.busy_timeout(std::time::Duration::from_millis(50))
-            .unwrap();
+        let start = std::time::Instant::now();
 
         convert_journal_mode(&conn, &db_path);
 
         assert_eq!(crate::db::wal::journal_mode(&conn).unwrap(), "delete");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "a command must not wait out the busy timeout to find out it cannot \
+             convert the database, took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
