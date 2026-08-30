@@ -23,13 +23,20 @@ pub fn run(
     mode: OutputMode,
     overrides: &EmbedOverrides,
 ) -> Result<()> {
-    let spec =
-        EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS).with_overrides(overrides)?;
     match action {
-        Some(EmbedAction::Status) => show_status(conn, mode, &spec),
-        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode, &spec),
-        None => embed_with_prompt(conn, yes, batch_size, mode, &spec),
+        // Clearing deletes rows and never reads the chunking scheme, so it
+        // resolves no spec: a stored scheme that fails validation is
+        // exactly what a user runs `clear` to get out from under.
+        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode),
+        Some(EmbedAction::Status) => show_status(conn, mode, &resolve_spec(conn, overrides)?),
+        None => embed_with_prompt(conn, yes, batch_size, mode, &resolve_spec(conn, overrides)?),
     }
+}
+
+/// The spec to embed or report with: the stored scheme, then the hidden
+/// experiment flags, then validation.
+fn resolve_spec(conn: &Connection, overrides: &EmbedOverrides) -> Result<EmbedSpec> {
+    EmbedSpec::resolve_stored(conn, embed::MODEL_MAX_TOKENS).with_overrides(overrides)
 }
 
 /// Show embedding status without triggering embedding.
@@ -279,14 +286,13 @@ fn clear_embeddings(
     count: Option<usize>,
     yes: bool,
     mode: OutputMode,
-    spec: &EmbedSpec,
 ) -> Result<()> {
-    let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
+    // A physical delete counts physical rows. `embed status` reports a
+    // model-aware `embedded_chunks` that drops to 0 after a model change
+    // while every row is still there, so clear must not read that.
+    let stored = embed::store::count_stored_chunks(conn)?;
 
-    // Clearing is a physical operation, so it reads the physical count.
-    // `embedded_chunks` counts only what the current model can use, and
-    // goes to 0 after a model change while every row is still there.
-    if status.stored_chunks == 0 {
+    if stored == 0 {
         match mode {
             OutputMode::Json => {
                 println!(
@@ -305,8 +311,8 @@ fn clear_embeddings(
         return Ok(());
     }
 
-    let to_clear = count.unwrap_or(status.stored_chunks);
-    let actual_clear = to_clear.min(status.stored_chunks);
+    let to_clear = count.unwrap_or(stored);
+    let actual_clear = to_clear.min(stored);
 
     // Prompt unless --yes or non-TTY
     if !yes && mode == OutputMode::Tty {
@@ -318,7 +324,7 @@ fn clear_embeddings(
         } else {
             eprintln!(
                 "\nThis will clear all {} embeddings.",
-                format_number(status.stored_chunks)
+                format_number(stored)
             );
         }
         eprint!("Proceed? [y/N] ");
@@ -336,7 +342,7 @@ fn clear_embeddings(
         embed::store::delete_recent_chunks(conn, n)?
     } else {
         embed::wipe_all_embeddings(conn)?;
-        status.stored_chunks
+        stored
     };
 
     match mode {
@@ -764,7 +770,7 @@ mod tests {
         assert_eq!(status.embedded_chunks, 0);
         assert!(chunk_count(&conn) > 0);
 
-        clear_embeddings(&conn, None, true, OutputMode::Json, &spec).unwrap();
+        clear_embeddings(&conn, None, true, OutputMode::Json).unwrap();
 
         assert_eq!(chunk_count(&conn), 0);
     }
@@ -776,11 +782,37 @@ mod tests {
         let conn = setup_stale_model_db(3);
         let before = chunk_count(&conn);
         assert!(before >= 2);
-        let spec = EmbedSpec::default_for(512);
 
-        clear_embeddings(&conn, Some(2), true, OutputMode::Json, &spec).unwrap();
+        clear_embeddings(&conn, Some(2), true, OutputMode::Json).unwrap();
 
         assert_eq!(chunk_count(&conn), before - 2);
+    }
+
+    #[test]
+    fn clear_survives_an_unresolvable_stored_chunking_scheme() {
+        // Clearing is a physical delete, so it must not depend on the
+        // chunking spec resolving. A database whose stored scheme fails
+        // validation is exactly the one a user reaches for `clear` to fix.
+        let conn = setup_stale_model_db(2);
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_metadata (key, value)
+             VALUES ('chunking_target_tokens', '0')",
+            [],
+        )
+        .unwrap();
+        assert!(chunk_count(&conn) > 0);
+
+        run(
+            &conn,
+            Some(&EmbedAction::Clear { count: None }),
+            true,
+            embed::DEFAULT_BATCH_SIZE,
+            OutputMode::Json,
+            &EmbedOverrides::default(),
+        )
+        .unwrap();
+
+        assert_eq!(chunk_count(&conn), 0);
     }
 
     #[test]
