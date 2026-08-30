@@ -23,9 +23,22 @@ pub struct SyncConfig {
 
     /// Dropbox content hash both copies held at the last successful sync.
     ///
-    /// The reference point for deciding which side has changed. Absent until
-    /// the first push or pull completes under a version that records it.
+    /// The reference point for deciding whether the copy on Dropbox has
+    /// changed. Absent until the first push or pull completes under a version
+    /// that records it.
     pub last_synced_hash: Option<String>,
+
+    /// Dropbox content hash the local database file held when it last agreed
+    /// with Dropbox.
+    ///
+    /// Normally the same as `last_synced_hash`. They differ when something
+    /// rewrites the local file without changing what it holds, which is what
+    /// the one-time journal mode conversion does: two header bytes change, so
+    /// the file no longer hashes to what Dropbox has even though the two hold
+    /// the same meetings. Keeping the two references apart lets a pull see an
+    /// untouched local database and a push see an untouched remote one.
+    #[serde(default)]
+    pub last_local_hash: Option<String>,
 }
 
 impl SyncConfig {
@@ -71,6 +84,22 @@ impl SyncConfig {
         fs::rename(&temp_path, &path)?;
 
         Ok(())
+    }
+
+    /// What the local database file held when it last agreed with Dropbox.
+    ///
+    /// Falls back to the shared hash for a record written before the two were
+    /// tracked separately.
+    pub fn local_reference(&self) -> Option<&str> {
+        self.last_local_hash
+            .as_deref()
+            .or(self.last_synced_hash.as_deref())
+    }
+
+    /// Record that both copies now hold `hash`.
+    pub fn record_sync(&mut self, hash: String) {
+        self.last_synced_hash = Some(hash.clone());
+        self.last_local_hash = Some(hash);
     }
 
     /// Check if we have authentication credentials.
@@ -119,6 +148,7 @@ mod tests {
             last_push_time: Some(1234567890),
             last_pull_time: Some(1234567891),
             last_synced_hash: Some("abc123".to_string()),
+            last_local_hash: Some("abc123".to_string()),
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -152,6 +182,7 @@ mod tests {
                 last_push_time: Some(100),
                 last_pull_time: None,
                 last_synced_hash: None,
+                last_local_hash: None,
             };
 
             let content = toml::to_string_pretty(&config).unwrap();

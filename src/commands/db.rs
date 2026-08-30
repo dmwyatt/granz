@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 use crate::cli::args::DbAction;
 use crate::db::accounts::{self, account_label};
 use crate::db::integrity;
+use crate::db::wal::remove_database;
 
 pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
     match action {
@@ -29,7 +30,7 @@ pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
 
 fn clear_database(db_path: &Path) -> Result<()> {
     if db_path.exists() {
-        std::fs::remove_file(db_path)?;
+        remove_database(db_path)?;
         println!("Cleared database: {}", db_path.display());
     } else {
         println!("No database found at {}", db_path.display());
@@ -47,91 +48,144 @@ fn clear_all_databases() -> Result<()> {
     }
 
     let mut count = 0;
+    let mut failures = Vec::new();
     for entry in std::fs::read_dir(&data_dir)? {
         let entry = entry?;
         let path = entry.path();
 
         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("db") {
-            std::fs::remove_file(&path)?;
-            println!("Cleared: {}", path.display());
-            count += 1;
+            match remove_database(&path) {
+                Ok(()) => {
+                    println!("Cleared: {}", path.display());
+                    count += 1;
+                }
+                // One database another process still holds should not decide
+                // whether the rest are dealt with.
+                Err(e) => failures.push(format!("{}: {:#}", path.display(), e)),
+            }
         }
     }
 
-    if count == 0 {
+    if count == 0 && failures.is_empty() {
         println!("No database files found");
-    } else {
+    } else if count > 0 {
         println!("\nCleared {} database file(s)", count);
     }
 
-    Ok(())
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    bail!("could not clear:\n  {}", failures.join("\n  "))
 }
 
 fn show_database_info(db_path: &Path) -> Result<()> {
     println!("Database path: {}", db_path.display());
 
-    if db_path.exists() {
-        let metadata = std::fs::metadata(db_path)?;
-        let size_bytes = metadata.len();
-        let size_mb = size_bytes as f64 / 1_048_576.0;
-
-        println!("Database size: {:.2} MB ({} bytes)", size_mb, size_bytes);
-        println!("Status: exists");
-
-        // Try to read metadata from the database
-        if let Ok(conn) = rusqlite::Connection::open(db_path) {
-            // From PRAGMA user_version, which is what the migration system
-            // actually tracks. The `metadata` row this used to read is a fossil
-            // of the pre-migration scheme: nothing has written it since, so it
-            // reported 3 on a database at 14.
-            if let Ok(schema_version) = crate::db::migrations::get_schema_version(&conn) {
-                println!("Schema version: {}", schema_version);
-            }
-
-            print_accounts_seen(&conn);
-
-            // Show last sync times
-            let sync_keys = [
-                "documents",
-                "transcripts",
-                "people",
-                "calendars",
-                "templates",
-                "recipes",
-            ];
-            for key in sync_keys {
-                let sync_key = format!("last_sync_{}", key);
-                if let Ok(last_sync) = conn.query_row(
-                    "SELECT value FROM metadata WHERE key = ?1",
-                    [&sync_key],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    println!("Last {} sync: {}", key, last_sync);
-                }
-            }
-
-            // Show document/transcript counts
-            if let Ok(doc_count) =
-                conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
-            {
-                println!("Documents: {}", doc_count);
-            }
-
-            if let Ok(transcript_count) = conn.query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM transcript_utterances",
-                [],
-                |row| row.get(0),
-            ) {
-                println!("Transcript utterances: {}", transcript_count);
-            }
-
-            report_search_index_health(&conn);
-        }
-    } else {
+    if !db_path.exists() {
         println!("Status: does not exist (run 'grans sync' to create)");
+        return Ok(());
+    }
+
+    print_database_size(db_path)?;
+    println!("Status: exists");
+
+    // Read-write, because the index health check is spelled as an INSERT and
+    // SQLite refuses that on a read-only connection. Nothing here writes: the
+    // journal mode is converted by the migration path, not by opening.
+    //
+    // A database that will not open is reported as the failure it is. Skipping
+    // silently to the next line left the command exiting 0 with nothing but a
+    // path and a size, which reads as a healthy empty database.
+    let conn = crate::db::connection::open_existing(db_path)
+        .with_context(|| format!("reading the database at {}", db_path.display()))?;
+
+    // The first read of the file, and the one that has to be believed: SQLite
+    // opens lazily, so a file that is not a database opens without complaint
+    // and only fails when something reads a page. Everything below it is
+    // best-effort, because an old schema can legitimately be missing a table.
+    let schema_version = crate::db::migrations::get_schema_version(&conn)
+        .with_context(|| format!("reading the database at {}", db_path.display()))?;
+    println!("Schema version: {}", schema_version);
+
+    report_database_contents(&conn);
+
+    Ok(())
+}
+
+/// Report what the database occupies on disk.
+///
+/// The write-ahead log is part of the database, so a figure counting only the
+/// main file understates it, and anything that copies the database has to carry
+/// both.
+fn print_database_size(db_path: &Path) -> Result<()> {
+    let size_bytes = std::fs::metadata(db_path)?.len();
+    println!(
+        "Database size: {:.2} MB ({} bytes)",
+        size_bytes as f64 / 1_048_576.0,
+        size_bytes
+    );
+
+    let log = crate::db::wal::log_path(db_path);
+    if let Ok(log_bytes) = std::fs::metadata(&log).map(|m| m.len())
+        && log_bytes > 0
+    {
+        println!(
+            "Write-ahead log: {:.2} MB ({} bytes)",
+            log_bytes as f64 / 1_048_576.0,
+            log_bytes
+        );
     }
 
     Ok(())
+}
+
+/// Report what an open database holds.
+fn report_database_contents(conn: &rusqlite::Connection) {
+    print_accounts_seen(conn);
+    print_last_sync_times(conn);
+    print_row_counts(conn);
+    report_search_index_health(conn);
+}
+
+/// Print when each entity type was last synced from the Granola API.
+fn print_last_sync_times(conn: &rusqlite::Connection) {
+    let sync_keys = [
+        "documents",
+        "transcripts",
+        "people",
+        "calendars",
+        "templates",
+        "recipes",
+    ];
+
+    for key in sync_keys {
+        let sync_key = format!("last_sync_{}", key);
+        if let Ok(last_sync) = conn.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [&sync_key],
+            |row| row.get::<_, String>(0),
+        ) {
+            println!("Last {} sync: {}", key, last_sync);
+        }
+    }
+}
+
+/// Print how much the database holds.
+fn print_row_counts(conn: &rusqlite::Connection) {
+    if let Ok(doc_count) =
+        conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+    {
+        println!("Documents: {}", doc_count);
+    }
+
+    if let Ok(transcript_count) =
+        conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM transcript_utterances", [], |row| {
+            row.get(0)
+        })
+    {
+        println!("Transcript utterances: {}", transcript_count);
+    }
 }
 
 /// Print which Granola accounts this database has synced from.
@@ -247,6 +301,23 @@ fn list_all_databases() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A report that cannot read the database says so. Skipping to the next
+    /// line left the command exiting 0 after printing a path and a size, which
+    /// reads as a healthy, empty database.
+    #[test]
+    fn a_database_that_cannot_be_read_is_reported_as_a_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let corrupt = dir.path().join("grans.db");
+        std::fs::write(&corrupt, b"this is not a SQLite database").unwrap();
+
+        let result = super::show_database_info(&corrupt);
+
+        assert!(
+            result.is_err(),
+            "a corrupt database must not report as fine"
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
 
@@ -319,7 +390,7 @@ mod tests {
     fn test_show_database_info_existing() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
-        std::fs::write(&db_path, "mock db data").unwrap();
+        drop(crate::db::connection::open_db_at_path(&db_path).unwrap());
 
         assert!(db_path.exists());
         let result = show_database_info(&db_path);

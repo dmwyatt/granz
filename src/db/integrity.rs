@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use log::debug;
-use rusqlite::{Connection, ErrorCode, OpenFlags};
+use rusqlite::{Connection, ErrorCode};
 
 /// A grans database always has this table, so its absence means the file is a
 /// database but not one of ours.
@@ -101,7 +101,7 @@ pub fn rebuild_fts_indexes(conn: &Connection) -> Result<Vec<&'static str>> {
 pub fn check_pulled_database(path: &Path) -> Result<()> {
     let start = Instant::now();
 
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let conn = crate::db::connection::open_read_only(path)
         .with_context(|| format!("opening {} as a SQLite database", path.display()))?;
 
     run_quick_check(&conn)?;
@@ -311,7 +311,7 @@ mod tests {
         }
 
         let read_only =
-            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let err = check_fts_indexes(&read_only).unwrap_err();
 
         assert!(

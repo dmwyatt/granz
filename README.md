@@ -60,6 +60,8 @@ grans stores your meeting data in a local SQLite database at:
 - Linux: `~/.local/share/grans/grans.db`
 - Windows: `%APPDATA%/grans/grans.db`
 
+The database runs in SQLite's write-ahead logging mode, so you will see `grans.db-wal` and `grans.db-shm` beside it. They are part of the database: copy or move all three together, or run `grans dropbox push` (which folds the log into the database file first). Deleting them by hand while grans is running loses recent writes.
+
 Data is fetched from the Granola API using `grans sync` and accumulates over time. Unlike Granola's local cache (which only holds recent meetings), grans preserves all your synced data indefinitely.
 
 ## Commands
