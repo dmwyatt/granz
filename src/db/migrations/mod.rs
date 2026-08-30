@@ -42,6 +42,8 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
 
     let mut conn = Connection::open(db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
+    crate::db::connection::apply_pragmas(&conn)
+        .with_context(|| format!("Failed to configure database at {}", db_path.display()))?;
 
     let m = migrations();
 

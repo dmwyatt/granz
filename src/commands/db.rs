@@ -79,7 +79,7 @@ fn show_database_info(db_path: &Path) -> Result<()> {
         println!("Status: exists");
 
         // Try to read metadata from the database
-        if let Ok(conn) = rusqlite::Connection::open(db_path) {
+        if let Ok(conn) = crate::db::connection::open_existing(db_path) {
             // From PRAGMA user_version, which is what the migration system
             // actually tracks. The `metadata` row this used to read is a fossil
             // of the pre-migration scheme: nothing has written it since, so it

@@ -262,10 +262,7 @@ fn stored_account_email(db_path: Option<&Path>, sub: &str) -> Option<String> {
         },
     };
 
-    let conn = match rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
+    let conn = match crate::db::connection::open_read_only(&path) {
         Ok(conn) => conn,
         Err(e) => {
             debug!("accounts log unavailable at {}: {}", path.display(), e);

@@ -101,7 +101,7 @@ pub fn rebuild_fts_indexes(conn: &Connection) -> Result<Vec<&'static str>> {
 pub fn check_pulled_database(path: &Path) -> Result<()> {
     let start = Instant::now();
 
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let conn = crate::db::connection::open_read_only(path)
         .with_context(|| format!("opening {} as a SQLite database", path.display()))?;
 
     run_quick_check(&conn)?;
