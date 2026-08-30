@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use log::debug;
-use rusqlite::{Connection, ErrorCode, OpenFlags};
+use rusqlite::{Connection, ErrorCode};
 
 /// A grans database always has this table, so its absence means the file is a
 /// database but not one of ours.
@@ -311,7 +311,7 @@ mod tests {
         }
 
         let read_only =
-            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let err = check_fts_indexes(&read_only).unwrap_err();
 
         assert!(
