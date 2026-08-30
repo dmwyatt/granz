@@ -621,58 +621,47 @@ mod tests {
         conn
     }
 
-    /// A database fully embedded under the production model name, without
-    /// loading the production model: embed with the mock, then relabel.
-    /// Content hashes don't involve the model, so the status check sees
-    /// nothing pending and the already-embedded short-circuits fire.
-    fn setup_fully_embedded_db() -> Connection {
-        let conn = setup_test_db();
+    /// One document with a single utterance long enough to chunk.
+    fn insert_doc_with_utterance(conn: &Connection, i: usize) {
         conn.execute(
-            "INSERT INTO documents (id, title, created_at) VALUES ('doc1', 'Doc', '2025-01-01T00:00:00Z')",
-            [],
+            "INSERT INTO documents (id, title, created_at) VALUES (?1, 'Doc', '2025-01-01T00:00:00Z')",
+            [format!("doc{}", i)],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text)
-             VALUES ('u1', 'doc1', '2025-01-01T10:00:00Z',
+             VALUES (?1, ?2, '2025-01-01T10:00:00Z',
                      'This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.')",
-            [],
+            [format!("u{}", i), format!("doc{}", i)],
         )
         .unwrap();
+    }
+
+    /// `docs` documents embedded with the mock embedder. The stored model
+    /// name stays the mock's, which never matches `MODEL_NAME`, so this is
+    /// the model-changed state: every row is stored but unusable.
+    fn setup_embedded_db(docs: usize) -> Connection {
+        let conn = setup_test_db();
+        for i in 0..docs {
+            insert_doc_with_utterance(&conn, i);
+        }
         let embedder = MockEmbedder::default();
         let spec = EmbedSpec::default_for(512);
         embed::ensure_embeddings(&conn, &embedder, embed::DEFAULT_BATCH_SIZE, &spec).unwrap();
+        conn
+    }
+
+    /// The same database relabeled to the production model name, without
+    /// loading the production model. Content hashes don't involve the
+    /// model, so the status check sees nothing pending and the
+    /// already-embedded short-circuits fire.
+    fn setup_fully_embedded_db() -> Connection {
+        let conn = setup_embedded_db(1);
         conn.execute(
             "UPDATE embedding_metadata SET value = ?1 WHERE key = 'model_name'",
             [embed::model::MODEL_NAME],
         )
         .unwrap();
-        conn
-    }
-
-    /// A database whose embeddings were written by a model that is no
-    /// longer the current one: embed `docs` documents with the mock and
-    /// leave the stored model name as the mock's, which never matches
-    /// `MODEL_NAME`. Every stored row is physically present but unusable.
-    fn setup_stale_model_db(docs: usize) -> Connection {
-        let conn = setup_test_db();
-        for i in 0..docs {
-            conn.execute(
-                "INSERT INTO documents (id, title, created_at) VALUES (?1, 'Doc', '2025-01-01T00:00:00Z')",
-                [format!("doc{}", i)],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text)
-                 VALUES (?1, ?2, '2025-01-01T10:00:00Z',
-                         'This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.')",
-                [format!("u{}", i), format!("doc{}", i)],
-            )
-            .unwrap();
-        }
-        let embedder = MockEmbedder::default();
-        let spec = EmbedSpec::default_for(512);
-        embed::ensure_embeddings(&conn, &embedder, embed::DEFAULT_BATCH_SIZE, &spec).unwrap();
         conn
     }
 
@@ -763,7 +752,7 @@ mod tests {
         // the table. After a model change that count is 0 while every row
         // is still there, so clear reported "No embeddings to clear" and
         // deleted nothing.
-        let conn = setup_stale_model_db(3);
+        let conn = setup_embedded_db(3);
         let spec = EmbedSpec::default_for(512);
         let status = embed::get_embedding_status(&conn, embed::model::MODEL_NAME, &spec).unwrap();
         assert!(status.model_changed_warning);
@@ -779,7 +768,7 @@ mod tests {
     fn clear_count_removes_that_many_stale_model_embeddings() {
         // Same collision on the `--count` path: both the default and the
         // cap came from `embedded_chunks`, so `--count N` capped to 0.
-        let conn = setup_stale_model_db(3);
+        let conn = setup_embedded_db(3);
         let before = chunk_count(&conn);
         assert!(before >= 2);
 
@@ -793,7 +782,7 @@ mod tests {
         // Clearing is a physical delete, so it must not depend on the
         // chunking spec resolving. A database whose stored scheme fails
         // validation is exactly the one a user reaches for `clear` to fix.
-        let conn = setup_stale_model_db(2);
+        let conn = setup_embedded_db(2);
         conn.execute(
             "INSERT OR REPLACE INTO embedding_metadata (key, value)
              VALUES ('chunking_target_tokens', '0')",
