@@ -11,6 +11,7 @@ use chrono::FixedOffset;
 
 use crate::cli::args::DropboxAction;
 use crate::db::integrity::check_pulled_database;
+use crate::db::wal::{checkpoint_file, replace_database};
 use crate::output::format::{OutputMode, format_size};
 use crate::output::progress::create_spinner;
 use crate::pkce::PkceChallenge;
@@ -119,6 +120,10 @@ fn push(force: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Both the upload and the hash that decides whether to upload read the
+    // database file on its own, so it has to hold the whole database first.
+    checkpoint_file(&db_path)?;
+
     let synced_hash = push_file(
         &client,
         &db_path,
@@ -219,6 +224,11 @@ fn pull(force: bool) -> Result<()> {
 
     // Get local database path
     let db_path = crate::db::connection::default_db_path()?;
+
+    // Deciding whether the local copy has changes Dropbox lacks means hashing
+    // the database file, which is only the whole database once it is
+    // checkpointed.
+    checkpoint_file(&db_path)?;
 
     // Pull database
     if client.get_metadata(REMOTE_DB_PATH)?.is_some() {
@@ -321,7 +331,7 @@ fn pull_file(
 
     match downloaded {
         Ok(()) => {
-            std::fs::rename(&temp_path, local_path)?;
+            replace_database(&temp_path, local_path)?;
             println!("  Downloaded to {}", local_path.display());
             Ok(expected_hash.to_string())
         }

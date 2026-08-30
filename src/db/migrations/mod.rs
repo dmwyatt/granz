@@ -68,7 +68,7 @@ pub fn open_and_migrate(db_path: &Path) -> Result<Connection> {
         && db_exists
         && !matches!(current_version, rusqlite_migration::SchemaVersion::NoneSet)
     {
-        backup_database(db_path)?;
+        backup_database(&conn, db_path)?;
         eprintln!("[grans] Applying database migration(s)...");
     } else if needs_migration && !db_exists {
         eprintln!("[grans] Creating new database at {}", db_path.display());
@@ -95,10 +95,16 @@ pub fn get_schema_version(conn: &Connection) -> Result<usize> {
 }
 
 /// Create a backup of the database file before migrations.
-fn backup_database(db_path: &Path) -> Result<()> {
+///
+/// The copy is of the database file alone, so the write-ahead log has to be
+/// folded into it first: otherwise the backup taken to protect a database is
+/// missing whatever was committed since the last checkpoint.
+fn backup_database(conn: &Connection, db_path: &Path) -> Result<()> {
     if !db_path.exists() {
         return Ok(()); // Nothing to backup
     }
+
+    crate::db::wal::checkpoint(conn)?;
 
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let backup_path = db_path.with_extension(format!("db.backup.{}", timestamp));
@@ -199,6 +205,45 @@ mod tests {
             .count();
 
         assert_eq!(backup_count, 0);
+    }
+
+    /// The backup is a copy of the database file, and in WAL mode that file is
+    /// only the whole database once the log has been folded into it. A backup
+    /// taken to protect the data before a migration must not be the one thing
+    /// missing it.
+    #[test]
+    fn a_backup_carries_writes_still_in_the_write_ahead_log() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_and_migrate(&db_path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('uncheckpointed', 'yes')",
+            [],
+        )
+        .unwrap();
+
+        backup_database(&conn, &db_path).unwrap();
+
+        let backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.to_string_lossy().contains(".backup."))
+            .expect("a backup file should have been written");
+
+        let restored = Connection::open(&backup).unwrap();
+        let value: String = restored
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'uncheckpointed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the backup should carry the write");
+        assert_eq!(value, "yes");
     }
 
     #[test]

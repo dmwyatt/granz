@@ -15,3 +15,4 @@ pub mod templates;
 #[cfg(test)]
 pub mod test_fixtures;
 pub mod transcripts;
+pub mod wal;

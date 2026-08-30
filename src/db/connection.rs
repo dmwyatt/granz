@@ -30,9 +30,10 @@ pub fn apply_pragmas(conn: &Connection) -> Result<()> {
 ///
 /// For the read-mostly paths that report on a database rather than use it: they
 /// have no business triggering a migration, and its pre-migration backup, as a
-/// side effect of being asked for a row count.
+/// side effect of being asked for a row count. Opening without `CREATE` keeps
+/// them from conjuring an empty database when the file has gone.
 pub fn open_existing(path: &std::path::Path) -> Result<Connection> {
-    let conn = Connection::open(path)?;
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     apply_pragmas(&conn)?;
     Ok(conn)
 }

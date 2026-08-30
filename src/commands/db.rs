@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::cli::args::DbAction;
 use crate::db::accounts::{self, account_label};
 use crate::db::integrity;
+use crate::db::wal::remove_database;
 
 pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
     match action {
@@ -29,7 +30,7 @@ pub fn run_with_path(action: &DbAction, db_path: &Path) -> Result<()> {
 
 fn clear_database(db_path: &Path) -> Result<()> {
     if db_path.exists() {
-        std::fs::remove_file(db_path)?;
+        remove_database(db_path)?;
         println!("Cleared database: {}", db_path.display());
     } else {
         println!("No database found at {}", db_path.display());
@@ -52,7 +53,7 @@ fn clear_all_databases() -> Result<()> {
         let path = entry.path();
 
         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("db") {
-            std::fs::remove_file(&path)?;
+            remove_database(&path)?;
             println!("Cleared: {}", path.display());
             count += 1;
         }
