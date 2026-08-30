@@ -54,6 +54,7 @@ fn print_status_json(status: &EmbeddingStatus, spec: &EmbedSpec) {
         },
         "chunking_changed_warning": status.chunking_changed_warning,
         "total_chunks": status.total_chunks,
+        "stored_chunks": status.stored_chunks,
         "embedded_chunks": status.embedded_chunks,
         "pending_chunks": status.pending_chunks,
         "orphaned_chunks": status.orphaned_chunks,
@@ -143,6 +144,15 @@ fn print_status_tty(status: &EmbeddingStatus, spec: &EmbedSpec) {
     }
     println!();
 
+    // Rows in the database, which equal the usable ones in the steady
+    // state. Worth a line only when they don't, because the difference is
+    // stale rows that `grans embed clear` would delete.
+    if status.stored_chunks != status.embedded_chunks {
+        println!(
+            "Stored:    {} chunks in the database",
+            format_number(status.stored_chunks)
+        );
+    }
     println!(
         "Embedded:  {} chunks",
         format_number(status.embedded_chunks)
@@ -273,7 +283,10 @@ fn clear_embeddings(
 ) -> Result<()> {
     let status = embed::get_embedding_status(conn, embed::model::MODEL_NAME, spec)?;
 
-    if status.embedded_chunks == 0 && status.orphaned_chunks == 0 {
+    // Clearing is a physical operation, so it reads the physical count.
+    // `embedded_chunks` counts only what the current model can use, and
+    // goes to 0 after a model change while every row is still there.
+    if status.stored_chunks == 0 {
         match mode {
             OutputMode::Json => {
                 println!(
@@ -292,8 +305,8 @@ fn clear_embeddings(
         return Ok(());
     }
 
-    let to_clear = count.unwrap_or(status.embedded_chunks);
-    let actual_clear = to_clear.min(status.embedded_chunks);
+    let to_clear = count.unwrap_or(status.stored_chunks);
+    let actual_clear = to_clear.min(status.stored_chunks);
 
     // Prompt unless --yes or non-TTY
     if !yes && mode == OutputMode::Tty {
@@ -303,8 +316,10 @@ fn clear_embeddings(
                 format_number(actual_clear)
             );
         } else {
-            let total = status.embedded_chunks + status.orphaned_chunks;
-            eprintln!("\nThis will clear all {} embeddings.", format_number(total));
+            eprintln!(
+                "\nThis will clear all {} embeddings.",
+                format_number(status.stored_chunks)
+            );
         }
         eprint!("Proceed? [y/N] ");
         io::stderr().flush()?;
@@ -321,7 +336,7 @@ fn clear_embeddings(
         embed::store::delete_recent_chunks(conn, n)?
     } else {
         embed::wipe_all_embeddings(conn)?;
-        status.embedded_chunks + status.orphaned_chunks
+        status.stored_chunks
     };
 
     match mode {
@@ -629,6 +644,32 @@ mod tests {
         conn
     }
 
+    /// A database whose embeddings were written by a model that is no
+    /// longer the current one: embed `docs` documents with the mock and
+    /// leave the stored model name as the mock's, which never matches
+    /// `MODEL_NAME`. Every stored row is physically present but unusable.
+    fn setup_stale_model_db(docs: usize) -> Connection {
+        let conn = setup_test_db();
+        for i in 0..docs {
+            conn.execute(
+                "INSERT INTO documents (id, title, created_at) VALUES (?1, 'Doc', '2025-01-01T00:00:00Z')",
+                [format!("doc{}", i)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript_utterances (id, document_id, start_timestamp, text)
+                 VALUES (?1, ?2, '2025-01-01T10:00:00Z',
+                         'This is a longer utterance that contains enough characters to meet the minimum chunk size requirement for embedding.')",
+                [format!("u{}", i), format!("doc{}", i)],
+            )
+            .unwrap();
+        }
+        let embedder = MockEmbedder::default();
+        let spec = EmbedSpec::default_for(512);
+        embed::ensure_embeddings(&conn, &embedder, embed::DEFAULT_BATCH_SIZE, &spec).unwrap();
+        conn
+    }
+
     const SYNC_STAMP: &str = "2025-06-01T00:00:00+00:00";
 
     fn set_sync_stamp(conn: &Connection) {
@@ -707,6 +748,39 @@ mod tests {
 
         assert_eq!(chunk_count(&conn), 0);
         assert_eq!(stored_watermark(&conn).as_deref(), Some(SYNC_STAMP));
+    }
+
+    #[test]
+    fn clear_removes_embeddings_written_by_a_stale_model() {
+        // Regression for #35: `clear` read `embedded_chunks`, which counts
+        // chunks usable by the *current* model, as if it counted rows in
+        // the table. After a model change that count is 0 while every row
+        // is still there, so clear reported "No embeddings to clear" and
+        // deleted nothing.
+        let conn = setup_stale_model_db(3);
+        let spec = EmbedSpec::default_for(512);
+        let status = embed::get_embedding_status(&conn, embed::model::MODEL_NAME, &spec).unwrap();
+        assert!(status.model_changed_warning);
+        assert_eq!(status.embedded_chunks, 0);
+        assert!(chunk_count(&conn) > 0);
+
+        clear_embeddings(&conn, None, true, OutputMode::Json, &spec).unwrap();
+
+        assert_eq!(chunk_count(&conn), 0);
+    }
+
+    #[test]
+    fn clear_count_removes_that_many_stale_model_embeddings() {
+        // Same collision on the `--count` path: both the default and the
+        // cap came from `embedded_chunks`, so `--count N` capped to 0.
+        let conn = setup_stale_model_db(3);
+        let before = chunk_count(&conn);
+        assert!(before >= 2);
+        let spec = EmbedSpec::default_for(512);
+
+        clear_embeddings(&conn, Some(2), true, OutputMode::Json, &spec).unwrap();
+
+        assert_eq!(chunk_count(&conn), before - 2);
     }
 
     #[test]
