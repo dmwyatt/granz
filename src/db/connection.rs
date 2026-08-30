@@ -23,6 +23,40 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 /// never be handed out without them.
 pub fn apply_pragmas(conn: &Connection) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    enable_wal(conn)?;
+    Ok(())
+}
+
+/// Apply the settings a read-only connection can take.
+///
+/// The journal mode is a property of the file, so a reader inherits whichever
+/// one the file was left in and cannot change it. Asking a read-only connection
+/// to move a database to WAL is an error, and a database pulled from a machine
+/// running an older grans is exactly the case that would hit it.
+pub fn apply_read_only_pragmas(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(())
+}
+
+/// Put the database in write-ahead logging mode.
+///
+/// Under a rollback journal a commit has to lock the whole file, so a `grans
+/// sync` writing while a `grans search` reads fails with "database is locked"
+/// however long it is willing to wait: SQLite returns busy without consulting
+/// the busy handler when waiting could deadlock the two. WAL lets one writer
+/// and any number of readers work at once, which is the shape of every
+/// collision grans has.
+///
+/// The mode lives in the database file, so this changes anything only the first
+/// time. A filesystem that cannot support WAL leaves the database in the mode it
+/// already had rather than failing the command over it.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+
+    if mode != "wal" {
+        debug!("database stayed in {} journal mode rather than WAL", mode);
+    }
+
     Ok(())
 }
 
@@ -41,7 +75,7 @@ pub fn open_existing(path: &std::path::Path) -> Result<Connection> {
 /// Open an existing database for reading only.
 pub fn open_read_only(path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    apply_pragmas(&conn)?;
+    apply_read_only_pragmas(&conn)?;
     Ok(conn)
 }
 
@@ -114,6 +148,68 @@ mod tests {
             .expect("write should wait out the other connection's lock");
 
         holder.join().unwrap();
+    }
+
+    /// The failure a busy timeout cannot rescue, and the one behind the
+    /// "database is locked" warnings from the embedding store: a rollback
+    /// journal makes a commit wait for every open reader, and SQLite refuses
+    /// rather than wait when waiting could deadlock the two.
+    #[test]
+    fn a_writer_commits_while_a_reader_holds_a_read_transaction() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let writer = open_db_at_path(&db_path).unwrap();
+        let reader = open_db_at_path(&db_path).unwrap();
+
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))
+            .unwrap();
+
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE; \
+                 INSERT INTO metadata (key, value) VALUES ('writer', '1'); \
+                 COMMIT;",
+            )
+            .expect("an open reader should not block a commit");
+    }
+
+    #[test]
+    fn the_database_runs_in_wal_mode() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_db_at_path(&db_path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(mode, "wal");
+    }
+
+    /// A reader inherits the journal mode rather than setting it, so it has to
+    /// open a database that is still on a rollback journal, as one pulled from
+    /// a machine running an older grans would be.
+    #[test]
+    fn a_read_only_connection_opens_a_rollback_journal_database() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_db_at_path(&db_path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let reader = open_read_only(&db_path).unwrap();
+        let count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(count, 0);
     }
 
     #[test]
