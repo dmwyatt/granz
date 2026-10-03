@@ -316,9 +316,9 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             Section {
                 title: "Notes",
                 lines: &[
-                    "Matches part of an attendee's name or email address. Granola often",
-                    "records an attendee's email address without a name, so part of an",
-                    "email address finds meetings that a name misses.",
+                    "Matches part of an attendee's name or email address. grans stores a name",
+                    "for few attendees, so part of an email address finds meetings that a",
+                    "name misses.",
                     "",
                     "`grans browse people list` shows the people grans knows about.",
                 ],
