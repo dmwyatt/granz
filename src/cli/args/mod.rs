@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::cli::help;
 use crate::query::filter::SearchTarget;
 use crate::query::speaker::SpeakerSelector;
 
@@ -22,7 +23,12 @@ fn parse_min_score(s: &str) -> Result<f32, String> {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "grans", version = env!("GRANS_VERSION"), about = "Query your Granola meeting notes")]
+#[command(
+    name = "grans",
+    version = env!("GRANS_VERSION"),
+    about = "Query your Granola meeting notes",
+    after_long_help = help::overview()
+)]
 pub struct Cli {
     /// Output as JSON
     #[arg(long, global = true)]
@@ -59,16 +65,15 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     // === Daily Use Commands ===
-    /// Search meetings, transcripts, and notes (ranked discovery)
+    /// Find the meetings most relevant to a topic (ranked, by meaning and by words)
     ///
     /// Fuses keyword and semantic rankings, then reranks the top candidates
     /// with a cross-encoder (--fast skips the rerank stage). Results are the
     /// best few meetings for the query, not a complete list; when you need
-    /// every meeting containing exact words, or matches attributed to a
-    /// speaker, use `grans grep`. The first search downloads the embedding
-    /// and reranker models. Search only covers embedded content; it warns
-    /// when data has synced since the last `grans embed`.
-    #[command(visible_alias = "s")]
+    /// every meeting containing exact words, or what one person said, use
+    /// `grans grep`. The first search downloads the embedding and reranker
+    /// models.
+    #[command(visible_alias = "s", after_long_help = help::for_command("search"))]
     Search {
         /// Search query; words match in any order, "quoted phrases" must match exactly
         query: String,
@@ -125,10 +130,9 @@ pub enum Commands {
     /// Complete lexical lookup over the local full-text index: the reported
     /// count is a fact about your synced meetings, and --limit only trims
     /// how many are shown. Words match in any order; "quoted phrases" must
-    /// match exactly. Never loads models and never prompts. Use
-    /// --speaker to require the match in a specific speaker's utterances.
-    /// For ranked discovery by meaning, use `grans search`.
-    #[command(visible_alias = "g")]
+    /// match exactly. Use --speaker to require the match in what one
+    /// speaker said. To find meetings by meaning, use `grans search`.
+    #[command(visible_alias = "g", after_long_help = help::for_command("grep"))]
     Grep {
         /// Words to look up; words match in any order, "quoted phrases" must match exactly
         query: String,
@@ -175,7 +179,7 @@ pub enum Commands {
     },
 
     /// List meetings
-    #[command(visible_alias = "ls")]
+    #[command(visible_alias = "ls", after_long_help = help::for_command("list"))]
     List {
         /// Filter by person name or email
         #[arg(long)]
@@ -198,7 +202,8 @@ pub enum Commands {
         include_deleted: bool,
     },
 
-    /// Show meeting details
+    /// Show one meeting: its details, transcript, your notes, and AI notes
+    #[command(after_long_help = help::for_command("show"))]
     Show {
         /// Meeting ID or title substring
         meeting: String,
@@ -207,7 +212,7 @@ pub enum Commands {
         #[arg(long)]
         transcript: bool,
 
-        /// Output only the notes
+        /// Output only the notes you wrote
         #[arg(long)]
         notes: bool,
 
@@ -217,7 +222,7 @@ pub enum Commands {
     },
 
     /// Show meetings with a person
-    #[command(visible_alias = "w")]
+    #[command(visible_alias = "w", after_long_help = help::for_command("with"))]
     With {
         /// Person name or email fragment
         person: String,
@@ -240,25 +245,31 @@ pub enum Commands {
     },
 
     /// Show this week's meetings
+    #[command(after_long_help = help::for_command("recent"))]
     Recent,
 
     /// Show today's meetings
+    #[command(after_long_help = help::for_command("today"))]
     Today,
 
-    /// Show database statistics
+    /// Show what the local database holds
+    #[command(after_long_help = help::for_command("info"))]
     Info,
 
-    /// Sync data from Granola API
-    #[command(args_conflicts_with_subcommands = true)]
+    /// Fetch your meetings from Granola into the local database
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_long_help = help::for_command("sync")
+    )]
     Sync {
         #[command(subcommand)]
         action: Option<SyncAction>,
 
-        /// Complete sync: entities, then transcripts, then panels, then embeddings
+        /// Everything: the meeting list, then transcripts, then AI notes, then embeddings
         #[arg(long)]
         all: bool,
 
-        /// Retry documents that previously failed (transcript and panel legs)
+        /// Also retry meetings whose transcript or AI notes failed to fetch before
         #[arg(long, requires = "all")]
         retry: bool,
 
@@ -267,32 +278,37 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Dropbox sync (init, push, pull, status, logout)
+    /// Share the database between machines through Dropbox
+    #[command(after_long_help = help::for_command("dropbox"))]
     Dropbox {
         #[command(subcommand)]
         action: DropboxAction,
     },
 
     /// Manage grans's Granola sign-in (login, status, logout)
+    #[command(after_long_help = help::for_command("auth"))]
     Auth {
         #[command(subcommand)]
         action: AuthAction,
     },
 
     // === Grouped Commands ===
-    /// Browse entities (people, calendars, templates, recipes)
+    /// Browse people, calendars, templates, and recipes
+    #[command(after_long_help = help::for_command("browse"))]
     Browse {
         #[command(subcommand)]
         action: BrowseAction,
     },
 
     /// Administrative commands (db, token)
+    #[command(after_long_help = help::for_command("admin"))]
     Admin {
         #[command(subcommand)]
         action: AdminAction,
     },
 
     /// Update grans to the latest version
+    #[command(after_long_help = help::for_command("update"))]
     Update {
         /// Check for updates without installing
         #[arg(long)]
@@ -311,17 +327,18 @@ pub enum Commands {
         timeout: u64,
     },
 
-    /// Build embeddings for hybrid search
+    /// Build the embeddings that let search match by meaning
+    #[command(after_long_help = help::for_command("embed"))]
     Embed {
         #[command(subcommand)]
         action: Option<EmbedAction>,
 
         /// Skip confirmation prompt
-        #[arg(long, short = 'y', global = true)]
+        #[arg(long, short = 'y')]
         yes: bool,
 
         /// Number of chunks to embed per batch (higher values use more memory but may be faster on GPU)
-        #[arg(long, default_value = "16", global = true)]
+        #[arg(long, default_value = "16")]
         batch_size: usize,
 
         /// Experiment knob: target tokens per chunk (overrides the stored scheme)
@@ -342,10 +359,18 @@ pub enum Commands {
     },
 
     /// Benchmarking commands
+    #[command(after_long_help = help::for_command("benchmark"))]
     Benchmark {
         #[command(subcommand)]
         action: BenchmarkAction,
     },
+
+    /// Print a skill that points AI agents at this help
+    ///
+    /// Writes an agent skill (a SKILL.md) to stdout, for you to redirect to
+    /// wherever your agent tool reads skills.
+    #[command(after_long_help = help::for_command("skill"))]
+    Skill,
 }
 
 // === Benchmark Subcommands ===
@@ -382,6 +407,7 @@ impl QualityMode {
 #[derive(Subcommand, Debug)]
 pub enum BenchmarkAction {
     /// Benchmark semantic search performance
+    #[command(after_long_help = help::for_command("benchmark semantic-search"))]
     SemanticSearch {
         /// Number of search queries to run
         #[arg(long, default_value = "100")]
@@ -405,6 +431,7 @@ pub enum BenchmarkAction {
     },
 
     /// Run search quality benchmark against a labeled golden set
+    #[command(after_long_help = help::for_command("benchmark quality"))]
     Quality {
         /// Path to benchmark JSON file
         #[arg(long)]
@@ -458,13 +485,19 @@ pub enum BenchmarkAction {
 
 #[derive(Subcommand, Debug)]
 pub enum EmbedAction {
-    /// Show embedding status
+    /// Show how much content is embedded and how much is waiting
+    #[command(after_long_help = help::for_command("embed status"))]
     Status,
     /// Clear embeddings (for dev/testing)
+    #[command(after_long_help = help::for_command("embed clear"))]
     Clear {
         /// Number of most recent embeddings to clear (clears all if not specified)
         #[arg(long)]
         count: Option<usize>,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -476,20 +509,22 @@ pub const DEFAULT_SYNC_DELAY_MS: u64 = 1500;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SyncAction {
-    /// Sync documents (meetings) from Granola API
+    /// Sync the meeting list (Granola calls meetings documents)
+    #[command(after_long_help = help::for_command("sync documents"))]
     Documents,
 
-    /// Sync transcripts for documents
+    /// Sync transcripts for meetings that have none
+    #[command(after_long_help = help::for_command("sync transcripts"))]
     Transcripts {
-        /// Fetch the transcript for a single document (full ID or unique prefix), replacing any existing transcript
+        /// Fetch the transcript for a single meeting (full ID or unique prefix), replacing any existing transcript
         #[arg(value_name = "DOCUMENT_ID", conflicts_with_all = ["limit", "since", "delay_ms", "retry"])]
         document_id: Option<String>,
 
-        /// Maximum number of documents to fetch transcripts for
+        /// Maximum number of meetings to fetch transcripts for
         #[arg(long)]
         limit: Option<usize>,
 
-        /// Only sync transcripts for documents created on or after this date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
+        /// Only sync transcripts for meetings created on or after this date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
         #[arg(long)]
         since: Option<String>,
 
@@ -497,7 +532,7 @@ pub enum SyncAction {
         #[arg(long, default_value_t = DEFAULT_SYNC_DELAY_MS)]
         delay_ms: u64,
 
-        /// Retry documents that previously failed or had no transcript
+        /// Retry meetings that previously failed or had no transcript
         #[arg(long)]
         retry: bool,
 
@@ -507,24 +542,29 @@ pub enum SyncAction {
     },
 
     /// Sync people (contacts) from Granola API
+    #[command(after_long_help = help::for_command("sync people"))]
     People,
 
     /// Sync calendar events from Granola API
+    #[command(after_long_help = help::for_command("sync calendars"))]
     Calendars,
 
-    /// Sync panel templates from Granola API
+    /// Sync the templates Granola generates AI notes from
+    #[command(after_long_help = help::for_command("sync templates"))]
     Templates,
 
-    /// Sync recipes from Granola API
+    /// Sync recipes (Granola's saved prompts)
+    #[command(after_long_help = help::for_command("sync recipes"))]
     Recipes,
 
-    /// Sync AI-generated panels for documents
+    /// Sync AI notes: the summaries Granola generates (it calls them panels)
+    #[command(after_long_help = help::for_command("sync panels"))]
     Panels {
-        /// Maximum number of documents to fetch panels for
+        /// Maximum number of meetings to fetch AI notes for
         #[arg(long)]
         limit: Option<usize>,
 
-        /// Only sync panels for documents created on or after this date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
+        /// Only sync AI notes for meetings created on or after this date [e.g., 2024-01-15, 2024-01-15T10:30:00Z, or duration: 3d, 2w, 1m]
         #[arg(long)]
         since: Option<String>,
 
@@ -532,7 +572,7 @@ pub enum SyncAction {
         #[arg(long, default_value_t = DEFAULT_SYNC_DELAY_MS)]
         delay_ms: u64,
 
-        /// Retry documents that previously failed or had no panels
+        /// Retry meetings that previously failed or had no AI notes
         #[arg(long)]
         retry: bool,
     },
@@ -542,22 +582,26 @@ pub enum SyncAction {
 
 #[derive(Subcommand, Debug)]
 pub enum BrowseAction {
-    /// Query people
+    /// The people Granola has on record
+    #[command(after_long_help = help::for_command("browse people"))]
     People {
         #[command(subcommand)]
         action: PeopleAction,
     },
-    /// Query calendars
+    /// Your calendars and their events
+    #[command(after_long_help = help::for_command("browse calendars"))]
     Calendars {
         #[command(subcommand)]
         action: CalendarsAction,
     },
-    /// Browse templates
+    /// The templates Granola generates AI notes from
+    #[command(after_long_help = help::for_command("browse templates"))]
     Templates {
         #[command(subcommand)]
         action: TemplatesAction,
     },
-    /// Browse recipes
+    /// Granola's recipes (saved prompts)
+    #[command(after_long_help = help::for_command("browse recipes"))]
     Recipes {
         #[command(subcommand)]
         action: RecipesAction,
@@ -567,12 +611,14 @@ pub enum BrowseAction {
 #[derive(Subcommand, Debug)]
 pub enum PeopleAction {
     /// List people
+    #[command(after_long_help = help::for_command("browse people list"))]
     List {
         /// Filter by company name
         #[arg(long)]
         company: Option<String>,
     },
     /// Show person details
+    #[command(after_long_help = help::for_command("browse people show"))]
     Show {
         /// Person ID, name, or email fragment
         query: String,
@@ -582,10 +628,12 @@ pub enum PeopleAction {
 #[derive(Subcommand, Debug)]
 pub enum CalendarsAction {
     /// List calendars
+    #[command(after_long_help = help::for_command("browse calendars list"))]
     List,
     /// Show calendar events
+    #[command(after_long_help = help::for_command("browse calendars events"))]
     Events {
-        /// Filter by calendar ID
+        /// Filter by calendar ID (any part of it)
         #[arg(long)]
         calendar: Option<String>,
 
@@ -606,12 +654,14 @@ pub enum CalendarsAction {
 #[derive(Subcommand, Debug)]
 pub enum TemplatesAction {
     /// List templates
+    #[command(after_long_help = help::for_command("browse templates list"))]
     List {
         /// Filter by category
         #[arg(long)]
         category: Option<String>,
     },
     /// Show template details
+    #[command(after_long_help = help::for_command("browse templates show"))]
     Show {
         /// Template ID or title substring
         query: String,
@@ -621,12 +671,14 @@ pub enum TemplatesAction {
 #[derive(Subcommand, Debug)]
 pub enum RecipesAction {
     /// List recipes
+    #[command(after_long_help = help::for_command("browse recipes list"))]
     List {
         /// Filter by visibility (public, shared, user, unlisted)
         #[arg(long)]
         visibility: Option<String>,
     },
     /// Show recipe details
+    #[command(after_long_help = help::for_command("browse recipes show"))]
     Show {
         /// Recipe ID or name substring
         query: String,
@@ -638,11 +690,13 @@ pub enum RecipesAction {
 #[derive(Subcommand, Debug)]
 pub enum AdminAction {
     /// Database management
+    #[command(after_long_help = help::for_command("admin db"))]
     Db {
         #[command(subcommand)]
         action: DbAction,
     },
     /// Print the current Granola API token
+    #[command(after_long_help = help::for_command("admin token"))]
     Token {
         /// Copy to clipboard instead of printing
         #[arg(long, short = 'c')]
@@ -652,20 +706,24 @@ pub enum AdminAction {
 
 #[derive(Subcommand, Debug)]
 pub enum DbAction {
-    /// Clear the database (run 'grans sync' to repopulate)
+    /// Delete the database (run `grans sync --all` to download it again)
+    #[command(after_long_help = help::for_command("admin db clear"))]
     Clear {
         /// Remove all database files in the data directory
         #[arg(long)]
         all: bool,
     },
     /// Show database location, size and search index health
+    #[command(after_long_help = help::for_command("admin db info"))]
     Info,
     /// List all database files
+    #[command(after_long_help = help::for_command("admin db list"))]
     List,
     /// Rebuild the full-text search indexes from the tables they index
     ///
-    /// The repair for the drift that 'grans admin db info' reports. Re-derives
+    /// The repair for the drift that `grans admin db info` reports. Re-derives
     /// each index from its source, so nothing is lost and no re-sync is needed.
+    #[command(after_long_help = help::for_command("admin db rebuild-fts"))]
     RebuildFts,
 }
 
@@ -678,6 +736,7 @@ pub enum AuthAction {
     /// Opens a browser to Granola's login. It ends on a granola.ai page that
     /// tries to hand off to the Granola app rather than to grans, so cancel
     /// that dialog and paste the address bar URL back here instead.
+    #[command(after_long_help = help::for_command("auth login"))]
     Login {
         /// Identity provider to sign in with
         #[arg(long, value_enum, default_value_t = AuthProvider::Google)]
@@ -694,8 +753,10 @@ pub enum AuthAction {
     /// The account email comes from the local accounts log when this database
     /// has synced from the account before; otherwise one get-user-info API
     /// call fetches it.
+    #[command(after_long_help = help::for_command("auth status"))]
     Status,
     /// Remove grans's stored credentials
+    #[command(after_long_help = help::for_command("auth logout"))]
     Logout,
 }
 
@@ -708,22 +769,27 @@ pub enum AuthProvider {
 #[derive(Subcommand, Debug)]
 pub enum DropboxAction {
     /// Set up Dropbox authentication (one-time setup)
+    #[command(after_long_help = help::for_command("dropbox init"))]
     Init,
     /// Upload database to Dropbox
+    #[command(after_long_help = help::for_command("dropbox push"))]
     Push {
         /// Overwrite even if remote is newer
         #[arg(long)]
         force: bool,
     },
     /// Download database from Dropbox
+    #[command(after_long_help = help::for_command("dropbox pull"))]
     Pull {
         /// Overwrite even if local is newer
         #[arg(long)]
         force: bool,
     },
     /// Show sync status
+    #[command(after_long_help = help::for_command("dropbox status"))]
     Status,
     /// Remove Dropbox authentication
+    #[command(after_long_help = help::for_command("dropbox logout"))]
     Logout,
 }
 

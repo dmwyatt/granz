@@ -25,6 +25,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
+    // Printing the skill reads nothing: no database, token, or output mode
+    if let Commands::Skill = &cli.command {
+        commands::skill::run();
+        return Ok(());
+    }
+
     // Update command doesn't need a database
     if let Commands::Update {
         check,
@@ -287,6 +293,7 @@ fn main() -> Result<()> {
         Commands::Update { .. } => unreachable!(),    // Handled above
         Commands::Sync { .. } => unreachable!(),      // Handled above
         Commands::Embed { .. } => unreachable!(),     // Handled above
+        Commands::Skill => unreachable!(),            // Handled above
 
         // === Browse Commands ===
         Commands::Browse { action } => {

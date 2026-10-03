@@ -42,6 +42,8 @@ grans search "project kickoff"
 grans [OPTIONS] <COMMAND>
 ```
 
+grans documents itself. `grans --help` maps common tasks to commands and walks through the workflows that take more than one, and `grans <command> --help` gives that command's flags, examples, and notes (`-h` prints a shorter summary without the examples). The test suite runs every example in the help through the real argument parser, so a renamed or removed flag fails CI rather than lingering in an example.
+
 ### Global Options
 
 | Flag | Description |
@@ -71,17 +73,18 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 ### Quick Reference
 
 **Daily Use Commands** (top-level):
-- `sync` - Sync data from Granola API
+- `sync` - Fetch your meetings from Granola into the local database
 - `list` (`ls`) - List meetings
-- `show` - Show meeting details
-- `search` (`s`) - Ranked search across meetings, transcripts, notes, and panels
+- `show` - Show one meeting: its details, transcript, your notes, and AI notes
+- `search` (`s`) - Find the meetings most relevant to a topic (ranked, by meaning and by words)
 - `grep` (`g`) - List every meeting containing given words
 - `with` (`w`) - Show meetings with a person
 - `recent` - Show this week's meetings
 - `today` - Show today's meetings
-- `embed` - Build embeddings for semantic search
-- `dropbox` - Dropbox sync (init, push, pull, status, logout)
-- `info` - Show database statistics
+- `embed` - Build the embeddings that let search match by meaning
+- `dropbox` - Share the database between machines through Dropbox
+- `info` - Show what the local database holds
+- `skill` - Print a skill that points AI agents at the help
 
 **Browse Commands** (entity exploration):
 - `browse people` - List/show people and their meetings
@@ -129,8 +132,8 @@ grans sync transcripts 504fe9f6 --embed   # Rebuild embeddings afterward
 # Options
 grans sync --dry-run              # Preview what would sync
 grans sync transcripts --embed    # Build embeddings after syncing transcripts
-grans sync documents --limit 50   # Limit to 50 documents
-grans sync documents --since 7d   # Only docs updated in last 7 days
+grans sync transcripts --limit 50 # Fetch transcripts for at most 50 meetings
+grans sync transcripts --since 7d # Only meetings created in the last 7 days
 grans sync transcripts --delay-ms 500  # Rate limiting for transcripts
 grans sync transcripts --retry         # Retry previously failed documents
 grans sync panels --limit 10          # Fetch panels for up to 10 documents
@@ -313,7 +316,7 @@ grans grep "budget" --meeting "Weekly Standup"
 grans search "budget" --include-deleted
 ```
 
-Ranked search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either retriever surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do). Reranking takes roughly 2.2 seconds per query on CPU, most of it model inference; `--fast` skips the stage and returns fusion-order results (no relevance scores) in about 75 milliseconds.
+Ranked search runs keyword and semantic retrieval together and fuses the two rankings with reciprocal rank fusion, so a meeting ranked well by either retriever surfaces, and one ranked well by both rises to the top. The top 50 fused candidates are then scored by a cross-encoder reranker (`jina-reranker-v1-turbo-en`) for how well each meeting actually answers the query, and the final order blends that judgment with the fusion ranking and a small boost for meetings whose title matches the query (damped when many meetings share the title, as recurring series do). `--fast` skips the rerank stage and returns fusion-order results (no relevance scores). It saves only that stage: every search still loads the embedding model, so when running many lookups in a loop, use `grans grep`, which loads no models.
 
 Grep matches every word in the query, in any order, in the title as well as the body (`grans grep "budget review"` finds a meeting titled "Budget review" and one whose transcript mentions both words; quote a phrase inside the query, e.g. `grans grep '"budget review"'`, to require it verbatim). Matching is word-based everywhere, so the query words match whole tokens, not substrings inside a longer word (`art` does not match a title reading "Quarterly planning"). Results are ranked by relevance: titles, notes, transcripts, and AI notes are all scored by BM25, each meeting is ranked by its strongest match, and newer meetings break ties. Use grep when completeness is the point, e.g. auditing every mention of a term, or when you need matches attributed to a speaker: `--speaker` keeps only meetings where that speaker's transcript utterances match the query, and the cards show exactly those utterances. Notes and AI notes carry no speaker, so combining `--speaker` with an `--in` list that excludes transcripts is an error. Speaker filtering is grep-only because semantic retrieval has no per-utterance attribution, so search could not honor the filter without capping the answer.
 
@@ -357,6 +360,18 @@ grans embed clear --yes && grans embed --yes
 ```
 
 Embeddings are built by this command, by `grans sync --all`, or during `grans sync transcripts --embed`; search only reads them. Run one of these after syncing new content to make it searchable semantically.
+
+`grans embed` asks before it starts unless given `-y` or `--json`, so pass `-y` when nothing is there to answer. `-y` and `--batch-size` belong to `grans embed` itself; `embed clear` takes its own `-y`, and `embed status` takes neither.
+
+### Agent Skill
+
+`grans skill` prints a skill file (a `SKILL.md`) that tells an AI agent when grans is relevant and to read `grans --help` for how to use it. Redirect it to wherever your agent tool reads skills:
+
+```bash
+grans skill > ~/.claude/skills/grans/SKILL.md
+```
+
+The skill carries no usage documentation of its own. A redirected file is a snapshot, so anything it said about commands or flags would go stale on the next `grans update`; instead it sends the agent to the help, which always matches the installed binary. It ends with the grans version that generated it. grans only writes to stdout, because skill locations differ per agent tool.
 
 ### List Meetings
 

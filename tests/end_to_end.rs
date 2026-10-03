@@ -499,3 +499,47 @@ fn meetings_show_json_chat_url_null_when_absent() {
     assert!(!panels.is_empty());
     assert!(panels[0]["chat_url"].is_null());
 }
+
+// --- help and skill ---
+
+#[test]
+fn long_help_shows_examples_and_short_help_does_not() {
+    let help_of = |flag: &str| {
+        let output = assert_cmd::cargo_bin_cmd!("grans")
+            .args(["sync", flag])
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let long = help_of("--help");
+    assert!(long.contains("Examples:\n  grans sync --all"));
+    assert!(long.contains("Notes:\n"));
+
+    let short = help_of("-h");
+    assert!(short.contains("--all"));
+    assert!(!short.contains("Examples:"));
+}
+
+#[test]
+fn skill_prints_to_stdout_and_touches_no_database() {
+    let data_home = tempfile::TempDir::new().unwrap();
+
+    assert_cmd::cargo_bin_cmd!("grans")
+        .arg("skill")
+        .env("XDG_DATA_HOME", data_home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("---\nname: grans\n"))
+        .stdout(predicate::str::contains("grans --help"));
+
+    assert!(
+        std::fs::read_dir(data_home.path())
+            .unwrap()
+            .next()
+            .is_none(),
+        "printing the skill should not create a data directory or database"
+    );
+}

@@ -27,7 +27,12 @@ pub fn run(
         // Clearing deletes rows and never reads the chunking scheme, so it
         // resolves no spec: a stored scheme that fails validation is
         // exactly what a user runs `clear` to get out from under.
-        Some(EmbedAction::Clear { count }) => clear_embeddings(conn, *count, yes, mode),
+        // `-y` counts on either side of the subcommand: `embed clear -y` and
+        // `embed -y clear` both skip the prompt.
+        Some(EmbedAction::Clear {
+            count,
+            yes: clear_yes,
+        }) => clear_embeddings(conn, *count, yes || *clear_yes, mode),
         Some(EmbedAction::Status) => show_status(conn, mode, &resolve_spec(conn, overrides)?),
         None => embed_with_prompt(conn, yes, batch_size, mode, &resolve_spec(conn, overrides)?),
     }
@@ -793,8 +798,11 @@ mod tests {
 
         run(
             &conn,
-            Some(&EmbedAction::Clear { count: None }),
-            true,
+            Some(&EmbedAction::Clear {
+                count: None,
+                yes: true,
+            }),
+            false,
             embed::DEFAULT_BATCH_SIZE,
             OutputMode::Json,
             &EmbedOverrides::default(),
@@ -802,6 +810,38 @@ mod tests {
         .unwrap();
 
         assert_eq!(chunk_count(&conn), 0);
+    }
+
+    /// Run `embed clear` in the mode that prompts, with `-y` given after
+    /// the subcommand, before it, or both. A run that prompts anyway reads
+    /// the test's stdin, finds no "y" there, and clears nothing.
+    fn clear_with_yes(after_subcommand: bool, before_subcommand: bool) -> i64 {
+        let conn = setup_embedded_db(2);
+        run(
+            &conn,
+            Some(&EmbedAction::Clear {
+                count: None,
+                yes: after_subcommand,
+            }),
+            before_subcommand,
+            embed::DEFAULT_BATCH_SIZE,
+            OutputMode::Tty,
+            &EmbedOverrides::default(),
+        )
+        .unwrap();
+        chunk_count(&conn)
+    }
+
+    #[test]
+    fn clear_skips_the_prompt_for_yes_after_the_subcommand() {
+        assert_eq!(clear_with_yes(true, false), 0);
+    }
+
+    #[test]
+    fn clear_skips_the_prompt_for_yes_before_the_subcommand() {
+        // There `-y` is parsed as embed's own flag, not clear's. A script
+        // that writes `grans embed -y clear` must not be left at a prompt.
+        assert_eq!(clear_with_yes(false, true), 0);
     }
 
     #[test]
