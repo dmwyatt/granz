@@ -57,7 +57,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         examples: &[
             Example {
                 command: "grans sync documents",
-                about: "The meeting list: titles, attendees, and your notes",
+                about: "The meeting list: titles, invitees, and your notes",
             },
             Example {
                 command: "grans sync documents --dry-run",

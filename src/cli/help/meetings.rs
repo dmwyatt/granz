@@ -197,7 +197,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             },
             Example {
                 command: r#"grans list --person "jane""#,
-                about: "Meetings Jane attended",
+                about: "Meetings Jane was invited to",
             },
             Example {
                 command: "grans list --include-deleted",
@@ -214,7 +214,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
                 lines: &[
                     "Each row starts with the meeting's ID. Pass it to `grans show`.",
                     "",
-                    "--person matches part of an attendee's name or email address, as",
+                    "--person matches part of an invitee's name or email address, as",
                     "`grans with` does.",
                 ],
             },
@@ -297,7 +297,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         examples: &[
             Example {
                 command: r#"grans with "jane""#,
-                about: "Meetings Jane attended, newest first",
+                about: "Meetings Jane was invited to, newest first",
             },
             Example {
                 command: r#"grans with "jane@example.com""#,
@@ -316,9 +316,12 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             Section {
                 title: "Notes",
                 lines: &[
-                    "Matches part of an attendee's name or email address. grans stores a name",
-                    "for few attendees, so part of an email address finds meetings that a",
-                    "name misses.",
+                    "Finds meetings whose calendar invitation lists the person, matching part",
+                    "of a name or email address. An invitation is not attendance: someone",
+                    "listed may not have come. The transcript shows who spoke.",
+                    "",
+                    "grans stores a name for few invitees, so part of an email address finds",
+                    "meetings that a name misses.",
                     "",
                     "`grans browse people list` shows the people grans knows about.",
                 ],

@@ -53,7 +53,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         ],
         sections: &[Section {
             title: "Notes",
-            lines: &[r#"For the meetings someone attended, use `grans with "<name>"`."#],
+            lines: &[r#"For the meetings someone was invited to, use `grans with "<name>"`."#],
         }],
     },
     CommandHelp {
