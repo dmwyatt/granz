@@ -1,0 +1,3 @@
+# Compiled into the binary and printed verbatim by `grans skill`, so its bytes
+# must not depend on the platform that built grans.
+src/commands/skill.md text eol=lf

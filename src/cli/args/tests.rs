@@ -524,3 +524,59 @@ fn sync_all_allows_dry_run() {
         _ => panic!("expected sync subcommand"),
     }
 }
+
+#[test]
+fn embed_status_rejects_the_flags_that_do_nothing_there() {
+    for extra in [&["-y"][..], &["--yes"][..], &["--batch-size", "8"][..]] {
+        let mut argv = vec!["grans", "embed", "status"];
+        argv.extend_from_slice(extra);
+        let result = Cli::try_parse_from(argv);
+        assert!(result.is_err(), "embed status {extra:?} should be rejected");
+    }
+}
+
+#[test]
+fn embed_clear_rejects_batch_size() {
+    // Clearing embeds nothing, so there is no batch to size.
+    let result = Cli::try_parse_from(["grans", "embed", "clear", "--batch-size", "8"]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn embed_clear_takes_yes() {
+    for flag in ["-y", "--yes"] {
+        let cli = Cli::try_parse_from(["grans", "embed", "clear", "--count", "5", flag]).unwrap();
+        let Commands::Embed {
+            action: Some(EmbedAction::Clear { count, yes }),
+            ..
+        } = &cli.command
+        else {
+            panic!("expected embed clear subcommand");
+        };
+        assert_eq!(*count, Some(5));
+        assert!(*yes, "embed clear {flag} should skip the prompt");
+    }
+}
+
+#[test]
+fn embed_takes_yes_and_batch_size() {
+    let cli = Cli::try_parse_from(["grans", "embed", "-y", "--batch-size", "32"]).unwrap();
+    let Commands::Embed {
+        action,
+        yes,
+        batch_size,
+        ..
+    } = &cli.command
+    else {
+        panic!("expected embed subcommand");
+    };
+    assert!(action.is_none());
+    assert!(*yes);
+    assert_eq!(*batch_size, 32);
+}
+
+#[test]
+fn skill_parses_without_arguments() {
+    let cli = Cli::try_parse_from(["grans", "skill"]).unwrap();
+    assert!(matches!(cli.command, Commands::Skill));
+}

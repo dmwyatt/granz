@@ -13,9 +13,13 @@ pub const DEFAULT_SEARCH_TARGETS: &str = "titles,transcripts,notes,panels";
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[value(rename_all = "lowercase")]
 pub enum SearchTarget {
+    /// Meeting titles
     Titles,
+    /// What was said, as transcribed
     Transcripts,
+    /// The notes you wrote yourself
     Notes,
+    /// AI notes: the summaries Granola generates (it calls them panels)
     Panels,
 }
 

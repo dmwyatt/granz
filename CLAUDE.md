@@ -83,7 +83,31 @@ cargo run -- browse people list
 
 ## Documentation
 
-When changes affect user-facing behavior (new commands, changed flags, modified output, new features), update `README.md` to reflect those changes. Keep the README in sync with the actual CLI interface. Internal refactors that don't change the CLI surface do not require README updates.
+Usage documentation lives in `--help`, and the help is the source of truth for
+how to use grans. It has two parts: the clap doc comments in
+`src/cli/args/mod.rs`, and the examples and notes in `src/cli/help/`, which
+each command attaches with `after_long_help = help::for_command("<path>")`
+(the top level uses `help::overview()`).
+
+When a change affects user-facing behavior (new commands, changed flags,
+modified output, new features), update the help first:
+
+- Every visible command needs an entry in `src/cli/help/` with at least one
+  example. `cargo test cli::help` fails for a command without one, for an
+  example the real parser rejects, and for a `grans ...` command line in
+  backticks anywhere in the help that names a command or flag that does not
+  exist. The tests check command lines only, so the prose beside them is
+  yours to keep true.
+- Write examples and task descriptions as the task someone arrives with, not
+  in terms of the data model. Where a flag forces a Granola noun (`panels`,
+  `documents`), gloss it in plain words.
+- Notes are wrapped by hand at about 76 columns; clap prints them as written.
+
+`grans skill` prints `src/commands/skill.md`, which deliberately carries no
+usage documentation (its tests enforce that); do not add any.
+
+Then update `README.md` where it covers the same ground. Internal refactors
+that don't change the CLI surface need neither.
 
 ## Architecture
 
@@ -97,7 +121,7 @@ CLI (main.rs, cli/) → Commands (commands/) → DB queries (db/) → SQLite
                             API (api/) — for sync
 ```
 
-- **cli/**: Clap derive definitions and `RunContext` (output mode)
+- **cli/**: Clap derive definitions, `RunContext` (output mode), and `help/` (the examples and notes shown under `--help`)
 - **commands/**: Dispatch to db/ queries or api/ calls, select output formatter
 - **api/**: Granola API client and authentication
   - `auth.rs`: Token resolution order (`--token`/`GRANS_TOKEN`, stored credentials, local store)
