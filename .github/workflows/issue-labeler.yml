@@ -113,9 +113,9 @@ jobs:
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           CLASSIFICATION: ${{ steps.classify.outputs.structured_output }}
         run: |
-          # Read the labels again instead of reusing the earlier answer: the
-          # classification takes a minute or two, and a label someone set in
-          # the meantime stands like one set at filing.
+          # Read the labels again instead of reusing the earlier answer: a
+          # label someone set while Claude was classifying stands like one set
+          # at filing.
           labels=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '[.labels[].name]')
           new_labels=$(jq -rn --argjson labels "$labels" --argjson classification "$CLASSIFICATION" '
             ($labels | map(split(": ")[0])) as $labelled
