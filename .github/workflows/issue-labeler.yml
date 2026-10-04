@@ -10,13 +10,18 @@ on:
         required: true
         type: number
 
+# Labels chosen by whoever filed the issue stand. Claude classifies the issue
+# but cannot edit it: its answer comes back as structured output, and a shell
+# step adds a label only to a group (type, status, prio, size) that has none.
+# An instruction in the prompt to leave existing labels alone would be a
+# request, and a missed one costs more than a wrong size: agents dispatch off
+# `status: ready`, so a blocked issue relabelled ready gets picked up.
 jobs:
   label-issue:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
-      id-token: write
 
     steps:
       - name: Checkout repository
@@ -32,8 +37,9 @@ jobs:
         id: details
         env:
           GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
         run: |
-          gh issue view ${{ steps.issue.outputs.number }} --json title,body --jq '{title, body}' > /tmp/issue.json
+          gh issue view "$ISSUE_NUMBER" --json title,body,labels > /tmp/issue.json
           echo "title=$(jq -r .title /tmp/issue.json)" >> "$GITHUB_OUTPUT"
           {
             echo "body<<ISSUE_BODY_EOF"
@@ -41,51 +47,87 @@ jobs:
             echo "ISSUE_BODY_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Label Issue with Claude
+          # The groups the issue has no label in. When there are none, the
+          # issue was filed fully labelled and the remaining steps are skipped.
+          unlabelled=$(jq -r '
+            ["type", "status", "prio", "size"] - [.labels[].name | split(": ")[0]] | join(" ")
+          ' /tmp/issue.json)
+          echo "unlabelled=$unlabelled" >> "$GITHUB_OUTPUT"
+
+      # github_token is the job's own token. Without it the action trades an
+      # OIDC token for a Claude app token, which Claude has no use for here.
+      - name: Classify issue with Claude
+        id: classify
+        if: steps.details.outputs.unlabelled != ''
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--allowed-tools "Bash(gh issue edit*)"'
+          github_token: ${{ github.token }}
+          claude_args: |
+            --json-schema '{"type":"object","properties":{"type":{"type":"string","enum":["bug","feature","chore","docs"]},"status":{"type":"string","enum":["triage","ready","needs info"]},"prio":{"type":"string","enum":["p0","p1","p2","p3"]},"size":{"type":"string","enum":["s","m","l"]},"good_first_issue":{"type":"boolean"}},"required":["type","status","prio"],"additionalProperties":false}'
           prompt: |
-            Analyze the following GitHub issue and apply appropriate labels using `gh issue edit`.
+            Classify the following GitHub issue.
 
             Issue #${{ steps.issue.outputs.number }}
             Title: ${{ steps.details.outputs.title }}
             Body:
             ${{ steps.details.outputs.body }}
 
-            ## Label Schema
+            ## Classification
 
-            Apply ONE label from each applicable category:
+            **type (required - pick exactly one):**
+            - `bug` - Something isn't working
+            - `feature` - New functionality
+            - `chore` - Maintenance, refactoring, dependencies
+            - `docs` - Documentation only
 
-            **Type (required - pick exactly one):**
-            - `type: bug` - Something isn't working
-            - `type: feature` - New functionality
-            - `type: chore` - Maintenance, refactoring, dependencies
-            - `type: docs` - Documentation only
+            **status (required - pick exactly one):**
+            - `triage` - Use if unclear or needs discussion
+            - `ready` - Use if the issue is clear and actionable
+            - `needs info` - Use if the issue is missing critical details
 
-            **Status (required - pick exactly one):**
-            - `status: triage` - Use if unclear or needs discussion
-            - `status: ready` - Use if the issue is clear and actionable
-            - `status: needs info` - Use if the issue is missing critical details
+            **prio (required - pick exactly one):**
+            - `p0` - Critical, drop everything (security issues, data loss, complete breakage)
+            - `p1` - High priority (significant bugs, blocking issues)
+            - `p2` - Medium priority (normal bugs, useful features)
+            - `p3` - Low priority (nice-to-have, minor improvements)
 
-            **Priority (required - pick exactly one):**
-            - `prio: p0` - Critical, drop everything (security issues, data loss, complete breakage)
-            - `prio: p1` - High priority (significant bugs, blocking issues)
-            - `prio: p2` - Medium priority (normal bugs, useful features)
-            - `prio: p3` - Low priority (nice-to-have, minor improvements)
+            **size (optional - leave it out unless it can be estimated):**
+            - `s` - Small, quick fix
+            - `m` - Medium effort
+            - `l` - Large, multiple days
 
-            **Size (optional - only if estimable):**
-            - `size: s` - Small, quick fix
-            - `size: m` - Medium effort
-            - `size: l` - Large, multiple days
-
-            **Workflow (optional):**
-            - `good first issue` - Only if simple and well-documented, good for newcomers
+            **good_first_issue (optional):**
+            - `true` - Only if simple and well-documented, good for newcomers
 
             ## Instructions
 
             1. Analyze the issue title and body to understand what it's about
-            2. Select appropriate labels from each category
-            3. Apply labels using: `gh issue edit ${{ steps.issue.outputs.number }} --add-label "label1" --add-label "label2" ...`
-            4. Do NOT comment on the issue - just apply the labels silently
+            2. Return one value for each category
+            3. Do NOT comment on the issue or edit it - a later step applies the labels
+
+      - name: Label the groups the issue has no label in
+        if: steps.details.outputs.unlabelled != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          CLASSIFICATION: ${{ steps.classify.outputs.structured_output }}
+        run: |
+          # Read the labels again instead of reusing the earlier answer: the
+          # classification takes a minute or two, and a label someone set in
+          # the meantime stands like one set at filing.
+          labels=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '[.labels[].name]')
+          new_labels=$(jq -rn --argjson labels "$labels" --argjson classification "$CLASSIFICATION" '
+            ($labels | map(split(": ")[0])) as $labelled
+            | [
+                ("type", "status", "prio", "size") as $group
+                | select($group | IN($labelled[]) | not)
+                | $classification[$group] | values | "\($group): \(.)"
+              ]
+              + (if $classification.good_first_issue then ["good first issue"] else [] end)
+            | join(",")
+          ')
+
+          if [[ -n "$new_labels" ]]; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "$new_labels"
+          fi
