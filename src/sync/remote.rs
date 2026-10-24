@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::config::SyncConfig;
 use super::content_hash::HashKind;
 use super::dropbox::{self, DropboxClient};
+use super::google_drive::{self, GoogleDriveClient};
 use super::transfer::{ProgressFn, verify_content_hash};
 use super::{SyncError, SyncResult};
 
@@ -22,6 +23,7 @@ use super::{SyncError, SyncResult};
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     Dropbox,
+    GoogleDrive,
 }
 
 impl Provider {
@@ -29,6 +31,7 @@ impl Provider {
     pub fn hash_kind(self) -> HashKind {
         match self {
             Self::Dropbox => HashKind::Dropbox,
+            Self::GoogleDrive => HashKind::Sha256,
         }
     }
 }
@@ -37,6 +40,7 @@ impl fmt::Display for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Dropbox => "Dropbox",
+            Self::GoogleDrive => "Google Drive",
         })
     }
 }
@@ -104,6 +108,17 @@ pub fn connect(config: &SyncConfig) -> SyncResult<Box<dyn Remote>> {
         Provider::Dropbox => {
             let tokens = dropbox::oauth::refresh_access_token(refresh_token)?;
             Ok(Box::new(DropboxClient::new(tokens.access_token)?))
+        }
+        Provider::GoogleDrive => {
+            let client = config.google_client.as_ref().ok_or_else(|| {
+                SyncError::Config(
+                    "the sync record names Google Drive but holds no OAuth client. Run \
+                     'grans remote init google-drive <client-file>' again."
+                        .to_string(),
+                )
+            })?;
+            let tokens = google_drive::oauth::refresh_access_token(client, refresh_token)?;
+            Ok(Box::new(GoogleDriveClient::new(tokens.access_token)?))
         }
     }
 }

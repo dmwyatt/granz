@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::cli::args::InitProvider;
 use crate::pkce::PkceChallenge;
-use crate::sync::config::SyncConfig;
+use crate::sync::config::{Authorization, SyncConfig};
 use crate::sync::dropbox::oauth::{PKCE_ENTROPY_BYTES, build_auth_url, exchange_code};
 use crate::sync::remote::Provider;
 
@@ -21,15 +21,20 @@ pub(super) fn init(target: &InitProvider) -> Result<()> {
         return Ok(());
     }
 
-    let refresh_token = match target {
-        InitProvider::Dropbox => authorize_dropbox()?,
+    let authorization = match target {
+        InitProvider::Dropbox => Authorization::Dropbox {
+            refresh_token: authorize_dropbox()?,
+        },
     };
 
-    config.reconnected(provider, refresh_token).save()?;
+    config.reconnected(authorization).save()?;
 
     println!("\nConnected to {}.", provider);
     match provider {
         Provider::Dropbox => println!("The shared copy lives in Apps/grans/ in your Dropbox."),
+        Provider::GoogleDrive => {
+            println!("The shared copy lives in a folder named grans in your Google Drive.")
+        }
     }
 
     Ok(())
