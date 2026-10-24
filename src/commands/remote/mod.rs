@@ -15,13 +15,13 @@ use chrono::FixedOffset;
 use crate::cli::args::DropboxAction;
 use crate::output::format::OutputMode;
 use crate::pkce::PkceChallenge;
-use crate::sync::SyncError;
 use crate::sync::config::{SyncConfig, config_path};
-use crate::sync::oauth::{PKCE_ENTROPY_BYTES, build_auth_url, exchange_code, refresh_access_token};
+use crate::sync::dropbox::oauth::{PKCE_ENTROPY_BYTES, build_auth_url, exchange_code};
 
-/// Remote paths on Dropbox (within app folder)
-const REMOTE_DB_PATH: &str = "/grans.db";
-const REMOTE_METADATA_PATH: &str = "/sync_metadata.json";
+/// What the shared copy of the database is called on the remote.
+const REMOTE_DB: &str = "grans.db";
+/// Database statistics pushed alongside it, so status can compare without a download.
+const REMOTE_METADATA: &str = "sync_metadata.json";
 
 /// Run Dropbox commands (init, push, pull, status, logout)
 pub fn run_dropbox(
@@ -115,17 +115,6 @@ fn logout() -> Result<()> {
     println!("Your database on Dropbox has not been deleted.");
 
     Ok(())
-}
-
-/// Get a valid access token, refreshing if necessary.
-fn get_access_token(config: &SyncConfig) -> Result<String> {
-    let refresh_token = config
-        .refresh_token
-        .as_ref()
-        .ok_or(SyncError::NotAuthenticated)?;
-
-    let tokens = refresh_access_token(refresh_token)?;
-    Ok(tokens.access_token)
 }
 
 /// Get file modification time as Unix timestamp.

@@ -1,7 +1,8 @@
 //! Rendering for `grans dropbox status`.
 //!
-//! Compares the local database against the copy on Dropbox without downloading
-//! it, using the metadata file that `push` uploads alongside the database.
+//! Compares the local database against the copy on the remote without
+//! downloading it, using the metadata file that `push` uploads alongside the
+//! database.
 
 use std::path::Path;
 
@@ -11,10 +12,10 @@ use serde::Serialize;
 
 use crate::output::format::{OutputMode, format_size};
 use crate::sync::config::SyncConfig;
-use crate::sync::dropbox::{DropboxClient, FileMetadata, format_timestamp, parse_dropbox_time};
 use crate::sync::metadata::SyncMetadata;
+use crate::sync::remote::{Remote, RemoteFile, connect};
 
-use super::{REMOTE_DB_PATH, REMOTE_METADATA_PATH, get_access_token, get_file_mtime};
+use super::{REMOTE_DB, REMOTE_METADATA, get_file_mtime};
 
 /// File information for status display
 #[derive(Debug, Clone, Serialize)]
@@ -42,12 +43,12 @@ impl FileInfo {
         }
     }
 
-    fn from_remote(meta: Option<&FileMetadata>) -> Self {
-        match meta {
-            Some(m) => Self {
+    fn from_remote(stored: Option<&RemoteFile>) -> Self {
+        match stored {
+            Some(f) => Self {
                 exists: true,
-                size_bytes: Some(m.size),
-                modified_time: parse_dropbox_time(&m.server_modified),
+                size_bytes: Some(f.size),
+                modified_time: f.modified,
             },
             None => Self {
                 exists: false,
@@ -84,11 +85,10 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
 
     // Remote info (only if authenticated)
     let (remote_metadata, remote_db_info) = if config.is_authenticated() {
-        match get_access_token(&config) {
-            Ok(access_token) => {
-                let client = DropboxClient::new(access_token)?;
-                let remote_meta = fetch_remote_metadata(&client);
-                let db_meta = client.get_metadata(REMOTE_DB_PATH).ok().flatten();
+        match connect(&config) {
+            Ok(remote) => {
+                let remote_meta = fetch_remote_metadata(remote.as_ref());
+                let db_meta = remote.stat(REMOTE_DB).ok().flatten();
 
                 (remote_meta, FileInfo::from_remote(db_meta.as_ref()))
             }
@@ -120,8 +120,8 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     Ok(())
 }
 
-fn fetch_remote_metadata(client: &DropboxClient) -> Option<SyncMetadata> {
-    match client.download(REMOTE_METADATA_PATH) {
+fn fetch_remote_metadata(remote: &dyn Remote) -> Option<SyncMetadata> {
+    match remote.download(REMOTE_METADATA) {
         Ok(bytes) => {
             let json = String::from_utf8(bytes).ok()?;
             match serde_json::from_str(&json) {
@@ -329,6 +329,16 @@ fn format_number(n: i64) -> String {
     }
 }
 
+/// Format a Unix timestamp for display in local time.
+fn format_timestamp(ts: u64) -> String {
+    use chrono::{DateTime, Local};
+    let dt = DateTime::from_timestamp(ts as i64, 0)
+        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+    dt.with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
 fn format_short_time(ts: u64, tz: &FixedOffset) -> String {
     use chrono::DateTime;
     let dt = DateTime::from_timestamp(ts as i64, 0)
@@ -360,6 +370,13 @@ mod tests {
         assert_eq!(format_number(52847), "52.8K");
         assert_eq!(format_number(1000000), "1.0M");
         assert_eq!(format_number(1500000), "1.5M");
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        // 2025-01-27T10:30:00Z
+        let formatted = format_timestamp(1737973800);
+        assert!(formatted.contains("2025"));
     }
 
     #[test]

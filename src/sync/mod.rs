@@ -1,15 +1,17 @@
-//! Dropbox sync module for synchronizing SQLite index and embeddings databases.
+//! Sharing the database between machines through a remote service.
 
 pub mod config;
 pub mod content_hash;
 pub mod dropbox;
 pub mod journal;
 pub mod metadata;
-pub mod oauth;
 pub mod reconcile;
+pub mod remote;
 pub mod transfer;
 
 use thiserror::Error;
+
+use remote::Provider;
 
 #[derive(Error, Debug)]
 pub enum SyncError {
@@ -19,10 +21,10 @@ pub enum SyncError {
     #[error("OAuth error: {0}")]
     OAuth(String),
 
-    #[error("Dropbox API error: {0}")]
-    DropboxApi(String),
+    #[error("{provider} API error: {message}")]
+    Api { provider: Provider, message: String },
 
-    #[error("Dropbox {operation} failed: {hint}")]
+    #[error("{operation} failed: {hint}")]
     Transport {
         operation: String,
         hint: String,
@@ -31,40 +33,42 @@ pub enum SyncError {
     },
 
     #[error(
-        "Incomplete transfer: {what} delivered {actual} bytes but Dropbox reported {expected}. \
+        "Incomplete transfer: {what} delivered {actual} bytes but {provider} reported {expected}. \
          The local file was left untouched; retry the transfer."
     )]
     IncompleteTransfer {
+        provider: Provider,
         what: String,
         actual: u64,
         expected: u64,
     },
 
     #[error(
-        "Corrupt transfer: the {what} received does not match the content hash Dropbox reported \
-         (expected {expected}, computed {actual}). The local file was left untouched; \
+        "Corrupt transfer: the {what} received does not match the content hash {provider} \
+         reported (expected {expected}, computed {actual}). The local file was left untouched; \
          retry the transfer."
     )]
     ContentMismatch {
+        provider: Provider,
         what: String,
         expected: String,
         actual: String,
     },
 
     #[error(
-        "Dropbox reported no content hash for {path}, so the download could not be verified \
+        "{provider} reported no content hash for {path}, so the transfer could not be verified \
          against the stored file."
     )]
-    MissingContentHash { path: String },
+    MissingContentHash { provider: Provider, path: String },
 
     #[error("Config error: {0}")]
     Config(String),
 
     #[error(
-        "The {what} on Dropbox has changed since this machine last synced, so pushing would \
+        "The {what} on {provider} has changed since this machine last synced, so pushing would \
          discard those changes. Run 'grans dropbox pull' first, or push --force to overwrite."
     )]
-    ConflictRemoteChanged { what: String },
+    ConflictRemoteChanged { provider: Provider, what: String },
 
     #[error(
         "The local {what} has changed since this machine last synced, so pulling would discard \
@@ -73,11 +77,11 @@ pub enum SyncError {
     ConflictLocalChanged { what: String },
 
     #[error(
-        "The {what} on Dropbox differs from the local copy, and grans has no record of syncing \
-         with it, so neither can be shown to supersede the other. Compare them with \
+        "The {what} on {provider} differs from the local copy, and grans has no record of \
+         syncing with it, so neither can be shown to supersede the other. Compare them with \
          'grans dropbox status', then push --force or pull --force to choose."
     )]
-    ConflictNoSyncRecord { what: String },
+    ConflictNoSyncRecord { provider: Provider, what: String },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

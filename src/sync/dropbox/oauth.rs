@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use super::{SyncError, SyncResult};
+use crate::sync::{SyncError, SyncResult};
 
 /// Dropbox App Key (public, safe to embed)
 const CLIENT_ID: &str = "bqkd8myq8v5w7xu";

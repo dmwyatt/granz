@@ -1,8 +1,9 @@
-//! HTTP transport policy and byte-moving helpers for Dropbox sync.
+//! HTTP transport policy and byte-moving helpers shared by every remote.
 
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
+use super::remote::Provider;
 use super::{SyncError, SyncResult};
 
 /// Buffer size for streaming transfers.
@@ -73,7 +74,7 @@ impl<R: Read> Read for ProgressReader<R> {
     }
 }
 
-/// Build the HTTP client used for every Dropbox call.
+/// Build the HTTP client used for every call to a remote.
 pub fn build_client() -> SyncResult<reqwest::blocking::Client> {
     build_client_with_stall_timeout(STALL_TIMEOUT)
 }
@@ -104,7 +105,7 @@ pub fn transport_hint(err: &reqwest::Error) -> String {
             STALL_TIMEOUT.as_secs()
         )
     } else if err.is_connect() {
-        "could not reach Dropbox (DNS, proxy, or TLS failure)".to_string()
+        "could not reach the server (DNS, proxy, or TLS failure)".to_string()
     } else if err.is_body() || err.is_decode() {
         "the connection dropped mid-transfer".to_string()
     } else {
@@ -124,7 +125,7 @@ pub fn transport_error(operation: impl Into<String>, source: reqwest::Error) -> 
 /// Stream `reader` into `writer`, invoking `on_progress` with the running total.
 ///
 /// Returns the number of bytes copied.
-pub fn stream_with_progress<R: Read, W: Write>(
+pub fn stream_with_progress<R: Read, W: Write + ?Sized>(
     reader: &mut R,
     writer: &mut W,
     on_progress: &mut dyn FnMut(u64),
@@ -171,16 +172,22 @@ pub fn describe_throughput(bytes: u64, elapsed: Duration) -> String {
     format!("{:.2} MB in {:?} ({:.2} MB/s)", mib, elapsed, mib / secs)
 }
 
-/// Fail when the bytes received do not match the hash Dropbox holds for the file.
+/// Fail when the bytes received do not match the hash the remote holds for the file.
 ///
 /// A byte count only proves the transfer was not cut short; this proves the
-/// content is the file Dropbox has.
-pub fn verify_content_hash(actual: &str, expected: &str, what: &str) -> SyncResult<()> {
+/// content is the file the remote has.
+pub fn verify_content_hash(
+    actual: &str,
+    expected: &str,
+    provider: Provider,
+    what: &str,
+) -> SyncResult<()> {
     if actual.eq_ignore_ascii_case(expected) {
         return Ok(());
     }
 
     Err(SyncError::ContentMismatch {
+        provider,
         what: what.to_string(),
         expected: expected.to_string(),
         actual: actual.to_string(),
@@ -191,12 +198,18 @@ pub fn verify_content_hash(actual: &str, expected: &str, what: &str) -> SyncResu
 ///
 /// A download cut short still produces a readable file, so without this check a
 /// truncated database would quietly replace a good one.
-pub fn verify_transfer_size(actual: u64, expected: u64, what: &str) -> SyncResult<()> {
+pub fn verify_transfer_size(
+    actual: u64,
+    expected: u64,
+    provider: Provider,
+    what: &str,
+) -> SyncResult<()> {
     if actual == expected {
         return Ok(());
     }
 
     Err(SyncError::IncompleteTransfer {
+        provider,
         what: what.to_string(),
         actual,
         expected,
@@ -550,18 +563,18 @@ mod tests {
 
     #[test]
     fn verify_content_hash_accepts_a_match() {
-        assert!(verify_content_hash("abc123", "abc123", "database").is_ok());
+        assert!(verify_content_hash("abc123", "abc123", Provider::Dropbox, "database").is_ok());
     }
 
     /// Dropbox documents the hash as hex; casing should not decide the outcome.
     #[test]
     fn verify_content_hash_ignores_case() {
-        assert!(verify_content_hash("ABC123", "abc123", "database").is_ok());
+        assert!(verify_content_hash("ABC123", "abc123", Provider::Dropbox, "database").is_ok());
     }
 
     #[test]
     fn verify_content_hash_rejects_a_mismatch() {
-        let err = verify_content_hash("aaaa", "bbbb", "database").unwrap_err();
+        let err = verify_content_hash("aaaa", "bbbb", Provider::Dropbox, "database").unwrap_err();
         let msg = err.to_string();
 
         assert!(msg.contains("aaaa") && msg.contains("bbbb"), "{}", msg);
@@ -574,12 +587,12 @@ mod tests {
 
     #[test]
     fn verify_transfer_size_accepts_exact_match() {
-        assert!(verify_transfer_size(1024, 1024, "database").is_ok());
+        assert!(verify_transfer_size(1024, 1024, Provider::Dropbox, "database").is_ok());
     }
 
     #[test]
     fn verify_transfer_size_rejects_truncated_transfer() {
-        let err = verify_transfer_size(512, 1024, "database").unwrap_err();
+        let err = verify_transfer_size(512, 1024, Provider::Dropbox, "database").unwrap_err();
         let msg = err.to_string();
 
         assert!(msg.contains("512"), "message should report actual: {}", msg);
