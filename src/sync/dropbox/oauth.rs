@@ -2,9 +2,8 @@
 //!
 //! Implements RFC 7636 (PKCE) for secure authorization without embedding secrets.
 
-use serde::Deserialize;
-
-use crate::sync::{SyncError, SyncResult};
+use crate::sync::SyncResult;
+use crate::sync::oauth::{TokenResponse, request_tokens};
 
 /// Dropbox App Key (public, safe to embed)
 const CLIENT_ID: &str = "bqkd8myq8v5w7xu";
@@ -24,87 +23,29 @@ pub fn build_auth_url(challenge: &str) -> String {
     )
 }
 
-/// Response from token endpoint.
-#[derive(Deserialize, Debug)]
-#[allow(dead_code)]
-pub struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_in: Option<u64>,
-    pub token_type: String,
-}
-
-/// Error response from token endpoint.
-#[derive(Deserialize, Debug)]
-struct TokenError {
-    error: String,
-    error_description: Option<String>,
-}
-
 /// Exchange authorization code for tokens.
 pub fn exchange_code(code: &str, verifier: &str) -> SyncResult<TokenResponse> {
-    let client = reqwest::blocking::Client::new();
-
-    let params = [
-        ("code", code),
-        ("grant_type", "authorization_code"),
-        ("code_verifier", verifier),
-        ("client_id", CLIENT_ID),
-    ];
-
-    let response = client
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .map_err(|e| SyncError::OAuth(format!("request failed: {}", e)))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| SyncError::OAuth(format!("failed to read response: {}", e)))?;
-
-    if !status.is_success() {
-        // Try to parse error response
-        if let Ok(err) = serde_json::from_str::<TokenError>(&body) {
-            let msg = err.error_description.unwrap_or_else(|| err.error.clone());
-            return Err(SyncError::OAuth(msg));
-        }
-        return Err(SyncError::OAuth(format!("HTTP {}: {}", status, body)));
-    }
-
-    serde_json::from_str(&body).map_err(|e| SyncError::OAuth(format!("parse response: {}", e)))
+    request_tokens(
+        TOKEN_URL,
+        &[
+            ("code", code),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", verifier),
+            ("client_id", CLIENT_ID),
+        ],
+    )
 }
 
 /// Refresh an expired access token.
 pub fn refresh_access_token(refresh_token: &str) -> SyncResult<TokenResponse> {
-    let client = reqwest::blocking::Client::new();
-
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", CLIENT_ID),
-    ];
-
-    let response = client
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .map_err(|e| SyncError::OAuth(format!("refresh request failed: {}", e)))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| SyncError::OAuth(format!("failed to read response: {}", e)))?;
-
-    if !status.is_success() {
-        if let Ok(err) = serde_json::from_str::<TokenError>(&body) {
-            let msg = err.error_description.unwrap_or_else(|| err.error.clone());
-            return Err(SyncError::OAuth(msg));
-        }
-        return Err(SyncError::OAuth(format!("HTTP {}: {}", status, body)));
-    }
-
-    serde_json::from_str(&body).map_err(|e| SyncError::OAuth(format!("parse response: {}", e)))
+    request_tokens(
+        TOKEN_URL,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", CLIENT_ID),
+        ],
+    )
 }
 
 #[cfg(test)]

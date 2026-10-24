@@ -5,6 +5,7 @@ pub mod content_hash;
 pub mod dropbox;
 pub mod journal;
 pub mod metadata;
+pub mod oauth;
 pub mod reconcile;
 pub mod remote;
 pub mod transfer;
@@ -20,6 +21,10 @@ pub enum SyncError {
 
     #[error("OAuth error: {0}")]
     OAuth(String),
+
+    /// The token endpoint refused the request, with the service's error code.
+    #[error("OAuth error: {message}")]
+    OAuthRejected { code: String, message: String },
 
     #[error("{provider} API error: {message}")]
     Api { provider: Provider, message: String },
