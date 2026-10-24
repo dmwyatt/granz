@@ -14,7 +14,7 @@ use crate::sync::config::SyncConfig;
 use crate::sync::dropbox::{DropboxClient, FileMetadata, format_timestamp, parse_dropbox_time};
 use crate::sync::metadata::SyncMetadata;
 
-use super::sync::{REMOTE_DB_PATH, REMOTE_METADATA_PATH, get_access_token, get_file_mtime};
+use super::{REMOTE_DB_PATH, REMOTE_METADATA_PATH, get_access_token, get_file_mtime};
 
 /// File information for status display
 #[derive(Debug, Clone, Serialize)]

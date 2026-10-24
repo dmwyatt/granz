@@ -73,7 +73,7 @@ fn main() -> Result<()> {
 
     // Dropbox commands (init, push, pull, status, logout)
     if let Commands::Dropbox { action } = &cli.command {
-        commands::sync::run_dropbox(action, ctx.output_mode, &ctx.tz)?;
+        commands::remote::run_dropbox(action, ctx.output_mode, &ctx.tz)?;
         return Ok(());
     }
 
