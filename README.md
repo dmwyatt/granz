@@ -597,15 +597,17 @@ grans remote pull
 | `grans remote status` | Show sync status with local vs remote comparison |
 | `grans remote logout` | Forget the remote authorization on this machine |
 
-**Google Drive setup:** grans brings no Google app of its own, so Drive sync goes through an OAuth client you create, once, in the [Google Cloud console](https://console.cloud.google.com/):
+**Google Drive setup:** grans brings no Google app of its own, so you create one for it in your Google account. It takes about ten minutes, once: every machine then uses the file it produces. Sign in to the [Google Cloud console](https://console.cloud.google.com/) with the Google account whose Drive should hold the database.
 
-1. Create a project, and enable the Google Drive API in it.
-2. Open Google Auth Platform, give the app a name and your email, and choose External for the audience.
-3. Under Data Access, add the `.../auth/drive.file` scope.
-4. Under Audience, press **Publish app**. While the app stays in Testing, Google drops its login after 7 days.
-5. Under Clients, create a client of type Desktop app and download its JSON.
+1. **Create a project.** Click the project picker at the top left, beside the Google Cloud logo, then **New project**. Name it `grans` and click **Create**. If it asks for a billing account, any will do: the Drive API is free. When the notification says the project exists, click **Select project**. The picker should now read `grans`.
+2. **Turn on the Drive API.** Open **APIs & Services** from the navigation menu at the top left and click **Enable APIs and services**. Search for `Google Drive API`, open the result with exactly that name (not Drive Activity or Drive MCP), and click **Enable**.
+3. **Describe the app.** In the APIs & Services menu on the left, click **OAuth consent screen**, then **Get started**. Enter `grans` as the app name and pick your address as the support email, choose **External**, give your address as the contact, tick the agreement to the Google API Services User Data Policy, and click **Create**.
+4. **Give it Drive access.** In the menu on the left, open **Data Access** and click **Add or remove scopes**. Type `drive.file` into the panel's filter, tick the Google Drive API row (`.../auth/drive.file`), and click **Update**. Then click **Save** at the bottom of the page; nothing is kept until you do.
+5. **Publish it.** Google will not publish an app without a home page and a privacy policy link. Nobody but you will see them, so the grans repository serves for both. Open **Branding**, enter `https://github.com/dmwyatt/granz` as the Application home page and as the Application privacy policy link, click **Add domain** under Authorized domains, enter `github.com`, and click **Save**. Then open **Audience**, click **Publish app**, and **Confirm**. The status should read *In production*. An app left in Testing loses its login after 7 days, and you would have to run `grans remote init google-drive` again every week.
+6. **Create the client.** Open **Clients**, click **Create client**, choose **Desktop app** as the application type, name it `grans`, and click **Create**. In the dialog that follows, click **Download JSON** before closing it: Google never shows the client secret again. If the dialog closed first, delete the client and create another.
+7. **Connect grans.** Run `grans remote init google-drive <downloaded file>`. Your browser opens on Google's account chooser: pick the same account, then approve the permissions page, which asks to let grans see and change only the Drive files it uses. The terminal then says it is connected.
 
-Then run `grans remote init google-drive <that file>` on each machine, with the same file everywhere: Google shows grans only the files created through that client, so a machine using a different one finds no database to pull. `drive.file` is a non-sensitive scope, so publishing needs no review from Google.
+Do step 7 on each machine, with the same file everywhere: Google shows grans only the files created through that client, so a machine using a different one finds no database to pull. Publishing needs no review from Google, because grans asks only for `drive.file`, which Google rates as non-sensitive. New settings can take a few minutes to reach Google's login, so if the command fails right after the setup, wait a few minutes and retry.
 
 The login finishes in a browser, which Google sends back to a port grans listens on. On a machine without a browser, open the printed address on another machine and paste back the address the browser lands on, even though that page will not load.
 
