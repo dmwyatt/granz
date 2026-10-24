@@ -1,18 +1,35 @@
 //! `grans remote init`: choose the remote and authorize grans there.
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use crate::cli::args::InitProvider;
 use crate::pkce::PkceChallenge;
 use crate::sync::config::{Authorization, SyncConfig};
-use crate::sync::dropbox::oauth::{PKCE_ENTROPY_BYTES, build_auth_url, exchange_code};
+use crate::sync::dropbox;
+use crate::sync::google_drive::loopback::{RedirectListener, wait_for_response};
+use crate::sync::google_drive::oauth::{self as google, GoogleClient};
 use crate::sync::remote::Provider;
 
-pub(super) fn init(target: &InitProvider) -> Result<()> {
+/// A remote to authorize, with what it needs read before anything is asked.
+enum Target {
+    Dropbox,
+    GoogleDrive(GoogleClient),
+}
+
+pub(super) fn init(requested: &InitProvider) -> Result<()> {
+    // Read the client file first, so a wrong one fails before any prompt.
+    let target = match requested {
+        InitProvider::Dropbox => Target::Dropbox,
+        InitProvider::GoogleDrive { client_file } => {
+            Target::GoogleDrive(read_client_file(client_file)?)
+        }
+    };
     let provider = match target {
-        InitProvider::Dropbox => Provider::Dropbox,
+        Target::Dropbox => Provider::Dropbox,
+        Target::GoogleDrive(_) => Provider::GoogleDrive,
     };
     let config = SyncConfig::load()?;
 
@@ -22,8 +39,12 @@ pub(super) fn init(target: &InitProvider) -> Result<()> {
     }
 
     let authorization = match target {
-        InitProvider::Dropbox => Authorization::Dropbox {
+        Target::Dropbox => Authorization::Dropbox {
             refresh_token: authorize_dropbox()?,
+        },
+        Target::GoogleDrive(client) => Authorization::GoogleDrive {
+            refresh_token: authorize_google_drive(&client)?,
+            client,
         },
     };
 
@@ -65,8 +86,8 @@ fn confirm_replacing(config: &SyncConfig, provider: Provider) -> Result<bool> {
 
 /// Run Dropbox's authorization in a browser and return the refresh token.
 fn authorize_dropbox() -> Result<String> {
-    let pkce = PkceChallenge::generate(PKCE_ENTROPY_BYTES);
-    let auth_url = build_auth_url(&pkce.challenge);
+    let pkce = PkceChallenge::generate(dropbox::oauth::PKCE_ENTROPY_BYTES);
+    let auth_url = dropbox::oauth::build_auth_url(&pkce.challenge);
 
     println!("\nOpening browser for Dropbox authorization...");
     println!("\nIf the browser doesn't open, visit this URL:");
@@ -88,9 +109,51 @@ fn authorize_dropbox() -> Result<String> {
     }
 
     println!("Exchanging code for tokens...");
-    let tokens = exchange_code(code, &pkce.verifier)?;
+    let tokens = dropbox::oauth::exchange_code(code, &pkce.verifier)?;
 
     tokens
         .refresh_token
         .context("Dropbox granted access but returned no refresh token")
+}
+
+/// Read the OAuth client JSON the user downloaded from Google.
+fn read_client_file(path: &Path) -> Result<GoogleClient> {
+    let json = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the client file {}", path.display()))?;
+    google::parse_client_file(&json)
+        .with_context(|| format!("reading the client file {}", path.display()))
+}
+
+/// Run Google's authorization in a browser and return the refresh token.
+fn authorize_google_drive(client: &GoogleClient) -> Result<String> {
+    let listener = RedirectListener::bind().context("listening for Google's response")?;
+    let redirect_uri = listener.redirect_uri();
+    let pkce = PkceChallenge::generate(google::PKCE_ENTROPY_BYTES);
+    let state = google::random_state();
+    let auth_url = google::build_auth_url(client, &redirect_uri, &pkce.challenge, &state);
+
+    println!("\nOpening browser for Google authorization...");
+    println!("\nIf the browser doesn't open, visit this URL:");
+    println!("{}\n", auth_url);
+
+    if let Err(e) = open::that(&auth_url) {
+        eprintln!("Could not open browser: {}", e);
+    }
+
+    println!("Waiting for Google to send the browser back to grans.");
+    println!(
+        "If the browser is on another machine, paste the address it ends up on here, \
+         even though that page will not load:"
+    );
+
+    let response = wait_for_response(listener).context("waiting for Google's response")?;
+    let code = google::parse_callback(&response, &state)?;
+
+    println!("Exchanging code for tokens...");
+    Ok(google::exchange_code(
+        client,
+        &code,
+        &pkce.verifier,
+        &redirect_uri,
+    )?)
 }

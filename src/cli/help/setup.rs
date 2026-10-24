@@ -91,6 +91,10 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
                 about: "Connect grans to Dropbox, once per machine",
             },
             Example {
+                command: "grans remote init google-drive client_secret.json",
+                about: "Or to Google Drive, through your own OAuth client",
+            },
+            Example {
                 command: "grans remote push",
                 about: "Upload this machine's database",
             },
@@ -106,9 +110,10 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         sections: &[Section {
             title: "Notes",
             lines: &[
-                "Shares one database between machines, so transcripts are fetched and",
-                "embeddings built only once. Connect each machine to the same remote",
-                "with `grans remote init`, then push from one and pull on the others.",
+                "Shares one database between machines through Dropbox or Google Drive,",
+                "so transcripts are fetched and embeddings built only once. Connect each",
+                "machine to the same remote with `grans remote init`, then push from one",
+                "and pull on the others.",
                 "",
                 "push and pull transfer nothing when the two copies are identical. They",
                 "refuse when the other copy has changed since the last transfer, or when",
@@ -119,10 +124,16 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     },
     CommandHelp {
         path: "remote init",
-        examples: &[Example {
-            command: "grans remote init dropbox",
-            about: "Keep the shared copy in Dropbox",
-        }],
+        examples: &[
+            Example {
+                command: "grans remote init dropbox",
+                about: "Keep the shared copy in Dropbox",
+            },
+            Example {
+                command: "grans remote init google-drive client_secret.json",
+                about: "Keep it in Google Drive, through your own OAuth client",
+            },
+        ],
         sections: &[Section {
             title: "Notes",
             lines: &[
@@ -145,6 +156,48 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
                 "authorization code.",
             ],
         }],
+    },
+    CommandHelp {
+        path: "remote init google-drive",
+        examples: &[Example {
+            command: "grans remote init google-drive client_secret.json",
+            about: "Authorize grans in a browser with the client you created",
+        }],
+        sections: &[
+            Section {
+                title: "Setup",
+                lines: &[
+                    "grans brings no Google app of its own, so create one, once, in the",
+                    "Google Cloud console (console.cloud.google.com):",
+                    "",
+                    "  1. Create a project, and enable the Google Drive API in it.",
+                    "  2. Open Google Auth Platform, give the app a name and your email,",
+                    "     and choose External for the audience.",
+                    "  3. Under Data Access, add the scope .../auth/drive.file.",
+                    "  4. Under Audience, press Publish app. An app left in Testing loses",
+                    "     its Google login after 7 days.",
+                    "  5. Under Clients, create a client of type Desktop app and download",
+                    "     its JSON. That file is what this command takes.",
+                    "",
+                    "drive.file needs no review from Google before publishing.",
+                ],
+            },
+            Section {
+                title: "Notes",
+                lines: &[
+                    "Use the same client file on every machine. Google shows grans only",
+                    "the files created through it, so a machine with another client finds",
+                    "no database to pull.",
+                    "",
+                    "grans sees the folder named grans that it creates, and nothing else",
+                    "in your Drive.",
+                    "",
+                    "The login finishes in a browser on this machine. On a machine without",
+                    "one, open the printed address elsewhere and paste back the address",
+                    "the browser lands on.",
+                ],
+            },
+        ],
     },
     CommandHelp {
         path: "remote push",

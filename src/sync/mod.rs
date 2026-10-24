@@ -17,7 +17,10 @@ use remote::Provider;
 
 #[derive(Error, Debug)]
 pub enum SyncError {
-    #[error("No remote is set up. Run 'grans remote init dropbox' first.")]
+    #[error(
+        "No remote is set up. Run 'grans remote init dropbox' or \
+         'grans remote init google-drive <client-file>' first."
+    )]
     NotAuthenticated,
 
     #[error("OAuth error: {0}")]

@@ -167,8 +167,9 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
     } else {
         println!("Authentication: {}", "Not connected".red());
         println!(
-            "\nRun '{}' to choose where the shared copy lives.",
-            "grans remote init dropbox".cyan()
+            "\nRun '{}' or '{}' to choose where the shared copy lives.",
+            "grans remote init dropbox".cyan(),
+            "grans remote init google-drive <client-file>".cyan()
         );
         return;
     }

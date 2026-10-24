@@ -801,6 +801,12 @@ pub enum InitProvider {
     /// Keep the shared copy in Dropbox
     #[command(after_long_help = help::for_command("remote init dropbox"))]
     Dropbox,
+    /// Keep the shared copy in Google Drive, through an OAuth client you create
+    #[command(after_long_help = help::for_command("remote init google-drive"))]
+    GoogleDrive {
+        /// The OAuth client's JSON file, downloaded from the Google Cloud console
+        client_file: std::path::PathBuf,
+    },
 }
 
 #[cfg(test)]

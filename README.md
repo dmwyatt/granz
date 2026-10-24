@@ -82,7 +82,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `recent` - Show this week's meetings
 - `today` - Show today's meetings
 - `embed` - Build the embeddings that let search match by meaning
-- `remote` - Share the database between machines through Dropbox
+- `remote` - Share the database between machines through Dropbox or Google Drive
 - `info` - Show what the local database holds
 - `skill` - Print a skill that points AI agents at the help
 
@@ -536,7 +536,7 @@ with the email and first-seen date captured when each was recorded.
 
 ### Sharing the Database Between Machines
 
-Share your grans database across multiple machines through a remote: a copy kept in Dropbox.
+Share your grans database across multiple machines through a remote: a copy kept in Dropbox or Google Drive.
 
 **Why use this?** Two operations in grans are slow:
 
@@ -553,8 +553,10 @@ Once you've done this work on one machine, `grans remote` lets you share the res
 #    panels, and embeddings (slow first time)
 grans sync --all
 
-# 2. Connect to Dropbox (one-time OAuth)
+# 2. Connect to a remote (one-time OAuth): Dropbox, or Google Drive
+#    with the client file described below
 grans remote init dropbox
+# grans remote init google-drive client_secret.json
 
 # 3. Upload your database
 grans remote push
@@ -589,10 +591,23 @@ grans remote pull
 | Command | Description |
 |---------|-------------|
 | `grans remote init dropbox` | Connect this machine to Dropbox (once per machine) |
+| `grans remote init google-drive <client-file>` | Connect this machine to Google Drive (once per machine) |
 | `grans remote push` | Upload the database to the remote |
 | `grans remote pull` | Download the database from the remote |
 | `grans remote status` | Show sync status with local vs remote comparison |
 | `grans remote logout` | Forget the remote authorization on this machine |
+
+**Google Drive setup:** grans brings no Google app of its own, so Drive sync goes through an OAuth client you create, once, in the [Google Cloud console](https://console.cloud.google.com/):
+
+1. Create a project, and enable the Google Drive API in it.
+2. Open Google Auth Platform, give the app a name and your email, and choose External for the audience.
+3. Under Data Access, add the `.../auth/drive.file` scope.
+4. Under Audience, press **Publish app**. While the app stays in Testing, Google drops its login after 7 days.
+5. Under Clients, create a client of type Desktop app and download its JSON.
+
+Then run `grans remote init google-drive <that file>` on each machine, with the same file everywhere: Google shows grans only the files created through that client, so a machine using a different one finds no database to pull. `drive.file` is a non-sensitive scope, so publishing needs no review from Google.
+
+The login finishes in a browser, which Google sends back to a port grans listens on. On a machine without a browser, open the printed address on another machine and paste back the address the browser lands on, even though that page will not load.
 
 **Sync status** shows a side-by-side comparison of local and remote database:
 
@@ -629,7 +644,7 @@ Uploading database (428.9 MB)...
 [grans] 96.00 MiB/428.90 MiB [======>                       ] 22% 3.80 MiB/s, ETA 1m
 ```
 
-The bar is written to stderr and is skipped when output is redirected. Uploads above 150 MB are sent as chunked sessions, so the bar advances 8 MB at a time; smaller ones stream in a single request and advance smoothly.
+The bar is written to stderr and is skipped when output is redirected. Dropbox uploads above 150 MB are sent as chunked sessions, so the bar advances 8 MB at a time; smaller ones, and every Google Drive upload, stream in a single request and advance smoothly.
 
 **Conflict handling:** Sync compares content, not timestamps. It records the content hash both copies held at the last successful sync, and uses that to tell which side has moved since:
 
@@ -654,7 +669,7 @@ Because identical copies transfer nothing, pushing or pulling twice in a row is 
 | Check | Catches |
 |-------|---------|
 | Byte count against the size the remote reported | An interrupted or truncated transfer |
-| The remote's content hash (Dropbox's `content_hash`), computed while streaming | Content that differs from the stored file |
+| The remote's content hash (Dropbox's `content_hash`, Google Drive's `sha256Checksum`), computed while streaming | Content that differs from the stored file |
 | `PRAGMA quick_check` plus a schema probe | A corrupt file, or one that is not a grans database |
 
 If any check fails the temp file is discarded and your existing database is left untouched. The download is also flushed to the device before the rename, so a crash cannot leave a database whose contents were never written.
@@ -682,7 +697,7 @@ Use `GRANS_LOG` for finer control, e.g. `GRANS_LOG=grans::sync=debug`.
 **What gets synced:**
 - Database (meeting data, transcripts, FTS indices, vector embeddings for semantic search)
 
-Dropbox sync uses a sandboxed app folder (`Apps/grans/`), so it only accesses its own files, not your full Dropbox.
+Dropbox sync uses a sandboxed app folder (`Apps/grans/`), so it only accesses its own files, not your full Dropbox. Google Drive sync asks only for the `drive.file` scope, so grans sees the `grans` folder it creates and nothing else in your Drive.
 
 ## Output Modes
 
