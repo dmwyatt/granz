@@ -12,7 +12,7 @@ use crate::output::format::format_size;
 use crate::output::progress::create_spinner;
 use crate::sync::SyncError;
 use crate::sync::config::SyncConfig;
-use crate::sync::content_hash::{HashingWriter, hash_file};
+use crate::sync::content_hash::{HashKind, HashingWriter, hash_file};
 use crate::sync::dropbox::DropboxClient;
 use crate::sync::reconcile::{TransferDecision, decide};
 use crate::sync::transfer::{verify_content_hash, verify_transfer_size};
@@ -176,7 +176,7 @@ fn local_content_hash(local_path: &Path, force: bool) -> Option<String> {
         );
     }
 
-    match hash_file(local_path) {
+    match hash_file(HashKind::Dropbox, local_path) {
         Ok(hash) => Some(hash),
         Err(e) => {
             debug!("could not hash {}: {}", local_path.display(), e);
@@ -233,7 +233,7 @@ fn stream_to_file(
     let progress = TransferProgress::new(expected_size);
 
     let file = std::fs::File::create(temp_path)?;
-    let mut writer = HashingWriter::new(BufWriter::new(file));
+    let mut writer = HashingWriter::new(HashKind::Dropbox, BufWriter::new(file));
 
     let written =
         client.download_to_writer(remote_path, &mut writer, &mut |bytes| progress.set(bytes))?;

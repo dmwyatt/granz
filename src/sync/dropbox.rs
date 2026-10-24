@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use super::content_hash;
+use super::content_hash::{self, HashKind};
 use super::transfer::{self, ProgressFn, ProgressReader, UPLOAD_TIMEOUT};
 use super::{SyncError, SyncResult};
 
@@ -101,7 +101,7 @@ impl DropboxClient {
         on_progress: ProgressFn,
     ) -> SyncResult<FileMetadata> {
         let file_size = std::fs::metadata(local_path)?.len();
-        let local_hash = content_hash::hash_file(local_path)?;
+        let local_hash = content_hash::hash_file(HashKind::Dropbox, local_path)?;
         let start = Instant::now();
 
         let uploaded = if file_size <= UPLOAD_SINGLE_LIMIT {

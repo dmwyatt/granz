@@ -1,11 +1,10 @@
-//! Dropbox content hashing.
+//! Content hashes, in the algorithm each remote reports for a stored file.
 //!
-//! Dropbox reports a `content_hash` for every stored file, letting a download be
+//! Every remote reports a hash of what it stores, which lets a download be
 //! checked against the bytes the server actually holds rather than inferring
-//! integrity from a byte count. The algorithm is defined at
-//! <https://www.dropbox.com/developers/reference/content-hash>: split the file
-//! into 4 MiB blocks, SHA-256 each block, concatenate those digests in order,
-//! and SHA-256 the result.
+//! integrity from a byte count, and lets push and pull tell whether the two
+//! copies differ without transferring either. Both only work when the local
+//! file is hashed the same way the remote hashed its copy.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -15,15 +14,27 @@ use sha2::{Digest, Sha256};
 /// Dropbox hashes the file in 4 MiB blocks.
 const BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
-/// Compute the Dropbox content hash of a file on disk.
+/// Which algorithm a remote reports its content hash in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashKind {
+    /// Dropbox's `content_hash`, defined at
+    /// <https://www.dropbox.com/developers/reference/content-hash>: split the
+    /// file into 4 MiB blocks, SHA-256 each block, concatenate those digests in
+    /// order, and SHA-256 the result.
+    Dropbox,
+    /// A plain SHA-256 of the whole file, as Google Drive's `sha256Checksum`.
+    Sha256,
+}
+
+/// Compute the content hash of a file on disk.
 ///
 /// Reads the file in its own pass rather than hashing during the upload, which
 /// would mean threading a shared hasher through a request body that reqwest
 /// owns. The extra read costs a second or so against a transfer measured in
 /// minutes.
-pub fn hash_file(path: &Path) -> io::Result<String> {
+pub fn hash_file(kind: HashKind, path: &Path) -> io::Result<String> {
     let mut file = std::fs::File::open(path)?;
-    let mut hasher = ContentHasher::new();
+    let mut hasher = ContentHasher::new(kind);
     let mut buffer = vec![0u8; BLOCK_SIZE];
 
     loop {
@@ -35,11 +46,43 @@ pub fn hash_file(path: &Path) -> io::Result<String> {
     }
 }
 
+/// Computes a content hash incrementally.
+///
+/// Data may be fed in pieces of any size, so a download can be hashed as it
+/// streams past.
+pub enum ContentHasher {
+    Dropbox(DropboxHasher),
+    Sha256(Sha256),
+}
+
+impl ContentHasher {
+    pub fn new(kind: HashKind) -> Self {
+        match kind {
+            HashKind::Dropbox => Self::Dropbox(DropboxHasher::new()),
+            HashKind::Sha256 => Self::Sha256(Sha256::new()),
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Dropbox(hasher) => hasher.update(data),
+            Self::Sha256(hasher) => hasher.update(data),
+        }
+    }
+
+    /// Finish hashing and return the lowercase hex digest.
+    pub fn finish(self) -> String {
+        match self {
+            Self::Dropbox(hasher) => hasher.finish(),
+            Self::Sha256(hasher) => format!("{:x}", hasher.finalize()),
+        }
+    }
+}
+
 /// Computes a Dropbox content hash incrementally.
 ///
-/// Data may be fed in pieces of any size; block boundaries are handled
-/// internally, so a download can be hashed as it streams past.
-pub struct ContentHasher {
+/// Block boundaries are handled internally, whatever size the pieces arrive in.
+pub struct DropboxHasher {
     /// Hashes the block currently being filled.
     block: Sha256,
     /// Bytes accumulated into `block` so far.
@@ -48,8 +91,8 @@ pub struct ContentHasher {
     digests: Sha256,
 }
 
-impl ContentHasher {
-    pub fn new() -> Self {
+impl DropboxHasher {
+    fn new() -> Self {
         Self {
             block: Sha256::new(),
             block_len: 0,
@@ -57,7 +100,7 @@ impl ContentHasher {
         }
     }
 
-    pub fn update(&mut self, mut data: &[u8]) {
+    fn update(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
             let room = BLOCK_SIZE - self.block_len;
             let take = room.min(data.len());
@@ -79,8 +122,7 @@ impl ContentHasher {
         self.block_len = 0;
     }
 
-    /// Finish hashing and return the lowercase hex digest.
-    pub fn finish(mut self) -> String {
+    fn finish(mut self) -> String {
         // A trailing partial block still contributes a digest. An empty input
         // contributes none, leaving the hash of an empty concatenation.
         if self.block_len > 0 {
@@ -88,12 +130,6 @@ impl ContentHasher {
         }
 
         format!("{:x}", self.digests.finalize())
-    }
-}
-
-impl Default for ContentHasher {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -107,10 +143,10 @@ pub struct HashingWriter<W> {
 }
 
 impl<W: Write> HashingWriter<W> {
-    pub fn new(inner: W) -> Self {
+    pub fn new(kind: HashKind, inner: W) -> Self {
         Self {
             inner,
-            hasher: ContentHasher::new(),
+            hasher: ContentHasher::new(kind),
         }
     }
 
@@ -149,14 +185,14 @@ mod tests {
         "caa2b7a097746dcd56cbddd09bb9e5b5ab1c3a9a518a63453f07fb799e7839ec";
 
     fn hash_all(data: &[u8]) -> String {
-        let mut hasher = ContentHasher::new();
+        let mut hasher = ContentHasher::new(HashKind::Dropbox);
         hasher.update(data);
         hasher.finish()
     }
 
     /// Feed data in fixed-size pieces, mimicking a body arriving over a socket.
     fn hash_in_pieces(data: &[u8], piece: usize) -> String {
-        let mut hasher = ContentHasher::new();
+        let mut hasher = ContentHasher::new(HashKind::Dropbox);
         for chunk in data.chunks(piece) {
             hasher.update(chunk);
         }
@@ -213,8 +249,14 @@ mod tests {
         let data = vec![b'b'; BLOCK_SIZE + 1];
         std::fs::write(&path, &data).unwrap();
 
-        assert_eq!(hash_file(&path).unwrap(), ONE_BLOCK_PLUS_ONE);
-        assert_eq!(hash_file(&path).unwrap(), hash_all(&data));
+        assert_eq!(
+            hash_file(HashKind::Dropbox, &path).unwrap(),
+            ONE_BLOCK_PLUS_ONE
+        );
+        assert_eq!(
+            hash_file(HashKind::Dropbox, &path).unwrap(),
+            hash_all(&data)
+        );
     }
 
     #[test]
@@ -223,17 +265,17 @@ mod tests {
         let path = dir.path().join("empty.bin");
         std::fs::write(&path, b"").unwrap();
 
-        assert_eq!(hash_file(&path).unwrap(), EMPTY);
+        assert_eq!(hash_file(HashKind::Dropbox, &path).unwrap(), EMPTY);
     }
 
     #[test]
     fn hash_file_reports_a_missing_file() {
-        assert!(hash_file(Path::new("no/such/file.bin")).is_err());
+        assert!(hash_file(HashKind::Dropbox, Path::new("no/such/file.bin")).is_err());
     }
 
     #[test]
     fn hashing_writer_passes_bytes_through_and_hashes_them() {
-        let mut writer = HashingWriter::new(Vec::new());
+        let mut writer = HashingWriter::new(HashKind::Dropbox, Vec::new());
 
         writer.write_all(b"hello ").unwrap();
         writer.write_all(b"world").unwrap();
@@ -246,7 +288,7 @@ mod tests {
     #[test]
     fn hashing_writer_handles_a_block_spanning_write() {
         let data = vec![b'b'; BLOCK_SIZE + 1];
-        let mut writer = HashingWriter::new(Vec::new());
+        let mut writer = HashingWriter::new(HashKind::Dropbox, Vec::new());
 
         for chunk in data.chunks(64 * 1024) {
             writer.write_all(chunk).unwrap();
@@ -255,5 +297,48 @@ mod tests {
 
         assert_eq!(inner.len(), data.len());
         assert_eq!(hash, ONE_BLOCK_PLUS_ONE);
+    }
+
+    /// Google Drive reports a plain SHA-256 of the file, digests again computed
+    /// with Python's hashlib.
+    mod sha256 {
+        use super::*;
+
+        const HELLO_WORLD: &str =
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        const ONE_BLOCK_PLUS_ONE: &str =
+            "3b531b766f232823ed67c27302e20e9af33fd83d6ef94fe887a4c8bcd72704e2";
+
+        #[test]
+        fn hashes_a_short_input() {
+            let mut hasher = ContentHasher::new(HashKind::Sha256);
+            hasher.update(b"hello world");
+
+            assert_eq!(hasher.finish(), HELLO_WORLD);
+        }
+
+        /// Past Dropbox's block size the two algorithms part ways, so this is
+        /// where a hasher that ignored its kind would show.
+        #[test]
+        fn hash_file_hashes_the_whole_file_in_one_digest() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("payload.bin");
+            std::fs::write(&path, vec![b'b'; BLOCK_SIZE + 1]).unwrap();
+
+            assert_eq!(
+                hash_file(HashKind::Sha256, &path).unwrap(),
+                ONE_BLOCK_PLUS_ONE
+            );
+        }
+
+        #[test]
+        fn hashing_writer_hashes_with_the_kind_it_was_given() {
+            let mut writer = HashingWriter::new(HashKind::Sha256, Vec::new());
+
+            writer.write_all(b"hello world").unwrap();
+            let (_, hash) = writer.finish();
+
+            assert_eq!(hash, HELLO_WORLD);
+        }
     }
 }

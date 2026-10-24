@@ -8,7 +8,7 @@ use crate::db::wal::checkpoint_file;
 use crate::output::format::format_size;
 use crate::sync::SyncError;
 use crate::sync::config::SyncConfig;
-use crate::sync::content_hash::hash_file;
+use crate::sync::content_hash::{HashKind, hash_file};
 use crate::sync::dropbox::DropboxClient;
 use crate::sync::metadata::SyncMetadata;
 use crate::sync::reconcile::{TransferDecision, decide};
@@ -93,7 +93,7 @@ fn push_file(
     force: bool,
     last_synced: Option<&str>,
 ) -> Result<String> {
-    let local_hash = hash_file(local_path)?;
+    let local_hash = hash_file(HashKind::Dropbox, local_path)?;
     let remote = client.get_metadata(remote_path)?;
     let remote_hash = remote.as_ref().and_then(|m| m.content_hash.as_deref());
 

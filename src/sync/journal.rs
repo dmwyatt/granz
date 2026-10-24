@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use log::debug;
 
 use crate::sync::config::SyncConfig;
-use crate::sync::content_hash::hash_file;
+use crate::sync::content_hash::{HashKind, hash_file};
 
 /// Whether the sync record points at the local database file as it is now.
 #[derive(Debug, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl SyncedDatabase {
             return Self::Untracked;
         };
 
-        match hash_file(db_path) {
+        match hash_file(HashKind::Dropbox, db_path) {
             Ok(hash) if hash == reference => Self::Tracked,
             Ok(_) => Self::Untracked,
             Err(e) => {
@@ -63,7 +63,7 @@ impl SyncedDatabase {
             return Ok(());
         }
 
-        let hash = hash_file(db_path)
+        let hash = hash_file(HashKind::Dropbox, db_path)
             .with_context(|| format!("hashing {} after rewriting it", db_path.display()))?;
 
         let mut config = SyncConfig::load().context("reading the Dropbox sync record")?;
@@ -97,7 +97,7 @@ mod tests {
         drop(conn);
 
         let mut config = SyncConfig::default();
-        config.record_sync(hash_file(&db_path).unwrap());
+        config.record_sync(hash_file(HashKind::Dropbox, &db_path).unwrap());
 
         (db_path, config)
     }
@@ -115,9 +115,9 @@ mod tests {
         drop(conn);
         // What `follow` does, without reaching for the real sync record on this
         // machine.
-        config.last_local_hash = Some(hash_file(&db_path).unwrap());
+        config.last_local_hash = Some(hash_file(HashKind::Dropbox, &db_path).unwrap());
 
-        let local = hash_file(&db_path).unwrap();
+        let local = hash_file(HashKind::Dropbox, &db_path).unwrap();
         assert_ne!(local, on_dropbox, "the conversion rewrites the file");
 
         assert_eq!(
@@ -148,7 +148,7 @@ mod tests {
         assert!(wal::convert_to_wal(&conn).unwrap());
         drop(conn);
 
-        let local = hash_file(&db_path).unwrap();
+        let local = hash_file(HashKind::Dropbox, &db_path).unwrap();
 
         assert_eq!(
             decide(&on_dropbox, Some(&local), config.local_reference()),
