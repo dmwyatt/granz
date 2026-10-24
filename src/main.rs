@@ -71,9 +71,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Dropbox commands (init, push, pull, status, logout)
-    if let Commands::Dropbox { action } = &cli.command {
-        commands::remote::run_dropbox(action, ctx.output_mode, &ctx.tz)?;
+    // Remote commands (init, push, pull, status, logout)
+    if let Commands::Remote { action } = &cli.command {
+        commands::remote::run(action, ctx.output_mode, &ctx.tz)?;
         return Ok(());
     }
 
@@ -288,7 +288,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Benchmark { .. } => unreachable!(), // Handled above
-        Commands::Dropbox { .. } => unreachable!(),   // Handled above
+        Commands::Remote { .. } => unreachable!(),    // Handled above
         Commands::Auth { .. } => unreachable!(),      // Handled above
         Commands::Update { .. } => unreachable!(),    // Handled above
         Commands::Sync { .. } => unreachable!(),      // Handled above

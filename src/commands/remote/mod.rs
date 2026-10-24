@@ -1,97 +1,35 @@
-//! `grans dropbox`: share the database between machines.
+//! `grans remote`: share the database between machines.
 
+mod init;
 mod progress;
 mod pull;
 mod push;
 mod status;
 
-use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use chrono::FixedOffset;
 
-use crate::cli::args::DropboxAction;
+use crate::cli::args::RemoteAction;
 use crate::output::format::OutputMode;
-use crate::pkce::PkceChallenge;
 use crate::sync::config::{SyncConfig, config_path};
-use crate::sync::dropbox::oauth::{PKCE_ENTROPY_BYTES, build_auth_url, exchange_code};
 
 /// What the shared copy of the database is called on the remote.
 const REMOTE_DB: &str = "grans.db";
 /// Database statistics pushed alongside it, so status can compare without a download.
 const REMOTE_METADATA: &str = "sync_metadata.json";
 
-/// Run Dropbox commands (init, push, pull, status, logout)
-pub fn run_dropbox(
-    action: &DropboxAction,
-    output_mode: OutputMode,
-    tz: &FixedOffset,
-) -> Result<()> {
+/// Run a `grans remote` subcommand.
+pub fn run(action: &RemoteAction, output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     match action {
-        DropboxAction::Init => init()?,
-        DropboxAction::Push { force } => push::push(*force)?,
-        DropboxAction::Pull { force } => pull::pull(*force)?,
-        DropboxAction::Status => status::status(output_mode, tz)?,
-        DropboxAction::Logout => logout()?,
+        RemoteAction::Init { provider } => init::init(provider)?,
+        RemoteAction::Push { force } => push::push(*force)?,
+        RemoteAction::Pull { force } => pull::pull(*force)?,
+        RemoteAction::Status => status::status(output_mode, tz)?,
+        RemoteAction::Logout => logout()?,
     }
-    Ok(())
-}
-
-fn init() -> Result<()> {
-    let mut config = SyncConfig::load()?;
-
-    if config.is_authenticated() {
-        println!("Already authenticated with Dropbox.");
-        print!("Re-authenticate? [y/N] ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Keeping existing authentication.");
-            return Ok(());
-        }
-    }
-
-    // Generate PKCE challenge
-    let pkce = PkceChallenge::generate(PKCE_ENTROPY_BYTES);
-    let auth_url = build_auth_url(&pkce.challenge);
-
-    println!("\nOpening browser for Dropbox authorization...");
-    println!("\nIf the browser doesn't open, visit this URL:");
-    println!("{}\n", auth_url);
-
-    // Try to open browser
-    if let Err(e) = open::that(&auth_url) {
-        eprintln!("Could not open browser: {}", e);
-    }
-
-    // Get authorization code from user
-    print!("Enter the authorization code from Dropbox: ");
-    io::stdout().flush()?;
-
-    let mut code = String::new();
-    io::stdin().read_line(&mut code)?;
-    let code = code.trim();
-
-    if code.is_empty() {
-        anyhow::bail!("No authorization code provided");
-    }
-
-    // Exchange code for tokens
-    println!("Exchanging code for tokens...");
-    let tokens = exchange_code(code, &pkce.verifier)?;
-
-    // Store refresh token
-    config.refresh_token = tokens.refresh_token;
-    config.save()?;
-
-    println!("\nSuccessfully authenticated with Dropbox!");
-    println!("Your database will sync to Apps/grans/ in your Dropbox.");
-
     Ok(())
 }
 
@@ -103,6 +41,7 @@ fn logout() -> Result<()> {
         return Ok(());
     }
 
+    let provider = config.provider();
     config.clear_auth();
     config.save()?;
 
@@ -111,8 +50,8 @@ fn logout() -> Result<()> {
         let _ = std::fs::remove_file(path);
     }
 
-    println!("Logged out from Dropbox.");
-    println!("Your database on Dropbox has not been deleted.");
+    println!("Logged out from {}.", provider);
+    println!("Your database on {} has not been deleted.", provider);
 
     Ok(())
 }

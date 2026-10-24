@@ -1,4 +1,4 @@
-//! `grans dropbox pull`.
+//! `grans remote pull`.
 
 use std::io::BufWriter;
 use std::path::Path;

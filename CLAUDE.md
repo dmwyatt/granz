@@ -141,7 +141,7 @@ CLI (main.rs, cli/) → Commands (commands/) → DB queries (db/) → SQLite
 - **output/**: Tri-modal formatting (TTY colored tables / plain tab-separated / JSON)
 - **query/**: Date range parsing (relative + absolute), search utilities
 - **embed/**: Semantic embeddings for similarity search
-- **sync/**: Dropbox OAuth and sync functionality for sharing databases across machines
+- **sync/**: Sharing the database between machines (`grans remote`). `remote.rs` defines the `Remote` trait each provider implements (`dropbox/`); push, pull and status in `commands/remote/` only talk to the trait, so conflict detection (`reconcile.rs`) and transfer verification are provider-neutral
 - **update/**: Self-update functionality
 - **platform.rs**: Cross-platform path resolution for database and config files
 

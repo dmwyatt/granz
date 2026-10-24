@@ -62,7 +62,7 @@ grans stores your meeting data in a local SQLite database at:
 - Linux: `~/.local/share/grans/grans.db`
 - Windows: `%APPDATA%/grans/grans.db`
 
-The database runs in SQLite's write-ahead logging mode, so you will see `grans.db-wal` and `grans.db-shm` beside it. They are part of the database: copy or move all three together, or run `grans dropbox push` (which folds the log into the database file first). Deleting them by hand while grans is running loses recent writes.
+The database runs in SQLite's write-ahead logging mode, so you will see `grans.db-wal` and `grans.db-shm` beside it. They are part of the database: copy or move all three together, or run `grans remote push` (which folds the log into the database file first). Deleting them by hand while grans is running loses recent writes.
 
 Data is fetched from the Granola API using `grans sync` and accumulates over time. Unlike Granola's local cache (which only holds recent meetings), grans preserves all your synced data indefinitely.
 
@@ -82,7 +82,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `recent` - Show this week's meetings
 - `today` - Show today's meetings
 - `embed` - Build the embeddings that let search match by meaning
-- `dropbox` - Share the database between machines through Dropbox
+- `remote` - Share the database between machines through Dropbox
 - `info` - Show what the local database holds
 - `skill` - Print a skill that points AI agents at the help
 
@@ -328,7 +328,7 @@ The JSON envelopes differ where the contracts do: grep JSON reports `total_meeti
 
 The semantic half of search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads, and search skips the embedding model entirely when there are no embeddings to search. On macOS the embedding model is the f16 GGUF of the same weights, run by llama.cpp on Metal; elsewhere it is the ONNX export, run by ONNX Runtime. The two produce interchangeable vectors, so a database embedded on one platform searches correctly on the other, and syncing it via Dropbox to a Mac (or from one) never triggers a re-embed. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results), or when they were built with an outdated chunking strategy. Each warning says to run `grans embed`; searching itself never blocks.
+A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads, and search skips the embedding model entirely when there are no embeddings to search. On macOS the embedding model is the f16 GGUF of the same weights, run by llama.cpp on Metal; elsewhere it is the ONNX export, run by ONNX Runtime. The two produce interchangeable vectors, so a database embedded on one platform searches correctly on the other, and sharing it with `grans remote` to a Mac (or from one) never triggers a re-embed. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results), or when they were built with an outdated chunking strategy. Each warning says to run `grans embed`; searching itself never blocks.
 
 When an upgrade changes the embedding model, the next `grans embed` detects the stale embeddings and rebuilds them all. This full rebuild is a one-time cost and can take a while on large databases.
 
@@ -534,9 +534,9 @@ its source. Nothing is lost and no re-sync is needed.
 `admin db info` also lists every Granola account the database has synced from,
 with the email and first-seen date captured when each was recorded.
 
-### Dropbox Sync
+### Sharing the Database Between Machines
 
-Share your grans database across multiple machines via Dropbox.
+Share your grans database across multiple machines through a remote: a copy kept in Dropbox.
 
 **Why use this?** Two operations in grans are slow:
 
@@ -544,7 +544,7 @@ Share your grans database across multiple machines via Dropbox.
 
 2. **Embedding generation** - `grans embed` builds vector embeddings for transcripts, panel sections, and notes, which takes time on CPU.
 
-Once you've done this work on one machine, Dropbox sync lets you share the results instead of repeating it everywhere.
+Once you've done this work on one machine, `grans remote` lets you share the results instead of repeating it everywhere.
 
 **Initial setup (on your primary machine):**
 
@@ -554,20 +554,20 @@ Once you've done this work on one machine, Dropbox sync lets you share the resul
 grans sync --all
 
 # 2. Connect to Dropbox (one-time OAuth)
-grans dropbox init
+grans remote init dropbox
 
 # 3. Upload your database
-grans dropbox push
+grans remote push
 ```
 
 **On other machines:**
 
 ```bash
-# 1. Connect to Dropbox
-grans dropbox init
+# 1. Connect to the same remote
+grans remote init dropbox
 
-# 2. Download the databases
-grans dropbox pull
+# 2. Download the database
+grans remote pull
 
 # 3. Queries now work instantly - no need to re-sync or rebuild
 grans search "deployment"
@@ -578,27 +578,28 @@ grans search "deployment"
 ```bash
 # After syncing new data on your primary machine
 grans sync --all
-grans dropbox push
+grans remote push
 
 # On other machines
-grans dropbox pull
+grans remote pull
 ```
 
 **Commands:**
 
 | Command | Description |
 |---------|-------------|
-| `grans dropbox init` | One-time Dropbox authentication |
-| `grans dropbox push` | Upload database to Dropbox |
-| `grans dropbox pull` | Download database from Dropbox |
-| `grans dropbox status` | Show sync status with local vs remote comparison |
-| `grans dropbox logout` | Remove Dropbox authentication |
+| `grans remote init dropbox` | Connect this machine to Dropbox (once per machine) |
+| `grans remote push` | Upload the database to the remote |
+| `grans remote pull` | Download the database from the remote |
+| `grans remote status` | Show sync status with local vs remote comparison |
+| `grans remote logout` | Forget the remote authorization on this machine |
 
 **Sync status** shows a side-by-side comparison of local and remote database:
 
 ```
 Sync Status
 ───────────
+Remote: Dropbox
 Authentication: Connected
 Last push: 2025-01-27 15:30:00 UTC
 Last pull: Never
@@ -642,8 +643,8 @@ The bar is written to stderr and is skipped when output is redirected. Uploads a
 Use `--force` to overwrite regardless:
 
 ```bash
-grans dropbox push --force   # Replace the Dropbox copy with yours
-grans dropbox pull --force   # Replace your copy with Dropbox's
+grans remote push --force   # Replace the remote copy with yours
+grans remote pull --force   # Replace your copy with the remote one
 ```
 
 Because identical copies transfer nothing, pushing or pulling twice in a row is cheap and safe: the second run compares hashes and stops.
@@ -652,8 +653,8 @@ Because identical copies transfer nothing, pushing or pulling twice in a row is 
 
 | Check | Catches |
 |-------|---------|
-| Byte count against the size Dropbox reported | An interrupted or truncated transfer |
-| Dropbox `content_hash`, computed while streaming | Content that differs from the stored file |
+| Byte count against the size the remote reported | An interrupted or truncated transfer |
+| The remote's content hash (Dropbox's `content_hash`), computed while streaming | Content that differs from the stored file |
 | `PRAGMA quick_check` plus a schema probe | A corrupt file, or one that is not a grans database |
 
 If any check fails the temp file is discarded and your existing database is left untouched. The download is also flushed to the device before the rename, so a crash cannot leave a database whose contents were never written.
@@ -663,7 +664,7 @@ On a 424 MB database this costs about 1.3s; hashing runs alongside the transfer 
 **Troubleshooting a failed sync:** run the command again with `--verbose` to log each request, its HTTP status, and the throughput achieved:
 
 ```bash
-grans --verbose dropbox pull
+grans --verbose remote pull
 ```
 
 ```
@@ -681,7 +682,7 @@ Use `GRANS_LOG` for finer control, e.g. `GRANS_LOG=grans::sync=debug`.
 **What gets synced:**
 - Database (meeting data, transcripts, FTS indices, vector embeddings for semantic search)
 
-The sync uses a sandboxed Dropbox app folder (`Apps/grans/`), so it only accesses its own files, not your full Dropbox.
+Dropbox sync uses a sandboxed app folder (`Apps/grans/`), so it only accesses its own files, not your full Dropbox.
 
 ## Output Modes
 

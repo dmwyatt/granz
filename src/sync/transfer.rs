@@ -381,8 +381,8 @@ mod tests {
     /// timeout bounds each read rather than the transfer as a whole.
     ///
     /// Buffering the body with `Response::bytes()` instead makes the timeout a
-    /// cap on total transfer time, which is what broke `dropbox pull` on any
-    /// database too large to arrive within it.
+    /// cap on total transfer time, which is what broke pulling any database too
+    /// large to arrive within it.
     #[test]
     fn streaming_outlives_a_transfer_longer_than_the_stall_timeout() {
         const CHUNK: &[u8] = &[b'z'; 4096];
@@ -534,7 +534,7 @@ mod tests {
     }
 
     /// A streamed upload body must deliver every byte and report progress as it
-    /// goes, which is what lets `dropbox push` show a bar without first reading
+    /// goes, which is what lets `remote push` show a bar without first reading
     /// the whole file into memory.
     #[test]
     fn a_streamed_upload_body_delivers_every_byte_and_reports_progress() {

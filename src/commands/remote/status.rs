@@ -1,4 +1,4 @@
-//! Rendering for `grans dropbox status`.
+//! Rendering for `grans remote status`.
 //!
 //! Compares the local database against the copy on the remote without
 //! downloading it, using the metadata file that `push` uploads alongside the
@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::output::format::{OutputMode, format_size};
 use crate::sync::config::SyncConfig;
 use crate::sync::metadata::SyncMetadata;
-use crate::sync::remote::{Remote, RemoteFile, connect};
+use crate::sync::remote::{Provider, Remote, RemoteFile, connect};
 
 use super::{REMOTE_DB, REMOTE_METADATA, get_file_mtime};
 
@@ -63,6 +63,8 @@ impl FileInfo {
 #[derive(Debug, Serialize)]
 struct SyncStatusData {
     authenticated: bool,
+    /// The service holding the shared copy, when one is set up.
+    provider: Option<Provider>,
     last_push_time: Option<u64>,
     last_pull_time: Option<u64>,
     local: Option<SyncMetadata>,
@@ -100,6 +102,7 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
 
     let status_data = SyncStatusData {
         authenticated: config.is_authenticated(),
+        provider: config.is_authenticated().then(|| config.provider()),
         last_push_time: config.last_push_time,
         last_pull_time: config.last_pull_time,
         local: local_metadata.clone(),
@@ -143,13 +146,14 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
     println!("{}", "───────────".dimmed());
 
     // Authentication
-    if data.authenticated {
+    if let (true, Some(provider)) = (data.authenticated, data.provider) {
+        println!("Remote: {}", provider);
         println!("Authentication: {}", "Connected".green());
     } else {
         println!("Authentication: {}", "Not connected".red());
         println!(
-            "\nRun '{}' to connect to Dropbox.",
-            "grans dropbox init".cyan()
+            "\nRun '{}' to choose where the shared copy lives.",
+            "grans remote init dropbox".cyan()
         );
         return;
     }
@@ -411,6 +415,7 @@ mod tests {
     fn test_sync_status_data_serialization() {
         let data = SyncStatusData {
             authenticated: true,
+            provider: Some(Provider::Dropbox),
             last_push_time: Some(1737973800),
             last_pull_time: None,
             local: None,

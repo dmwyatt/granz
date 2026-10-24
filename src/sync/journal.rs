@@ -1,11 +1,11 @@
-//! Keeping the Dropbox sync record straight across a rewrite of the local
+//! Keeping the remote sync record straight across a rewrite of the local
 //! database file that changes nothing it holds.
 //!
 //! Sync tells the two copies apart by content hash. The one-time conversion to
 //! write-ahead logging rewrites two bytes of the database header, so to the
 //! sync record the local file looks edited: without this, the first pull after
 //! an upgrade refuses as diverged over a change the user never made, on a
-//! database whose meetings are identical to the ones on Dropbox.
+//! database whose meetings are identical to the ones on the remote.
 
 use std::path::Path;
 
@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use log::debug;
 
 use crate::sync::config::SyncConfig;
-use crate::sync::content_hash::{HashKind, hash_file};
+use crate::sync::content_hash::hash_file;
 
 /// Whether the sync record points at the local database file as it is now.
 #[derive(Debug, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl SyncedDatabase {
             return Self::Untracked;
         };
 
-        match hash_file(HashKind::Dropbox, db_path) {
+        match hash_file(config.provider().hash_kind(), db_path) {
             Ok(hash) if hash == reference => Self::Tracked,
             Ok(_) => Self::Untracked,
             Err(e) => {
@@ -55,7 +55,7 @@ impl SyncedDatabase {
 
     /// Point the record at the rewritten file.
     ///
-    /// Only the local side moves: Dropbox still holds the bytes it always held,
+    /// Only the local side moves: the remote still holds the bytes it always held,
     /// so a push has nothing new to fear and a pull sees a local database that
     /// has not been edited.
     pub fn follow(&self, db_path: &Path) -> Result<()> {
@@ -63,12 +63,13 @@ impl SyncedDatabase {
             return Ok(());
         }
 
-        let hash = hash_file(HashKind::Dropbox, db_path)
+        let mut config = SyncConfig::load().context("reading the remote sync record")?;
+
+        let hash = hash_file(config.provider().hash_kind(), db_path)
             .with_context(|| format!("hashing {} after rewriting it", db_path.display()))?;
 
-        let mut config = SyncConfig::load().context("reading the Dropbox sync record")?;
         config.last_local_hash = Some(hash);
-        config.save().context("writing the Dropbox sync record")?;
+        config.save().context("writing the remote sync record")?;
 
         debug!("sync record now follows the rewritten database file");
 
@@ -80,11 +81,12 @@ impl SyncedDatabase {
 mod tests {
     use super::*;
     use crate::db::wal;
+    use crate::sync::content_hash::HashKind;
     use crate::sync::reconcile::{TransferDecision, decide};
     use tempfile::TempDir;
 
     /// A database as it was before the upgrade: rollback journal, pushed to
-    /// Dropbox, both sides identical.
+    /// the remote, both sides identical.
     fn synced_database(dir: &TempDir) -> (std::path::PathBuf, SyncConfig) {
         let db_path = dir.path().join("grans.db");
         let conn = crate::db::connection::open_db_at_path(&db_path).unwrap();
@@ -108,7 +110,7 @@ mod tests {
     fn a_converted_database_does_not_reconcile_as_diverged() {
         let dir = TempDir::new().unwrap();
         let (db_path, mut config) = synced_database(&dir);
-        let on_dropbox = config.last_synced_hash.clone().unwrap();
+        let on_remote = config.last_synced_hash.clone().unwrap();
 
         let conn = crate::db::connection::open_existing(&db_path).unwrap();
         assert!(wal::convert_to_wal(&conn).unwrap());
@@ -118,21 +120,17 @@ mod tests {
         config.last_local_hash = Some(hash_file(HashKind::Dropbox, &db_path).unwrap());
 
         let local = hash_file(HashKind::Dropbox, &db_path).unwrap();
-        assert_ne!(local, on_dropbox, "the conversion rewrites the file");
+        assert_ne!(local, on_remote, "the conversion rewrites the file");
 
         assert_eq!(
-            decide(&on_dropbox, Some(&local), config.local_reference()),
+            decide(&on_remote, Some(&local), config.local_reference()),
             TransferDecision::Proceed,
             "a pull must see a local database nobody edited"
         );
         assert_eq!(
-            decide(
-                &local,
-                Some(&on_dropbox),
-                config.last_synced_hash.as_deref()
-            ),
+            decide(&local, Some(&on_remote), config.last_synced_hash.as_deref()),
             TransferDecision::Proceed,
-            "a push must see a copy on Dropbox nobody edited"
+            "a push must see a remote copy nobody edited"
         );
     }
 
@@ -142,7 +140,7 @@ mod tests {
     fn an_unrecorded_conversion_reads_as_a_conflict() {
         let dir = TempDir::new().unwrap();
         let (db_path, config) = synced_database(&dir);
-        let on_dropbox = config.last_synced_hash.clone().unwrap();
+        let on_remote = config.last_synced_hash.clone().unwrap();
 
         let conn = crate::db::connection::open_existing(&db_path).unwrap();
         assert!(wal::convert_to_wal(&conn).unwrap());
@@ -151,7 +149,7 @@ mod tests {
         let local = hash_file(HashKind::Dropbox, &db_path).unwrap();
 
         assert_eq!(
-            decide(&on_dropbox, Some(&local), config.local_reference()),
+            decide(&on_remote, Some(&local), config.local_reference()),
             TransferDecision::Diverged
         );
     }

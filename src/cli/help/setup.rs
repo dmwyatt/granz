@@ -84,31 +84,31 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         }],
     },
     CommandHelp {
-        path: "dropbox",
+        path: "remote",
         examples: &[
             Example {
-                command: "grans dropbox init",
+                command: "grans remote init dropbox",
                 about: "Connect grans to Dropbox, once per machine",
             },
             Example {
-                command: "grans dropbox push",
+                command: "grans remote push",
                 about: "Upload this machine's database",
             },
             Example {
-                command: "grans dropbox pull",
+                command: "grans remote pull",
                 about: "Download it on another machine",
             },
             Example {
-                command: "grans dropbox status",
-                about: "Compare the local copy with the one in Dropbox",
+                command: "grans remote status",
+                about: "Compare the local copy with the remote one",
             },
         ],
         sections: &[Section {
             title: "Notes",
             lines: &[
                 "Shares one database between machines, so transcripts are fetched and",
-                "embeddings built only once. The database lives in Apps/grans in your",
-                "Dropbox.",
+                "embeddings built only once. Connect each machine to the same remote",
+                "with `grans remote init`, then push from one and pull on the others.",
                 "",
                 "push and pull transfer nothing when the two copies are identical. They",
                 "refuse when the other copy has changed since the last transfer, or when",
@@ -118,26 +118,44 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         }],
     },
     CommandHelp {
-        path: "dropbox init",
+        path: "remote init",
         examples: &[Example {
-            command: "grans dropbox init",
+            command: "grans remote init dropbox",
+            about: "Keep the shared copy in Dropbox",
+        }],
+        sections: &[Section {
+            title: "Notes",
+            lines: &[
+                "Connecting to a different remote than before replaces the old",
+                "connection, and grans forgets what it knew about the copy there.",
+            ],
+        }],
+    },
+    CommandHelp {
+        path: "remote init dropbox",
+        examples: &[Example {
+            command: "grans remote init dropbox",
             about: "Authorize grans in a browser and store the result",
         }],
         sections: &[Section {
             title: "Notes",
-            lines: &["Needs someone at the keyboard to paste an authorization code."],
+            lines: &[
+                "The database lives in Apps/grans in your Dropbox, and grans can see",
+                "nothing else there. Needs someone at the keyboard to paste an",
+                "authorization code.",
+            ],
         }],
     },
     CommandHelp {
-        path: "dropbox push",
+        path: "remote push",
         examples: &[
             Example {
-                command: "grans dropbox push",
-                about: "Upload the database unless Dropbox's copy has changed",
+                command: "grans remote push",
+                about: "Upload the database unless the remote copy has changed",
             },
             Example {
-                command: "grans dropbox push --force",
-                about: "Replace Dropbox's copy with this one regardless",
+                command: "grans remote push --force",
+                about: "Replace the remote copy with this one regardless",
             },
         ],
         sections: &[Section {
@@ -149,15 +167,15 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         }],
     },
     CommandHelp {
-        path: "dropbox pull",
+        path: "remote pull",
         examples: &[
             Example {
-                command: "grans dropbox pull",
+                command: "grans remote pull",
                 about: "Download the database unless the local copy has changed",
             },
             Example {
-                command: "grans dropbox pull --force",
-                about: "Replace the local copy with Dropbox's regardless",
+                command: "grans remote pull --force",
+                about: "Replace the local copy with the remote one regardless",
             },
         ],
         sections: &[Section {
@@ -169,18 +187,18 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
         }],
     },
     CommandHelp {
-        path: "dropbox status",
+        path: "remote status",
         examples: &[Example {
-            command: "grans dropbox status",
-            about: "The local and Dropbox copies side by side",
+            command: "grans remote status",
+            about: "The local and remote copies side by side",
         }],
         sections: &[],
     },
     CommandHelp {
-        path: "dropbox logout",
+        path: "remote logout",
         examples: &[Example {
-            command: "grans dropbox logout",
-            about: "Forget the Dropbox authorization on this machine",
+            command: "grans remote logout",
+            about: "Forget the remote authorization on this machine",
         }],
         sections: &[],
     },

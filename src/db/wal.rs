@@ -2,7 +2,7 @@
 //!
 //! In write-ahead logging mode a committed write can live entirely in the
 //! `-wal` file until a checkpoint folds it into the database. Anything that
-//! treats the database as bytes has to account for that: the Dropbox upload,
+//! treats the database as bytes has to account for that: the remote upload,
 //! the content hash that decides whether to upload at all, and the deletes that
 //! replace or clear the file.
 
@@ -348,7 +348,7 @@ mod tests {
         assert!(!replacement.exists());
     }
 
-    /// What `grans dropbox push` uploads is the database file on its own, so
+    /// What `grans remote push` uploads is the database file on its own, so
     /// every commit has to be in it.
     #[test]
     fn a_checkpointed_database_file_carries_the_latest_writes() {

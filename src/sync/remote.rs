@@ -9,6 +9,8 @@ use std::fmt;
 use std::io::Write;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use super::config::SyncConfig;
 use super::content_hash::HashKind;
 use super::dropbox::{self, DropboxClient};
@@ -16,7 +18,8 @@ use super::transfer::{ProgressFn, verify_content_hash};
 use super::{SyncError, SyncResult};
 
 /// A service grans can keep the shared copy on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Provider {
     Dropbox,
 }
@@ -97,8 +100,12 @@ pub fn connect(config: &SyncConfig) -> SyncResult<Box<dyn Remote>> {
         .as_deref()
         .ok_or(SyncError::NotAuthenticated)?;
 
-    let tokens = dropbox::oauth::refresh_access_token(refresh_token)?;
-    Ok(Box::new(DropboxClient::new(tokens.access_token)?))
+    match config.provider() {
+        Provider::Dropbox => {
+            let tokens = dropbox::oauth::refresh_access_token(refresh_token)?;
+            Ok(Box::new(DropboxClient::new(tokens.access_token)?))
+        }
+    }
 }
 
 /// Upload a file and prove the remote stored the bytes hashed as `local_hash`.

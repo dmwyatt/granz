@@ -1,4 +1,4 @@
-//! `grans dropbox push`.
+//! `grans remote push`.
 
 use std::path::Path;
 

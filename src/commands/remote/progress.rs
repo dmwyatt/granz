@@ -1,4 +1,4 @@
-//! Transfer progress for `grans dropbox push` and `pull`.
+//! Transfer progress for `grans remote push` and `pull`.
 
 use std::io::{self, IsTerminal};
 

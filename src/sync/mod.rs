@@ -15,7 +15,7 @@ use remote::Provider;
 
 #[derive(Error, Debug)]
 pub enum SyncError {
-    #[error("Not authenticated. Run 'grans dropbox init' first.")]
+    #[error("No remote is set up. Run 'grans remote init dropbox' first.")]
     NotAuthenticated,
 
     #[error("OAuth error: {0}")]
@@ -66,20 +66,20 @@ pub enum SyncError {
 
     #[error(
         "The {what} on {provider} has changed since this machine last synced, so pushing would \
-         discard those changes. Run 'grans dropbox pull' first, or push --force to overwrite."
+         discard those changes. Run 'grans remote pull' first, or push --force to overwrite."
     )]
     ConflictRemoteChanged { provider: Provider, what: String },
 
     #[error(
         "The local {what} has changed since this machine last synced, so pulling would discard \
-         those changes. Run 'grans dropbox push' first, or pull --force to overwrite."
+         those changes. Run 'grans remote push' first, or pull --force to overwrite."
     )]
     ConflictLocalChanged { what: String },
 
     #[error(
         "The {what} on {provider} differs from the local copy, and grans has no record of \
          syncing with it, so neither can be shown to supersede the other. Compare them with \
-         'grans dropbox status', then push --force or pull --force to choose."
+         'grans remote status', then push --force or pull --force to choose."
     )]
     ConflictNoSyncRecord { provider: Provider, what: String },
 
