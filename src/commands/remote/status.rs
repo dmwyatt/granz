@@ -11,6 +11,7 @@ use chrono::FixedOffset;
 use serde::Serialize;
 
 use crate::output::format::{OutputMode, format_size};
+use crate::sync::SyncResult;
 use crate::sync::config::SyncConfig;
 use crate::sync::metadata::SyncMetadata;
 use crate::sync::remote::{Provider, Remote, RemoteFile, connect};
@@ -65,6 +66,8 @@ struct SyncStatusData {
     authenticated: bool,
     /// The service holding the shared copy, when one is set up.
     provider: Option<Provider>,
+    /// Why the remote could not be read, when it could not.
+    remote_error: Option<String>,
     last_push_time: Option<u64>,
     last_pull_time: Option<u64>,
     local: Option<SyncMetadata>,
@@ -85,24 +88,23 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     // Local file info
     let local_db_info = FileInfo::from_local(&db_path);
 
-    // Remote info (only if authenticated)
-    let (remote_metadata, remote_db_info) = if config.is_authenticated() {
-        match connect(&config) {
-            Ok(remote) => {
-                let remote_meta = fetch_remote_metadata(remote.as_ref());
-                let db_meta = remote.stat(REMOTE_DB).ok().flatten();
-
-                (remote_meta, FileInfo::from_remote(db_meta.as_ref()))
-            }
-            Err(_) => (None, FileInfo::from_remote(None)),
+    // Remote info (only if authenticated). Failing to reach the remote is
+    // reported rather than raised: the local half of the comparison is still
+    // worth showing, and an expired authorization is exactly what someone
+    // running status needs to see.
+    let (remote_metadata, remote_db_info, remote_error) = if config.is_authenticated() {
+        match read_remote(&config) {
+            Ok((meta, stored)) => (meta, FileInfo::from_remote(stored.as_ref()), None),
+            Err(e) => (None, FileInfo::from_remote(None), Some(e.to_string())),
         }
     } else {
-        (None, FileInfo::from_remote(None))
+        (None, FileInfo::from_remote(None), None)
     };
 
     let status_data = SyncStatusData {
         authenticated: config.is_authenticated(),
         provider: config.is_authenticated().then(|| config.provider()),
+        remote_error,
         last_push_time: config.last_push_time,
         last_pull_time: config.last_pull_time,
         local: local_metadata.clone(),
@@ -121,6 +123,13 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// What the remote holds: the pushed statistics, if any, and the database file.
+fn read_remote(config: &SyncConfig) -> SyncResult<(Option<SyncMetadata>, Option<RemoteFile>)> {
+    let remote = connect(config)?;
+    let stored = remote.stat(REMOTE_DB)?;
+    Ok((fetch_remote_metadata(remote.as_ref()), stored))
 }
 
 fn fetch_remote_metadata(remote: &dyn Remote) -> Option<SyncMetadata> {
@@ -148,7 +157,13 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
     // Authentication
     if let (true, Some(provider)) = (data.authenticated, data.provider) {
         println!("Remote: {}", provider);
-        println!("Authentication: {}", "Connected".green());
+        match &data.remote_error {
+            None => println!("Authentication: {}", "Connected".green()),
+            Some(e) => println!(
+                "Authentication: {}",
+                format!("could not reach {}: {}", provider, e).red()
+            ),
+        }
     } else {
         println!("Authentication: {}", "Not connected".red());
         println!(
@@ -416,6 +431,7 @@ mod tests {
         let data = SyncStatusData {
             authenticated: true,
             provider: Some(Provider::Dropbox),
+            remote_error: None,
             last_push_time: Some(1737973800),
             last_pull_time: None,
             local: None,
