@@ -21,6 +21,7 @@ mod fixtures;
 mod invitees;
 pub mod overview;
 pub mod page;
+pub mod people;
 pub mod series;
 pub mod time;
 mod transcript;

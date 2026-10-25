@@ -6,6 +6,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::Connection;
 
 mod load;
+mod people;
 mod recurring;
 mod summary;
 
@@ -57,6 +58,17 @@ pub fn run(
                 println!("{}", to_json(&report));
             } else {
                 recurring::print(&report, *limit, &ctx.tz);
+            }
+        }
+        Some(StatsAction::People { limit }) => {
+            let mut report = crate::stats::people::report(&rows);
+            if json {
+                if *limit > 0 {
+                    report.people.truncate(*limit);
+                }
+                println!("{}", to_json(&report));
+            } else {
+                people::print(&report, *limit, &ctx.tz);
             }
         }
     }

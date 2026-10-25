@@ -464,6 +464,9 @@ grans stats time --by week --date last-month
 # Recurring meetings: hours, cadence, invite list, punctuality, your share
 grans stats series
 
+# Who you meet with: one-on-ones, organizers, domains, invitation responses
+grans stats people
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

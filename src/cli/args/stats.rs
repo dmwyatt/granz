@@ -43,4 +43,13 @@ pub enum StatsAction {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// Who you meet with: one-on-ones, who organizes, outside your
+    /// organization, how invitations are answered, who is invited together
+    #[command(after_long_help = help::for_command("stats people"))]
+    People {
+        /// How many people to list, most meetings first (0 for all)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
