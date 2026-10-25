@@ -278,11 +278,11 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Share the database between machines through Dropbox
-    #[command(after_long_help = help::for_command("dropbox"))]
-    Dropbox {
+    /// Share the database between machines through a remote such as Dropbox
+    #[command(after_long_help = help::for_command("remote"))]
+    Remote {
         #[command(subcommand)]
-        action: DropboxAction,
+        action: RemoteAction,
     },
 
     /// Manage grans's Granola sign-in (login, status, logout)
@@ -767,30 +767,46 @@ pub enum AuthProvider {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum DropboxAction {
-    /// Set up Dropbox authentication (one-time setup)
-    #[command(after_long_help = help::for_command("dropbox init"))]
-    Init,
-    /// Upload database to Dropbox
-    #[command(after_long_help = help::for_command("dropbox push"))]
+pub enum RemoteAction {
+    /// Choose where the shared copy lives and authorize grans there (once per machine)
+    #[command(after_long_help = help::for_command("remote init"))]
+    Init {
+        #[command(subcommand)]
+        provider: InitProvider,
+    },
+    /// Upload the database to the remote
+    #[command(after_long_help = help::for_command("remote push"))]
     Push {
-        /// Overwrite even if remote is newer
+        /// Overwrite the remote copy even if it changed since the last transfer
         #[arg(long)]
         force: bool,
     },
-    /// Download database from Dropbox
-    #[command(after_long_help = help::for_command("dropbox pull"))]
+    /// Download the database from the remote
+    #[command(after_long_help = help::for_command("remote pull"))]
     Pull {
-        /// Overwrite even if local is newer
+        /// Overwrite the local copy even if it changed since the last transfer
         #[arg(long)]
         force: bool,
     },
-    /// Show sync status
-    #[command(after_long_help = help::for_command("dropbox status"))]
+    /// Compare the local database with the remote copy
+    #[command(after_long_help = help::for_command("remote status"))]
     Status,
-    /// Remove Dropbox authentication
-    #[command(after_long_help = help::for_command("dropbox logout"))]
+    /// Forget the remote authorization on this machine
+    #[command(after_long_help = help::for_command("remote logout"))]
     Logout,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InitProvider {
+    /// Keep the shared copy in Dropbox
+    #[command(after_long_help = help::for_command("remote init dropbox"))]
+    Dropbox,
+    /// Keep the shared copy in Google Drive, through an OAuth client you create
+    #[command(after_long_help = help::for_command("remote init google-drive"))]
+    GoogleDrive {
+        /// The OAuth client's JSON file, downloaded from the Google Cloud console
+        client_file: std::path::PathBuf,
+    },
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
-//! Rendering for `grans dropbox status`.
+//! Rendering for `grans remote status`.
 //!
-//! Compares the local database against the copy on Dropbox without downloading
-//! it, using the metadata file that `push` uploads alongside the database.
+//! Compares the local database against the copy on the remote without
+//! downloading it, using the metadata file that `push` uploads alongside the
+//! database.
 
 use std::path::Path;
 
@@ -10,11 +11,12 @@ use chrono::FixedOffset;
 use serde::Serialize;
 
 use crate::output::format::{OutputMode, format_size};
+use crate::sync::SyncResult;
 use crate::sync::config::SyncConfig;
-use crate::sync::dropbox::{DropboxClient, FileMetadata, format_timestamp, parse_dropbox_time};
 use crate::sync::metadata::SyncMetadata;
+use crate::sync::remote::{Provider, Remote, RemoteFile, connect};
 
-use super::sync::{REMOTE_DB_PATH, REMOTE_METADATA_PATH, get_access_token, get_file_mtime};
+use super::{REMOTE_DB, REMOTE_METADATA, get_file_mtime};
 
 /// File information for status display
 #[derive(Debug, Clone, Serialize)]
@@ -42,12 +44,12 @@ impl FileInfo {
         }
     }
 
-    fn from_remote(meta: Option<&FileMetadata>) -> Self {
-        match meta {
-            Some(m) => Self {
+    fn from_remote(stored: Option<&RemoteFile>) -> Self {
+        match stored {
+            Some(f) => Self {
                 exists: true,
-                size_bytes: Some(m.size),
-                modified_time: parse_dropbox_time(&m.server_modified),
+                size_bytes: Some(f.size),
+                modified_time: f.modified,
             },
             None => Self {
                 exists: false,
@@ -62,6 +64,10 @@ impl FileInfo {
 #[derive(Debug, Serialize)]
 struct SyncStatusData {
     authenticated: bool,
+    /// The service holding the shared copy, when one is set up.
+    provider: Option<Provider>,
+    /// Why the remote could not be read, when it could not.
+    remote_error: Option<String>,
     last_push_time: Option<u64>,
     last_pull_time: Option<u64>,
     local: Option<SyncMetadata>,
@@ -82,24 +88,23 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     // Local file info
     let local_db_info = FileInfo::from_local(&db_path);
 
-    // Remote info (only if authenticated)
-    let (remote_metadata, remote_db_info) = if config.is_authenticated() {
-        match get_access_token(&config) {
-            Ok(access_token) => {
-                let client = DropboxClient::new(access_token)?;
-                let remote_meta = fetch_remote_metadata(&client);
-                let db_meta = client.get_metadata(REMOTE_DB_PATH).ok().flatten();
-
-                (remote_meta, FileInfo::from_remote(db_meta.as_ref()))
-            }
-            Err(_) => (None, FileInfo::from_remote(None)),
+    // Remote info (only if authenticated). Failing to reach the remote is
+    // reported rather than raised: the local half of the comparison is still
+    // worth showing, and an expired authorization is exactly what someone
+    // running status needs to see.
+    let (remote_metadata, remote_db_info, remote_error) = if config.is_authenticated() {
+        match read_remote(&config) {
+            Ok((meta, stored)) => (meta, FileInfo::from_remote(stored.as_ref()), None),
+            Err(e) => (None, FileInfo::from_remote(None), Some(e.to_string())),
         }
     } else {
-        (None, FileInfo::from_remote(None))
+        (None, FileInfo::from_remote(None), None)
     };
 
     let status_data = SyncStatusData {
         authenticated: config.is_authenticated(),
+        provider: config.is_authenticated().then(|| config.provider()),
+        remote_error,
         last_push_time: config.last_push_time,
         last_pull_time: config.last_pull_time,
         local: local_metadata.clone(),
@@ -120,8 +125,15 @@ pub(super) fn status(output_mode: OutputMode, tz: &FixedOffset) -> Result<()> {
     Ok(())
 }
 
-fn fetch_remote_metadata(client: &DropboxClient) -> Option<SyncMetadata> {
-    match client.download(REMOTE_METADATA_PATH) {
+/// What the remote holds: the pushed statistics, if any, and the database file.
+fn read_remote(config: &SyncConfig) -> SyncResult<(Option<SyncMetadata>, Option<RemoteFile>)> {
+    let remote = connect(config)?;
+    let stored = remote.stat(REMOTE_DB)?;
+    Ok((fetch_remote_metadata(remote.as_ref()), stored))
+}
+
+fn fetch_remote_metadata(remote: &dyn Remote) -> Option<SyncMetadata> {
+    match remote.download(REMOTE_METADATA) {
         Ok(bytes) => {
             let json = String::from_utf8(bytes).ok()?;
             match serde_json::from_str(&json) {
@@ -143,13 +155,21 @@ fn print_status_tty(data: &SyncStatusData, tz: &FixedOffset) {
     println!("{}", "───────────".dimmed());
 
     // Authentication
-    if data.authenticated {
-        println!("Authentication: {}", "Connected".green());
+    if let (true, Some(provider)) = (data.authenticated, data.provider) {
+        println!("Remote: {}", provider);
+        match &data.remote_error {
+            None => println!("Authentication: {}", "Connected".green()),
+            Some(e) => println!(
+                "Authentication: {}",
+                format!("could not reach {}: {}", provider, e).red()
+            ),
+        }
     } else {
         println!("Authentication: {}", "Not connected".red());
         println!(
-            "\nRun '{}' to connect to Dropbox.",
-            "grans dropbox init".cyan()
+            "\nRun '{}' or '{}' to choose where the shared copy lives.",
+            "grans remote init dropbox".cyan(),
+            "grans remote init google-drive <client-file>".cyan()
         );
         return;
     }
@@ -329,6 +349,16 @@ fn format_number(n: i64) -> String {
     }
 }
 
+/// Format a Unix timestamp for display in local time.
+fn format_timestamp(ts: u64) -> String {
+    use chrono::{DateTime, Local};
+    let dt = DateTime::from_timestamp(ts as i64, 0)
+        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+    dt.with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
 fn format_short_time(ts: u64, tz: &FixedOffset) -> String {
     use chrono::DateTime;
     let dt = DateTime::from_timestamp(ts as i64, 0)
@@ -363,6 +393,13 @@ mod tests {
     }
 
     #[test]
+    fn test_format_timestamp() {
+        // 2025-01-27T10:30:00Z
+        let formatted = format_timestamp(1737973800);
+        assert!(formatted.contains("2025"));
+    }
+
+    #[test]
     fn test_format_date_range() {
         assert_eq!(
             format_date_range(
@@ -394,6 +431,8 @@ mod tests {
     fn test_sync_status_data_serialization() {
         let data = SyncStatusData {
             authenticated: true,
+            provider: Some(Provider::Dropbox),
+            remote_error: None,
             last_push_time: Some(1737973800),
             last_pull_time: None,
             local: None,

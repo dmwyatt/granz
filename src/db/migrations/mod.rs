@@ -102,7 +102,7 @@ fn convert_journal_mode(conn: &Connection, db_path: &Path) {
     }
 
     // The conversion rewrites the file header, which changes the content hash
-    // Dropbox sync identifies the local database by. Capture the record's view
+    // remote sync identifies the local database by. Capture the record's view
     // of the file first, so it can follow the file rather than report a
     // conflict over a change the user did not make.
     let record = SyncedDatabase::capture(db_path);
@@ -111,7 +111,7 @@ fn convert_journal_mode(conn: &Connection, db_path: &Path) {
         Ok(true) => {
             if let Err(e) = record.follow(db_path) {
                 eprintln!(
-                    "[grans] Warning: the database moved to write-ahead logging but the Dropbox \
+                    "[grans] Warning: the database moved to write-ahead logging but the remote \
                      sync record could not be updated ({:#}). A pull may report a conflict.",
                     e
                 );
