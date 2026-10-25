@@ -1,8 +1,8 @@
 //! Rows for statistics tests. Each builder sets exactly what its arguments
 //! name; anything else a test needs it sets on the returned row.
 
-use super::transcript::Session;
-use super::{Invitee, MeetingRecord, MeetingRow, TranscriptFacts, calendar::Rsvp};
+use super::transcript::{Session, VoiceRow};
+use super::{Invitee, MeetingRecord, MeetingRow, TranscriptFacts, Voice, calendar::Rsvp};
 
 /// A meeting with one session of talk from `first_word` to `last_word`,
 /// created at its first word, with no voices recorded.
@@ -51,4 +51,25 @@ pub fn invitee(email: &str, response: Option<Rsvp>) -> Invitee {
         response,
         organizer: false,
     }
+}
+
+/// One voice's line, with `chars` of talk in one utterance and nothing
+/// binned by minute. Its first and last word are placeholders.
+pub fn voice(voice: Voice, chars: u64) -> VoiceRow {
+    VoiceRow {
+        voice,
+        utterances: 1,
+        chars,
+        questions: 0,
+        first_word: Default::default(),
+        last_word: Default::default(),
+        chars_by_minute: vec![],
+    }
+}
+
+/// `row` with its transcript's voices replaced. The row must have a
+/// transcript.
+pub fn with_voices(mut row: MeetingRow, voices: Vec<VoiceRow>) -> MeetingRow {
+    row.transcript.as_mut().expect("a transcript").voices = voices;
+    row
 }
