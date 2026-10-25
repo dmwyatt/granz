@@ -27,6 +27,7 @@ pub fn spoken_in(sessions: &[(&str, &str)]) -> MeetingRow {
         sessions,
         handoffs: 0,
         voices: vec![],
+        turns: vec![],
     });
     row
 }
