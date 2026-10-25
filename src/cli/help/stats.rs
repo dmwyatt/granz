@@ -147,4 +147,40 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats people",
+        examples: &[
+            Example {
+                command: "grans stats people",
+                about: "Who you meet with most, and your one-on-ones with each",
+            },
+            Example {
+                command: "grans stats people --date this-month --limit 5",
+                about: "This month's five most frequent invitees",
+            },
+            Example {
+                command: "grans stats people --json",
+                about: "Everything, including who is invited together",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "A person is an invitee's email address. Meetings with someone are",
+                    "meetings they were invited to and did not decline; an invitation does",
+                    "not say whether they came. A one-on-one is a meeting with exactly one",
+                    "such invitee, so everyone else's audio is that person even in meetings",
+                    "from before Granola named speakers.",
+                    "",
+                    "Then: who organized your meetings, invitees by email domain and how",
+                    "many meetings included someone outside yours, how you answered the",
+                    "invitations of meetings you recorded, and who is most often invited",
+                    "together, counting meetings of up to 10 invitees.",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
+    },
 ];

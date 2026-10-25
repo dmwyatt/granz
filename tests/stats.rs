@@ -244,3 +244,21 @@ fn series_rolls_up_a_recurring_meeting() {
         (&json!("Robin / me"), &json!(2), &json!(0.75), &json!(1.0))
     );
 }
+
+#[test]
+fn people_ledger_counts_one_on_ones() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["people"]);
+
+    let robin = report["people"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["email"] == "robin@example.com")
+        .unwrap();
+    assert_eq!(
+        (&robin["name"], &robin["meetings"], &robin["one_on_ones"]),
+        (&json!("Robin Diaz"), &json!(1), &json!(1))
+    );
+}
