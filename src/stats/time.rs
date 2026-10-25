@@ -68,12 +68,12 @@ pub struct SizeMix {
 
 impl SizeMix {
     fn add(&mut self, invited: usize) {
-        let bucket = match invited {
+        let bucket = match size_bucket(invited) {
             0 => &mut self.none,
             1 => &mut self.one,
             2 => &mut self.two,
-            3..=5 => &mut self.three_to_five,
-            6..=10 => &mut self.six_to_ten,
+            3 => &mut self.three_to_five,
+            4 => &mut self.six_to_ten,
             _ => &mut self.eleven_plus,
         };
         *bucket += 1;
@@ -92,6 +92,16 @@ impl SizeMix {
 }
 
 pub const SIZE_LABELS: [&str; 6] = ["none", "1", "2", "3-5", "6-10", "11+"];
+
+/// The index into [`SIZE_LABELS`] for a meeting with `invited` invitees.
+pub fn size_bucket(invited: usize) -> usize {
+    match invited {
+        0..=2 => invited,
+        3..=5 => 3,
+        6..=10 => 4,
+        _ => 5,
+    }
+}
 
 /// One week or month.
 #[derive(Debug, Clone, PartialEq, Serialize)]

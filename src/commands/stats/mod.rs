@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::Connection;
 
+mod conversation;
 mod load;
 mod people;
 mod recurring;
@@ -69,6 +70,14 @@ pub fn run(
                 println!("{}", to_json(&report));
             } else {
                 people::print(&report, *limit, &ctx.tz);
+            }
+        }
+        Some(StatsAction::Talk) => {
+            let report = crate::stats::talk::report(&rows, &ctx.tz);
+            if json {
+                println!("{}", to_json(&report));
+            } else {
+                conversation::print(&report, &ctx.tz);
             }
         }
     }

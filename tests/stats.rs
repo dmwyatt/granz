@@ -262,3 +262,16 @@ fn people_ledger_counts_one_on_ones() {
         (&json!("Robin Diaz"), &json!(1), &json!(1))
     );
 }
+
+#[test]
+fn talk_reports_my_share_and_questions() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["talk"]);
+
+    let overall = &report["overall"];
+    assert_eq!(
+        (&overall["meetings"], &overall["my_question_rate"]),
+        (&json!(2), &json!(0.3333333333333333))
+    );
+}
