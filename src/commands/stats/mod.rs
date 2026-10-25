@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::Connection;
 
+mod load;
 mod summary;
 
 use crate::cli::args::{StatsAction, StatsPeriod};
@@ -15,7 +16,7 @@ use crate::output::json::to_json;
 use crate::query::dates::{DateRange, build_date_range};
 use crate::stats::overview::overview;
 use crate::stats::page::{self, Payload};
-use crate::stats::{MeetingRow, summarize};
+use crate::stats::{MeetingRow, summarize, time};
 
 pub fn run(
     conn: &Connection,
@@ -38,6 +39,14 @@ pub fn run(
         None => summary::print_overview(&overview(&rows), &ctx.tz),
         Some(StatsAction::Meetings) if json => println!("{}", to_json(&rows)),
         Some(StatsAction::Meetings) => summary::print_meetings(&rows, &ctx.tz),
+        Some(StatsAction::Time { by }) => {
+            let report = time::report(&rows, *by, &ctx.tz);
+            if json {
+                println!("{}", to_json(&report));
+            } else {
+                load::print(&report, *by);
+            }
+        }
     }
     Ok(())
 }

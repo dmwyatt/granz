@@ -81,4 +81,37 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats time",
+        examples: &[
+            Example {
+                command: "grans stats time",
+                about: "Hours of meetings per month, and how they break up the day",
+            },
+            Example {
+                command: "grans stats time --by week --date last-month",
+                about: "The same per week, for last month",
+            },
+            Example {
+                command: "grans stats time --json",
+                about: "Every day's numbers too, for your own analysis",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "For each period: meetings, hours, and days with meetings; the typical",
+                    "first and last spoken word of a meeting day; the typical longest gap",
+                    "between meetings from 09:00 to 17:00; and the most meetings in a row",
+                    "(no more than 10 minutes apart) on one day. Then meeting sizes, by",
+                    "invitees who did not decline, and hours by weekday and hour of day.",
+                    "",
+                    "Days and hours are in your time zone, or UTC with --utc.",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
+    },
 ];

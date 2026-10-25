@@ -196,3 +196,33 @@ fn html_does_not_combine_with_a_subcommand() {
         .assert()
         .failure();
 }
+
+#[test]
+fn time_reports_meetings_and_hours_per_month() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["time", "--utc"]);
+
+    let months: Vec<(&Value, &Value, &Value)> = report["periods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (&p["start"], &p["meetings"], &p["hours"]))
+        .collect();
+    assert_eq!(
+        months,
+        vec![
+            (&json!("2026-03-01"), &json!(2), &json!(0.5)),
+            (&json!("2026-08-01"), &json!(1), &json!(0.25)),
+        ]
+    );
+}
+
+#[test]
+fn time_by_week_starts_weeks_on_monday() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["time", "--by", "week", "--utc"]);
+
+    assert_eq!(report["periods"][0]["start"], "2026-03-02");
+}
