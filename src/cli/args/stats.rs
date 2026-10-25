@@ -81,4 +81,13 @@ pub enum StatsAction {
     /// meetings that repeat themselves, overlapping series, and outliers
     #[command(after_long_help = help::for_command("stats topics"))]
     Topics,
+
+    /// Notes: action items in Granola's summaries (and the ones naming you),
+    /// which summary templates wrote them, and how often you typed notes
+    #[command(after_long_help = help::for_command("stats notes"))]
+    Notes {
+        /// How many of the action items naming you to list (0 for all)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }

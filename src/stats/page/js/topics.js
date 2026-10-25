@@ -70,7 +70,7 @@ function topicsOverTime(body, embedded) {
     plot: (width) => Plot.plot({
       ...plotDefaults(width),
       height: 260,
-      x: { type: "band", label: null, tickFormat: (d) => d3.timeFormat(d.getMonth() === 0 ? "%b %Y" : "%b")(d) },
+      x: { type: "band", label: null, tickFormat: monthTick },
       y: { label: "meetings" },
       color: { ...colors, legend: true },
       marks: [

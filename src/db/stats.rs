@@ -13,6 +13,7 @@ use crate::embed::store::blob_to_vector;
 use crate::models::DocumentPeople;
 use crate::query::dates::DateRange;
 use crate::stats::calendar::CalendarInvite;
+use crate::stats::notes::PanelRecord;
 use crate::stats::{MeetingRecord, Utterance, Voice};
 
 /// Every meeting created in `range`, oldest first. Deleted meetings are
@@ -20,7 +21,8 @@ use crate::stats::{MeetingRecord, Utterance, Voice};
 pub fn meeting_records(conn: &Connection, range: Option<&DateRange>) -> Result<Vec<MeetingRecord>> {
     let (filter, params) = range_filter(range);
     let sql = format!(
-        "SELECT id, title, created_at, people_json, google_calendar_event_json
+        "SELECT id, title, created_at, people_json, google_calendar_event_json,
+                coalesce(length(trim(notes_plain, ' ' || char(9, 10, 13))), 0)
          FROM documents d
          WHERE deleted_at IS NULL{filter}
          ORDER BY created_at, id"
@@ -33,14 +35,50 @@ pub fn meeting_records(conn: &Connection, range: Option<&DateRange>) -> Result<V
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
+            row.get::<_, u32>(5)?,
         ))
     })?;
 
+    let mut panels = panels(conn, range)?;
     rows.map(|row| {
-        let (id, title, created_at, people_json, calendar_json) = row?;
-        decode_record(id, title, created_at, people_json, calendar_json)
+        let (id, title, created_at, people_json, calendar_json, typed_note_chars) = row?;
+        let mut record = decode_record(id, title, created_at, people_json, calendar_json)?;
+        record.typed_note_chars = typed_note_chars;
+        record.panels = panels.remove(&record.id).unwrap_or_default();
+        Ok(record)
     })
     .collect()
+}
+
+/// Each meeting's AI summaries that are not deleted, oldest first.
+fn panels(
+    conn: &Connection,
+    range: Option<&DateRange>,
+) -> Result<HashMap<String, Vec<PanelRecord>>> {
+    let (filter, params) = range_filter(range);
+    let sql = format!(
+        "SELECT p.document_id, p.template_slug, coalesce(p.content_markdown, '')
+         FROM panels p
+         JOIN documents d ON d.id = p.document_id
+         WHERE p.deleted_at IS NULL AND d.deleted_at IS NULL{filter}
+         ORDER BY p.created_at, p.id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs(&params).as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PanelRecord {
+                template_slug: row.get(1)?,
+                markdown: row.get(2)?,
+            },
+        ))
+    })?;
+    let mut by_meeting: HashMap<String, Vec<PanelRecord>> = HashMap::new();
+    for row in rows {
+        let (id, panel) = row?;
+        by_meeting.entry(id).or_default().push(panel);
+    }
+    Ok(by_meeting)
 }
 
 fn decode_record(
@@ -66,6 +104,8 @@ fn decode_record(
         title,
         people,
         calendar,
+        typed_note_chars: 0,
+        panels: vec![],
     })
 }
 
@@ -263,6 +303,25 @@ mod tests {
                 ]
             }
         })
+    }
+
+    #[test]
+    fn notes_of_only_blank_lines_are_not_typed_notes() {
+        let conn = build_test_db(&json!({
+            "documents": {
+                "blank": {"id": "blank", "title": "T", "created_at": "2026-03-02T16:00:00Z",
+                          "notes_plain": "\n \r\n\t"},
+                "typed": {"id": "typed", "title": "T", "created_at": "2026-03-03T16:00:00Z",
+                          "notes_plain": "\n Ship it \n"}
+            }
+        }));
+
+        let chars: Vec<_> = meeting_records(&conn, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.typed_note_chars)
+            .collect();
+        assert_eq!(chars, vec![0, 7]);
     }
 
     #[test]

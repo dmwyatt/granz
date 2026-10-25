@@ -320,4 +320,32 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats notes",
+        examples: &[
+            Example {
+                command: "grans stats notes",
+                about: "Action items per series, the ones naming you, and your typed notes",
+            },
+            Example {
+                command: "grans stats notes --date this-month --limit 0",
+                about: "Every action item naming you this month",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "Action items are the bullets under \"Next steps\" or \"Action items\"",
+                    "headings in Granola's AI notes. One names you when your first name, as",
+                    "your notes give it, is in the item or the name it is listed under.",
+                    "",
+                    "Per month: meetings, how many you typed notes in, action items, and",
+                    "the summary templates that wrote the AI notes. Template names date",
+                    "Granola's changes to how it summarizes.",
+                ],
+            },
+            DATES,
+        ],
+    },
 ];

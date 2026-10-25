@@ -348,7 +348,7 @@ function sizeMix(body, meetings) {
     plot: (width) => rows.length ? Plot.plot({
       ...plotDefaults(width),
       height: 260,
-      x: { type: "band", label: null, tickFormat: (d) => d3.timeFormat(d.getMonth() === 0 ? "%b %Y" : "%b")(d) },
+      x: { type: "band", label: null, tickFormat: monthTick },
       y: { label: "meetings" },
       color: { domain: SIZE_BUCKETS, range: ramp, legend: true, label: "invitees" },
       marks: [
