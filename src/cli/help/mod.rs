@@ -12,6 +12,7 @@ mod browse;
 mod meetings;
 mod overview;
 mod setup;
+mod stats;
 mod sync;
 
 #[cfg(test)]
@@ -152,6 +153,7 @@ fn commands() -> impl Iterator<Item = &'static CommandHelp> {
         meetings::COMMANDS,
         sync::COMMANDS,
         setup::COMMANDS,
+        stats::COMMANDS,
         browse::COMMANDS,
         admin::COMMANDS,
     ]
