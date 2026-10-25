@@ -54,8 +54,8 @@ pub fn invitee(email: &str, response: Option<Rsvp>) -> Invitee {
     }
 }
 
-/// One voice's line, with `chars` of talk in one utterance and nothing
-/// binned by minute. Its first and last word are placeholders.
+/// One voice's line, with `chars` of talk in one utterance (so also its
+/// longest run) and nothing binned by minute. Its first and last word are placeholders.
 pub fn voice(voice: Voice, chars: u64) -> VoiceRow {
     VoiceRow {
         voice,
@@ -65,6 +65,7 @@ pub fn voice(voice: Voice, chars: u64) -> VoiceRow {
         first_word: Default::default(),
         last_word: Default::default(),
         chars_by_minute: vec![],
+        longest_run: chars,
     }
 }
 
