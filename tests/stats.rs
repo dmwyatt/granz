@@ -4,7 +4,8 @@ use common::TestEnv;
 use serde_json::{Value, json};
 
 /// A weekly one-on-one with Robin, twice, and a planning meeting Sam
-/// declined. Speaker names appear only in the later one-on-one.
+/// declined. Speaker names appear only in the later one-on-one, and a
+/// calendar edit between the two gave the recurrence a new id.
 fn team_state() -> String {
     json!({
         "documents": {
@@ -32,7 +33,7 @@ fn team_state() -> String {
                 "id": "one-on-one-2",
                 "title": "Robin / me",
                 "created_at": "2026-08-03T16:00:00.000Z",
-                "google_calendar_event": {"recurringEventId": "weekly-robin"}
+                "google_calendar_event": {"recurringEventId": "weekly-robin_R20260801"}
             },
             "planning": {
                 "id": "planning",
@@ -109,13 +110,13 @@ fn meeting_row_carries_schedule_series_and_invitee_responses() {
 
     assert_eq!(
         (
-            &rows[0]["series"],
+            (&rows[0]["series"], &rows[0]["recurring_event_id"]),
             &rows[0]["scheduled"],
             &rows[0]["organized_by_me"],
             &rows[0]["invitees"]
         ),
         (
-            &json!("weekly-robin"),
+            (&json!("robin / me"), &json!("weekly-robin")),
             &json!({"start": "2026-03-02T16:00:00Z", "end": "2026-03-02T16:30:00Z"}),
             &json!(true),
             &json!([{"email": "robin@example.com", "name": "Robin Diaz",
@@ -228,7 +229,7 @@ fn time_by_week_starts_weeks_on_monday() {
 }
 
 #[test]
-fn series_rolls_up_a_recurring_meeting() {
+fn recurrences_split_by_a_calendar_edit_are_one_series() {
     let env = TestEnv::with_state(&team_state());
 
     let report = stats_json(&env, &["series"]);

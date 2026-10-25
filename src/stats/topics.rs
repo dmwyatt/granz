@@ -221,12 +221,7 @@ fn twins(embedded: &[(&MeetingRow, Vec<f32>)]) -> Vec<Twin> {
         .collect();
     let mut pairs: Vec<Twin> = Vec::new();
     for (i, a) in centroids.iter().enumerate() {
-        // Same-titled series are one meeting split by a calendar edit, not
-        // two meetings covering the same ground.
-        for b in centroids[i + 1..]
-            .iter()
-            .filter(|b| !b.1.eq_ignore_ascii_case(a.1))
-        {
+        for b in &centroids[i + 1..] {
             pairs.push(Twin {
                 a: a.0.to_string(),
                 a_title: a.1.to_string(),
@@ -522,24 +517,6 @@ mod tests {
 
         let twin = &report(&rows, &v).twins[0];
         assert_eq!((twin.a.as_str(), twin.b.as_str()), ("x", "y"));
-    }
-
-    #[test]
-    fn series_with_the_same_title_are_not_twins() {
-        let mut rows = Vec::new();
-        let mut v = HashMap::new();
-        for (n, series) in ["x", "x", "x", "y", "y", "y"].iter().enumerate() {
-            let id = format!("m{n}");
-            rows.push(meeting(
-                &id,
-                &format!("2026-03-0{}T10:00:00Z", n + 1),
-                Some(series),
-                "Standup",
-            ));
-            v.insert(id, vec![1.0, 0.0, 0.0]);
-        }
-
-        assert_eq!(report(&rows, &v).twins, vec![]);
     }
 
     #[test]
