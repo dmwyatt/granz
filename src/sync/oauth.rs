@@ -1,30 +1,14 @@
-//! OAuth PKCE flow for Dropbox authentication.
+//! The token endpoint half of OAuth 2.0 (RFC 6749), which every remote shares.
 //!
-//! Implements RFC 7636 (PKCE) for secure authorization without embedding secrets.
+//! Exchanging an authorization code and refreshing an access token are both a
+//! form POST that answers with tokens or with an `error` and its description.
+//! Only the parameters differ between services.
 
 use serde::Deserialize;
 
 use super::{SyncError, SyncResult};
 
-/// Dropbox App Key (public, safe to embed)
-const CLIENT_ID: &str = "bqkd8myq8v5w7xu";
-
-/// Dropbox OAuth endpoints
-const AUTHORIZE_URL: &str = "https://www.dropbox.com/oauth2/authorize";
-const TOKEN_URL: &str = "https://api.dropboxapi.com/oauth2/token";
-
-/// Entropy for the PKCE verifier, in bytes.
-pub const PKCE_ENTROPY_BYTES: usize = 64;
-
-/// Build the authorization URL for the user to visit.
-pub fn build_auth_url(challenge: &str) -> String {
-    format!(
-        "{}?client_id={}&response_type=code&code_challenge={}&code_challenge_method=S256&token_access_type=offline",
-        AUTHORIZE_URL, CLIENT_ID, challenge
-    )
-}
-
-/// Response from token endpoint.
+/// A token endpoint's answer to a successful request.
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 pub struct TokenResponse {
@@ -32,29 +16,25 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
     pub token_type: String,
+    /// The scopes actually granted, space-separated, when the service reports
+    /// them. A user can grant fewer than were asked for.
+    pub scope: Option<String>,
 }
 
-/// Error response from token endpoint.
+/// A token endpoint's answer to a rejected request.
 #[derive(Deserialize, Debug)]
 struct TokenError {
     error: String,
     error_description: Option<String>,
 }
 
-/// Exchange authorization code for tokens.
-pub fn exchange_code(code: &str, verifier: &str) -> SyncResult<TokenResponse> {
+/// POST `params` to a token endpoint and return the tokens it grants.
+pub fn request_tokens(url: &str, params: &[(&str, &str)]) -> SyncResult<TokenResponse> {
     let client = reqwest::blocking::Client::new();
 
-    let params = [
-        ("code", code),
-        ("grant_type", "authorization_code"),
-        ("code_verifier", verifier),
-        ("client_id", CLIENT_ID),
-    ];
-
     let response = client
-        .post(TOKEN_URL)
-        .form(&params)
+        .post(url)
+        .form(params)
         .send()
         .map_err(|e| SyncError::OAuth(format!("request failed: {}", e)))?;
 
@@ -64,47 +44,22 @@ pub fn exchange_code(code: &str, verifier: &str) -> SyncResult<TokenResponse> {
         .map_err(|e| SyncError::OAuth(format!("failed to read response: {}", e)))?;
 
     if !status.is_success() {
-        // Try to parse error response
-        if let Ok(err) = serde_json::from_str::<TokenError>(&body) {
-            let msg = err.error_description.unwrap_or_else(|| err.error.clone());
-            return Err(SyncError::OAuth(msg));
-        }
-        return Err(SyncError::OAuth(format!("HTTP {}: {}", status, body)));
+        return Err(parse_rejection(status, &body));
     }
 
     serde_json::from_str(&body).map_err(|e| SyncError::OAuth(format!("parse response: {}", e)))
 }
 
-/// Refresh an expired access token.
-pub fn refresh_access_token(refresh_token: &str) -> SyncResult<TokenResponse> {
-    let client = reqwest::blocking::Client::new();
-
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", CLIENT_ID),
-    ];
-
-    let response = client
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .map_err(|e| SyncError::OAuth(format!("refresh request failed: {}", e)))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| SyncError::OAuth(format!("failed to read response: {}", e)))?;
-
-    if !status.is_success() {
-        if let Ok(err) = serde_json::from_str::<TokenError>(&body) {
-            let msg = err.error_description.unwrap_or_else(|| err.error.clone());
-            return Err(SyncError::OAuth(msg));
-        }
-        return Err(SyncError::OAuth(format!("HTTP {}: {}", status, body)));
+/// Describe a rejected token request, keeping the service's error code so a
+/// caller can explain the cases it knows.
+fn parse_rejection(status: reqwest::StatusCode, body: &str) -> SyncError {
+    match serde_json::from_str::<TokenError>(body) {
+        Ok(err) => SyncError::OAuthRejected {
+            message: err.error_description.unwrap_or_else(|| err.error.clone()),
+            code: err.error,
+        },
+        Err(_) => SyncError::OAuth(format!("HTTP {}: {}", status, body)),
     }
-
-    serde_json::from_str(&body).map_err(|e| SyncError::OAuth(format!("parse response: {}", e)))
 }
 
 #[cfg(test)]
@@ -112,15 +67,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_auth_url_format() {
-        let challenge = "test_challenge_123";
-        let url = build_auth_url(challenge);
+    fn a_rejection_keeps_the_error_code_and_shows_the_description() {
+        let body = r#"{"error": "invalid_grant", "error_description": "Token has been expired or revoked."}"#;
 
-        assert!(url.starts_with("https://www.dropbox.com/oauth2/authorize"));
-        assert!(url.contains("client_id=bqkd8myq8v5w7xu"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains(&format!("code_challenge={}", challenge)));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("token_access_type=offline"));
+        let err = parse_rejection(reqwest::StatusCode::BAD_REQUEST, body);
+
+        assert!(
+            matches!(
+                &err,
+                SyncError::OAuthRejected { code, message }
+                    if code == "invalid_grant" && message == "Token has been expired or revoked."
+            ),
+            "{:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn a_rejection_without_a_description_shows_the_code() {
+        let err = parse_rejection(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error": "invalid_client"}"#,
+        );
+
+        assert_eq!(err.to_string(), "OAuth error: invalid_client");
+    }
+
+    #[test]
+    fn a_rejection_that_is_not_json_shows_the_status_and_body() {
+        let err = parse_rejection(reqwest::StatusCode::BAD_GATEWAY, "upstream down");
+
+        assert_eq!(
+            err.to_string(),
+            "OAuth error: HTTP 502 Bad Gateway: upstream down"
+        );
     }
 }

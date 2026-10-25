@@ -24,8 +24,9 @@ pub enum TransferDecision {
 
 /// Decide whether `source` may overwrite `target`.
 ///
-/// Hashes are Dropbox content hashes. `synced` is the content both sides held
-/// at the last successful sync, absent if they have never synced.
+/// Hashes are content hashes in the remote's algorithm. `synced` is the content
+/// both sides held at the last successful sync, absent if they have never
+/// synced.
 pub fn decide(source: &str, target: Option<&str>, synced: Option<&str>) -> TransferDecision {
     let Some(target) = target else {
         // Nothing on the far side to lose.

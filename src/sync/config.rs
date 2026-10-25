@@ -6,12 +6,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use super::google_drive::oauth::GoogleClient;
+use super::remote::Provider;
 use super::{SyncError, SyncResult};
 use crate::platform::data_dir;
 
-/// Configuration for Dropbox sync.
+/// The sync record: which remote holds the shared copy, the authorization to
+/// reach it, and what both copies held at the last transfer.
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct SyncConfig {
+    /// The service holding the shared copy.
+    ///
+    /// Absent from records written before grans supported more than Dropbox;
+    /// [`SyncConfig::provider`] reads those as Dropbox.
+    #[serde(default)]
+    pub provider: Option<Provider>,
+
     /// OAuth refresh token (long-lived)
     pub refresh_token: Option<String>,
 
@@ -21,24 +31,49 @@ pub struct SyncConfig {
     /// Unix timestamp of last successful pull
     pub last_pull_time: Option<u64>,
 
-    /// Dropbox content hash both copies held at the last successful sync.
+    /// Content hash both copies held at the last successful sync, in the
+    /// provider's algorithm.
     ///
-    /// The reference point for deciding whether the copy on Dropbox has
-    /// changed. Absent until the first push or pull completes under a version
-    /// that records it.
+    /// The reference point for deciding whether the remote copy has changed.
+    /// Absent until the first push or pull completes under a version that
+    /// records it.
     pub last_synced_hash: Option<String>,
 
-    /// Dropbox content hash the local database file held when it last agreed
-    /// with Dropbox.
+    /// Content hash the local database file held when it last agreed with the
+    /// remote copy.
     ///
     /// Normally the same as `last_synced_hash`. They differ when something
     /// rewrites the local file without changing what it holds, which is what
     /// the one-time journal mode conversion does: two header bytes change, so
-    /// the file no longer hashes to what Dropbox has even though the two hold
+    /// the file no longer hashes to what the remote has even though the two hold
     /// the same meetings. Keeping the two references apart lets a pull see an
     /// untouched local database and a push see an untouched remote one.
     #[serde(default)]
     pub last_local_hash: Option<String>,
+
+    /// The OAuth client the user registered for Google Drive.
+    #[serde(default)]
+    pub google_client: Option<GoogleClient>,
+}
+
+/// What authorizing grans with a remote yields, for the sync record to keep.
+pub enum Authorization {
+    Dropbox {
+        refresh_token: String,
+    },
+    GoogleDrive {
+        client: GoogleClient,
+        refresh_token: String,
+    },
+}
+
+impl Authorization {
+    pub fn provider(&self) -> Provider {
+        match self {
+            Self::Dropbox { .. } => Provider::Dropbox,
+            Self::GoogleDrive { .. } => Provider::GoogleDrive,
+        }
+    }
 }
 
 impl SyncConfig {
@@ -86,7 +121,41 @@ impl SyncConfig {
         Ok(())
     }
 
-    /// What the local database file held when it last agreed with Dropbox.
+    /// The service holding the shared copy.
+    pub fn provider(&self) -> Provider {
+        self.provider.unwrap_or(Provider::Dropbox)
+    }
+
+    /// The record after authorizing grans with a remote.
+    ///
+    /// Re-authorizing the same remote keeps what the record knows about the
+    /// copy there. Switching remotes starts afresh, since hashes recorded
+    /// against one service say nothing about the copy on another.
+    pub fn reconnected(self, authorization: Authorization) -> Self {
+        let provider = authorization.provider();
+        let kept = if self.provider() == provider {
+            self
+        } else {
+            Self::default()
+        };
+
+        let (refresh_token, google_client) = match authorization {
+            Authorization::Dropbox { refresh_token } => (refresh_token, None),
+            Authorization::GoogleDrive {
+                client,
+                refresh_token,
+            } => (refresh_token, Some(client)),
+        };
+
+        Self {
+            provider: Some(provider),
+            refresh_token: Some(refresh_token),
+            google_client,
+            ..kept
+        }
+    }
+
+    /// What the local database file held when it last agreed with the remote.
     ///
     /// Falls back to the shared hash for a record written before the two were
     /// tracked separately.
@@ -110,6 +179,7 @@ impl SyncConfig {
     /// Clear all authentication data.
     pub fn clear_auth(&mut self) {
         self.refresh_token = None;
+        self.google_client = None;
     }
 }
 
@@ -144,16 +214,19 @@ mod tests {
     #[test]
     fn test_serialize_deserialize() {
         let config = SyncConfig {
+            provider: Some(Provider::Dropbox),
             refresh_token: Some("test-token".to_string()),
             last_push_time: Some(1234567890),
             last_pull_time: Some(1234567891),
             last_synced_hash: Some("abc123".to_string()),
             last_local_hash: Some("abc123".to_string()),
+            google_client: None,
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
         let deserialized: SyncConfig = toml::from_str(&serialized).unwrap();
 
+        assert_eq!(deserialized.provider, config.provider);
         assert_eq!(deserialized.refresh_token, config.refresh_token);
         assert_eq!(deserialized.last_push_time, config.last_push_time);
         assert_eq!(deserialized.last_pull_time, config.last_pull_time);
@@ -178,11 +251,13 @@ mod tests {
             let path = dir.path().join("sync.toml");
 
             let config = SyncConfig {
+                provider: None,
                 refresh_token: Some("my-token".to_string()),
                 last_push_time: Some(100),
                 last_pull_time: None,
                 last_synced_hash: None,
                 last_local_hash: None,
+                google_client: None,
             };
 
             let content = toml::to_string_pretty(&config).unwrap();
@@ -194,5 +269,103 @@ mod tests {
             assert_eq!(loaded.last_push_time, Some(100));
             assert!(loaded.last_pull_time.is_none());
         });
+    }
+
+    /// Records written before grans supported more than one remote name none,
+    /// and every one of them was written for Dropbox.
+    #[test]
+    fn a_record_that_names_no_provider_is_read_as_dropbox() {
+        let legacy = "refresh_token = \"token\"\nlast_synced_hash = \"abc\"\n";
+
+        let config: SyncConfig = toml::from_str(legacy).unwrap();
+
+        assert_eq!(config.provider(), Provider::Dropbox);
+    }
+
+    #[test]
+    fn reauthorizing_the_same_remote_keeps_the_sync_record() {
+        let config = SyncConfig {
+            provider: Some(Provider::Dropbox),
+            refresh_token: Some("old".to_string()),
+            last_synced_hash: Some("abc".to_string()),
+            ..Default::default()
+        };
+
+        let config = config.reconnected(Authorization::Dropbox {
+            refresh_token: "new".to_string(),
+        });
+
+        assert_eq!(
+            (
+                config.refresh_token.as_deref(),
+                config.last_synced_hash.as_deref()
+            ),
+            (Some("new"), Some("abc"))
+        );
+    }
+
+    fn google_client() -> GoogleClient {
+        GoogleClient {
+            client_id: "123-abc.apps.googleusercontent.com".to_string(),
+            client_secret: Some("not-really-secret".to_string()),
+        }
+    }
+
+    #[test]
+    fn switching_remotes_forgets_the_sync_record() {
+        let config = SyncConfig {
+            provider: Some(Provider::Dropbox),
+            refresh_token: Some("dropbox".to_string()),
+            last_synced_hash: Some("hash of the copy on Dropbox".to_string()),
+            ..Default::default()
+        };
+
+        let config = config.reconnected(Authorization::GoogleDrive {
+            client: google_client(),
+            refresh_token: "google".to_string(),
+        });
+
+        assert_eq!(
+            (config.provider(), config.last_synced_hash),
+            (Provider::GoogleDrive, None)
+        );
+    }
+
+    #[test]
+    fn switching_back_to_dropbox_drops_the_google_client() {
+        let config = SyncConfig::default().reconnected(Authorization::GoogleDrive {
+            client: google_client(),
+            refresh_token: "google".to_string(),
+        });
+
+        let config = config.reconnected(Authorization::Dropbox {
+            refresh_token: "dropbox".to_string(),
+        });
+
+        assert_eq!(config.google_client, None);
+    }
+
+    /// Every push and pull rebuilds the Drive connection from the saved
+    /// record, client included.
+    #[test]
+    fn a_google_drive_record_survives_a_round_trip_through_toml() {
+        let config = SyncConfig {
+            last_push_time: Some(100),
+            ..SyncConfig::default().reconnected(Authorization::GoogleDrive {
+                client: google_client(),
+                refresh_token: "google".to_string(),
+            })
+        };
+
+        let loaded: SyncConfig = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        assert_eq!(
+            (
+                loaded.provider(),
+                loaded.google_client,
+                loaded.last_push_time
+            ),
+            (Provider::GoogleDrive, Some(google_client()), Some(100))
+        );
     }
 }

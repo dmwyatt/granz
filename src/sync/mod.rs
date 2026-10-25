@@ -1,28 +1,39 @@
-//! Dropbox sync module for synchronizing SQLite index and embeddings databases.
+//! Sharing the database between machines through a remote service.
 
 pub mod config;
 pub mod content_hash;
 pub mod dropbox;
+pub mod google_drive;
 pub mod journal;
 pub mod metadata;
 pub mod oauth;
 pub mod reconcile;
+pub mod remote;
 pub mod transfer;
 
 use thiserror::Error;
 
+use remote::Provider;
+
 #[derive(Error, Debug)]
 pub enum SyncError {
-    #[error("Not authenticated. Run 'grans dropbox init' first.")]
+    #[error(
+        "No remote is set up. Run 'grans remote init dropbox' or \
+         'grans remote init google-drive <client-file>' first."
+    )]
     NotAuthenticated,
 
     #[error("OAuth error: {0}")]
     OAuth(String),
 
-    #[error("Dropbox API error: {0}")]
-    DropboxApi(String),
+    /// The token endpoint refused the request, with the service's error code.
+    #[error("OAuth error: {message}")]
+    OAuthRejected { code: String, message: String },
 
-    #[error("Dropbox {operation} failed: {hint}")]
+    #[error("{provider} API error: {message}")]
+    Api { provider: Provider, message: String },
+
+    #[error("{operation} failed: {hint}")]
     Transport {
         operation: String,
         hint: String,
@@ -31,53 +42,55 @@ pub enum SyncError {
     },
 
     #[error(
-        "Incomplete transfer: {what} delivered {actual} bytes but Dropbox reported {expected}. \
+        "Incomplete transfer: {what} delivered {actual} bytes but {provider} reported {expected}. \
          The local file was left untouched; retry the transfer."
     )]
     IncompleteTransfer {
+        provider: Provider,
         what: String,
         actual: u64,
         expected: u64,
     },
 
     #[error(
-        "Corrupt transfer: the {what} received does not match the content hash Dropbox reported \
-         (expected {expected}, computed {actual}). The local file was left untouched; \
+        "Corrupt transfer: the {what} received does not match the content hash {provider} \
+         reported (expected {expected}, computed {actual}). The local file was left untouched; \
          retry the transfer."
     )]
     ContentMismatch {
+        provider: Provider,
         what: String,
         expected: String,
         actual: String,
     },
 
     #[error(
-        "Dropbox reported no content hash for {path}, so the download could not be verified \
+        "{provider} reported no content hash for {path}, so the transfer could not be verified \
          against the stored file."
     )]
-    MissingContentHash { path: String },
+    MissingContentHash { provider: Provider, path: String },
 
     #[error("Config error: {0}")]
     Config(String),
 
     #[error(
-        "The {what} on Dropbox has changed since this machine last synced, so pushing would \
-         discard those changes. Run 'grans dropbox pull' first, or push --force to overwrite."
+        "The {what} on {provider} has changed since this machine last synced, so pushing would \
+         discard those changes. Run 'grans remote pull' first, or push --force to overwrite."
     )]
-    ConflictRemoteChanged { what: String },
+    ConflictRemoteChanged { provider: Provider, what: String },
 
     #[error(
         "The local {what} has changed since this machine last synced, so pulling would discard \
-         those changes. Run 'grans dropbox push' first, or pull --force to overwrite."
+         those changes. Run 'grans remote push' first, or pull --force to overwrite."
     )]
     ConflictLocalChanged { what: String },
 
     #[error(
-        "The {what} on Dropbox differs from the local copy, and grans has no record of syncing \
-         with it, so neither can be shown to supersede the other. Compare them with \
-         'grans dropbox status', then push --force or pull --force to choose."
+        "The {what} on {provider} differs from the local copy, and grans has no record of \
+         syncing with it, so neither can be shown to supersede the other. Compare them with \
+         'grans remote status', then push --force or pull --force to choose."
     )]
-    ConflictNoSyncRecord { what: String },
+    ConflictNoSyncRecord { provider: Provider, what: String },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

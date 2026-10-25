@@ -62,7 +62,7 @@ grans stores your meeting data in a local SQLite database at:
 - Linux: `~/.local/share/grans/grans.db`
 - Windows: `%APPDATA%/grans/grans.db`
 
-The database runs in SQLite's write-ahead logging mode, so you will see `grans.db-wal` and `grans.db-shm` beside it. They are part of the database: copy or move all three together, or run `grans dropbox push` (which folds the log into the database file first). Deleting them by hand while grans is running loses recent writes.
+The database runs in SQLite's write-ahead logging mode, so you will see `grans.db-wal` and `grans.db-shm` beside it. They are part of the database: copy or move all three together, or run `grans remote push` (which folds the log into the database file first). Deleting them by hand while grans is running loses recent writes.
 
 Data is fetched from the Granola API using `grans sync` and accumulates over time. Unlike Granola's local cache (which only holds recent meetings), grans preserves all your synced data indefinitely.
 
@@ -82,7 +82,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `recent` - Show this week's meetings
 - `today` - Show today's meetings
 - `embed` - Build the embeddings that let search match by meaning
-- `dropbox` - Share the database between machines through Dropbox
+- `remote` - Share the database between machines through Dropbox or Google Drive
 - `info` - Show what the local database holds
 - `skill` - Print a skill that points AI agents at the help
 
@@ -328,7 +328,7 @@ The JSON envelopes differ where the contracts do: grep JSON reports `total_meeti
 
 The semantic half of search uses a local embedding model (`nomic-embed-text-v1.5`) to match by meaning rather than exact keywords. Embeddings are built from transcripts, AI-generated panel sections, and your notes, and are stored in the main database.
 
-A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads, and search skips the embedding model entirely when there are no embeddings to search. On macOS the embedding model is the f16 GGUF of the same weights, run by llama.cpp on Metal; elsewhere it is the ONNX export, run by ONNX Runtime. The two produce interchangeable vectors, so a database embedded on one platform searches correctly on the other, and syncing it via Dropbox to a Mac (or from one) never triggers a re-embed. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results), or when they were built with an outdated chunking strategy. Each warning says to run `grans embed`; searching itself never blocks.
+A `grans search` reads local models and embeddings; `grans grep` never does. The first search downloads the embedding model (~270MB) and, when reranking, the reranker model too (~150MB); both are one-time downloads, and search skips the embedding model entirely when there are no embeddings to search. On macOS the embedding model is the f16 GGUF of the same weights, run by llama.cpp on Metal; elsewhere it is the ONNX export, run by ONNX Runtime. The two produce interchangeable vectors, so a database embedded on one platform searches correctly on the other, and sharing it with `grans remote` to a Mac (or from one) never triggers a re-embed. Search never builds or repairs embeddings: it searches what `grans embed` has built and warns on stderr when the index cannot cover everything, i.e. when data has synced since the last embed (recent meetings may be missing from results), when no embeddings exist yet, when the existing embeddings were built by a different model (both of the latter fall back to keyword-only results), or when they were built with an outdated chunking strategy. Each warning says to run `grans embed`; searching itself never blocks.
 
 When an upgrade changes the embedding model, the next `grans embed` detects the stale embeddings and rebuilds them all. This full rebuild is a one-time cost and can take a while on large databases.
 
@@ -534,9 +534,9 @@ its source. Nothing is lost and no re-sync is needed.
 `admin db info` also lists every Granola account the database has synced from,
 with the email and first-seen date captured when each was recorded.
 
-### Dropbox Sync
+### Sharing the Database Between Machines
 
-Share your grans database across multiple machines via Dropbox.
+Share your grans database across multiple machines through a remote: a copy kept in Dropbox or Google Drive.
 
 **Why use this?** Two operations in grans are slow:
 
@@ -544,7 +544,7 @@ Share your grans database across multiple machines via Dropbox.
 
 2. **Embedding generation** - `grans embed` builds vector embeddings for transcripts, panel sections, and notes, which takes time on CPU.
 
-Once you've done this work on one machine, Dropbox sync lets you share the results instead of repeating it everywhere.
+Once you've done this work on one machine, `grans remote` lets you share the results instead of repeating it everywhere.
 
 **Initial setup (on your primary machine):**
 
@@ -553,21 +553,23 @@ Once you've done this work on one machine, Dropbox sync lets you share the resul
 #    panels, and embeddings (slow first time)
 grans sync --all
 
-# 2. Connect to Dropbox (one-time OAuth)
-grans dropbox init
+# 2. Connect to a remote (one-time OAuth): Dropbox, or Google Drive
+#    with the client file described below
+grans remote init dropbox
+# grans remote init google-drive client_secret.json
 
 # 3. Upload your database
-grans dropbox push
+grans remote push
 ```
 
 **On other machines:**
 
 ```bash
-# 1. Connect to Dropbox
-grans dropbox init
+# 1. Connect to the same remote
+grans remote init dropbox
 
-# 2. Download the databases
-grans dropbox pull
+# 2. Download the database
+grans remote pull
 
 # 3. Queries now work instantly - no need to re-sync or rebuild
 grans search "deployment"
@@ -578,27 +580,43 @@ grans search "deployment"
 ```bash
 # After syncing new data on your primary machine
 grans sync --all
-grans dropbox push
+grans remote push
 
 # On other machines
-grans dropbox pull
+grans remote pull
 ```
 
 **Commands:**
 
 | Command | Description |
 |---------|-------------|
-| `grans dropbox init` | One-time Dropbox authentication |
-| `grans dropbox push` | Upload database to Dropbox |
-| `grans dropbox pull` | Download database from Dropbox |
-| `grans dropbox status` | Show sync status with local vs remote comparison |
-| `grans dropbox logout` | Remove Dropbox authentication |
+| `grans remote init dropbox` | Connect this machine to Dropbox (once per machine) |
+| `grans remote init google-drive <client-file>` | Connect this machine to Google Drive (once per machine) |
+| `grans remote push` | Upload the database to the remote |
+| `grans remote pull` | Download the database from the remote |
+| `grans remote status` | Show sync status with local vs remote comparison |
+| `grans remote logout` | Forget the remote authorization on this machine |
+
+**Google Drive setup:** grans brings no Google app of its own, so you create one for it in your Google account. It takes about ten minutes, once: every machine then uses the file it produces. Sign in to the [Google Cloud console](https://console.cloud.google.com/) with the Google account whose Drive should hold the database.
+
+1. **Create a project.** Click the project picker at the top left, beside the Google Cloud logo, then **New project**. Name it `grans` and click **Create**. If it asks for a billing account, any will do: the Drive API is free. When the notification says the project exists, click **Select project**. The picker should now read `grans`.
+2. **Turn on the Drive API.** Open **APIs & Services** from the navigation menu at the top left and click **Enable APIs and services**. Search for `Google Drive API`, open the result with exactly that name (not Drive Activity or Drive MCP), and click **Enable**.
+3. **Describe the app.** In the APIs & Services menu on the left, click **OAuth consent screen**, then **Get started**. Enter `grans` as the app name and pick your address as the support email, choose **External**, give your address as the contact, tick the agreement to the Google API Services User Data Policy, and click **Create**.
+4. **Give it Drive access.** In the menu on the left, open **Data Access** and click **Add or remove scopes**. Type `drive.file` into the panel's filter, tick the Google Drive API row (`.../auth/drive.file`), and click **Update**. Then click **Save** at the bottom of the page; nothing is kept until you do.
+5. **Publish it.** Google will not publish an app without a home page and a privacy policy link. Nobody but you will see them, so the grans repository serves for both. Open **Branding**, enter `https://github.com/dmwyatt/granz` as the Application home page and as the Application privacy policy link, click **Add domain** under Authorized domains, enter `github.com`, and click **Save**. Then open **Audience**, click **Publish app**, and **Confirm**. The status should read *In production*. An app left in Testing loses its login after 7 days, and you would have to run `grans remote init google-drive` again every week.
+6. **Create the client.** Open **Clients**, click **Create client**, choose **Desktop app** as the application type, name it `grans`, and click **Create**. In the dialog that follows, click **Download JSON** before closing it: Google never shows the client secret again. If the dialog closed first, delete the client and create another.
+7. **Connect grans.** Run `grans remote init google-drive <downloaded file>`. Your browser opens on Google's account chooser: pick the same account, then approve the permissions page, which asks to let grans see and change only the Drive files it uses. The terminal then says it is connected.
+
+Do step 7 on each machine, with the same file everywhere: Google shows grans only the files created through that client, so a machine using a different one finds no database to pull. Publishing needs no review from Google, because grans asks only for `drive.file`, which Google rates as non-sensitive. New settings can take a few minutes to reach Google's login, so if the command fails right after the setup, wait a few minutes and retry.
+
+The login finishes in a browser, which Google sends back to a port grans listens on. On a machine without a browser, open the printed address on another machine and paste back the address the browser lands on, even though that page will not load.
 
 **Sync status** shows a side-by-side comparison of local and remote database:
 
 ```
 Sync Status
 ───────────
+Remote: Dropbox
 Authentication: Connected
 Last push: 2025-01-27 15:30:00 UTC
 Last pull: Never
@@ -628,7 +646,7 @@ Uploading database (428.9 MB)...
 [grans] 96.00 MiB/428.90 MiB [======>                       ] 22% 3.80 MiB/s, ETA 1m
 ```
 
-The bar is written to stderr and is skipped when output is redirected. Uploads above 150 MB are sent as chunked sessions, so the bar advances 8 MB at a time; smaller ones stream in a single request and advance smoothly.
+The bar is written to stderr and is skipped when output is redirected. Dropbox uploads above 150 MB are sent as chunked sessions, so the bar advances 8 MB at a time; smaller ones, and every Google Drive upload, stream in a single request and advance smoothly.
 
 **Conflict handling:** Sync compares content, not timestamps. It records the content hash both copies held at the last successful sync, and uses that to tell which side has moved since:
 
@@ -642,8 +660,8 @@ The bar is written to stderr and is skipped when output is redirected. Uploads a
 Use `--force` to overwrite regardless:
 
 ```bash
-grans dropbox push --force   # Replace the Dropbox copy with yours
-grans dropbox pull --force   # Replace your copy with Dropbox's
+grans remote push --force   # Replace the remote copy with yours
+grans remote pull --force   # Replace your copy with the remote one
 ```
 
 Because identical copies transfer nothing, pushing or pulling twice in a row is cheap and safe: the second run compares hashes and stops.
@@ -652,8 +670,8 @@ Because identical copies transfer nothing, pushing or pulling twice in a row is 
 
 | Check | Catches |
 |-------|---------|
-| Byte count against the size Dropbox reported | An interrupted or truncated transfer |
-| Dropbox `content_hash`, computed while streaming | Content that differs from the stored file |
+| Byte count against the size the remote reported | An interrupted or truncated transfer |
+| The remote's content hash (Dropbox's `content_hash`, Google Drive's `sha256Checksum`), computed while streaming | Content that differs from the stored file |
 | `PRAGMA quick_check` plus a schema probe | A corrupt file, or one that is not a grans database |
 
 If any check fails the temp file is discarded and your existing database is left untouched. The download is also flushed to the device before the rename, so a crash cannot leave a database whose contents were never written.
@@ -663,7 +681,7 @@ On a 424 MB database this costs about 1.3s; hashing runs alongside the transfer 
 **Troubleshooting a failed sync:** run the command again with `--verbose` to log each request, its HTTP status, and the throughput achieved:
 
 ```bash
-grans --verbose dropbox pull
+grans --verbose remote pull
 ```
 
 ```
@@ -681,7 +699,7 @@ Use `GRANS_LOG` for finer control, e.g. `GRANS_LOG=grans::sync=debug`.
 **What gets synced:**
 - Database (meeting data, transcripts, FTS indices, vector embeddings for semantic search)
 
-The sync uses a sandboxed Dropbox app folder (`Apps/grans/`), so it only accesses its own files, not your full Dropbox.
+Dropbox sync uses a sandboxed app folder (`Apps/grans/`), so it only accesses its own files, not your full Dropbox. Google Drive sync asks only for the `drive.file` scope, so grans sees the `grans` folder it creates and nothing else in your Drive.
 
 ## Output Modes
 
