@@ -146,7 +146,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0; }
   gap: 16px;
 }
 
-figure {
+.card {
   margin: 0 0 16px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -155,9 +155,10 @@ figure {
   min-width: 0;
 }
 figcaption { font-size: 13px; margin: 2px 0 10px; }
-figure .plot { overflow-x: auto; }
-figure svg { display: block; max-width: 100%; height: auto; }
-figure .empty { color: var(--muted); padding: 24px 0; }
+.card .plot { overflow-x: auto; }
+.card .plot figure { margin: 0; }
+.card svg { display: block; max-width: 100%; height: auto; }
+.card .empty { color: var(--muted); padding: 24px 0; }
 
 details { margin-top: 10px; }
 summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }

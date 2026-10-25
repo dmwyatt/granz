@@ -13,6 +13,7 @@ function update() {
     main.append(body);
     s.render(meetings, body);
   }
+  drawPending();
 }
 
 document.getElementById("byline").textContent =
