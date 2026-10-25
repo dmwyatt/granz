@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workflow
 
-The `main` branch is protected. All changes must go through a pull request with passing CI tests. Do not push directly to main.
+The `main` branch is protected. All changes must go through a pull request with passing CI tests and one approving review. The owner merges as an admin, which skips the review; the requirement exists so that app tokens, such as the Claude GitHub App's, cannot merge. Do not push directly to main.
 
 Before starting work, ensure you have the latest code: `git fetch origin` and check if your branch is behind. When starting new work from main, pull first.
 
