@@ -183,4 +183,38 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats talk",
+        examples: &[
+            Example {
+                command: "grans stats talk",
+                about: "How much of the talking you do, by meeting size and month",
+            },
+            Example {
+                command: "grans stats talk --date last-month --json",
+                about: "Last month's numbers, with every silent meeting listed",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "Your share is your characters of transcript over everyone's. Back and",
+                    "forth is how often the talk passes between you and everyone else, per",
+                    "hour: high in a discussion, low when someone presents. Questions are",
+                    "utterances ending in a question mark, as a share of each side's.",
+                    "",
+                    "The tenths split each meeting's talk into ten equal parts, first to",
+                    "last, to show whether you speak up early or late. Then meetings where",
+                    "you never spoke, and meetings with only your microphone, which are",
+                    "often in person with everyone on that one microphone.",
+                    "",
+                    "This uses the audio channels, not speaker names, so it covers every",
+                    "meeting with a transcript.",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
+    },
 ];

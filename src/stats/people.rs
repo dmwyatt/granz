@@ -336,9 +336,8 @@ fn pairs(rows: &[MeetingRow]) -> Vec<Pair> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::fixtures::{invitee, spoken, untranscribed};
-    use crate::stats::transcript::VoiceRow;
-    use crate::stats::{Invitee, TranscriptFacts, Voice};
+    use crate::stats::fixtures::{invitee, spoken, untranscribed, voice, with_voices};
+    use crate::stats::{Invitee, Voice};
 
     fn with(mut row: MeetingRow, invitees: Vec<Invitee>) -> MeetingRow {
         row.invitees = invitees;
@@ -356,18 +355,11 @@ mod tests {
         }
     }
 
-    fn talk(mut row: MeetingRow, mine: u64, theirs: u64) -> MeetingRow {
-        let t: &mut TranscriptFacts = row.transcript.as_mut().unwrap();
-        let voice = |voice: Voice, chars: u64| VoiceRow {
-            voice,
-            utterances: 1,
-            chars,
-            questions: 0,
-            first_word: t.first_word,
-            last_word: t.last_word,
-        };
-        t.voices = vec![voice(Voice::Me, mine), voice(Voice::Others, theirs)];
-        row
+    fn talk(row: MeetingRow, mine: u64, theirs: u64) -> MeetingRow {
+        with_voices(
+            row,
+            vec![voice(Voice::Me, mine), voice(Voice::Others, theirs)],
+        )
     }
 
     #[test]

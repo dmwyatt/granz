@@ -467,6 +467,10 @@ grans stats series
 # Who you meet with: one-on-ones, organizers, domains, invitation responses
 grans stats people
 
+# How much you talk: share by meeting size and month, back and forth,
+# questions, when in a meeting you speak, and meetings where you never did
+grans stats talk
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

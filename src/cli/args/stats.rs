@@ -52,4 +52,9 @@ pub enum StatsAction {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// How much you talk and how conversations flow: your share by meeting
+    /// size and month, back and forth, questions, and silent meetings
+    #[command(after_long_help = help::for_command("stats talk"))]
+    Talk,
 }

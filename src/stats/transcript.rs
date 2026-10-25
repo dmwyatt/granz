@@ -61,6 +61,9 @@ pub struct VoiceRow {
     pub questions: u32,
     pub first_word: DateTime<Utc>,
     pub last_word: DateTime<Utc>,
+    /// Characters of utterances starting in each minute since the
+    /// meeting's first word: entry 0 is the first minute.
+    pub chars_by_minute: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -143,11 +146,17 @@ pub fn summarize(utterances: &[Utterance]) -> Option<TranscriptFacts> {
             questions: 0,
             first_word: u.start,
             last_word: u.start,
+            chars_by_minute: Vec::new(),
         });
         row.utterances += 1;
         row.chars += u64::from(u.chars);
         row.questions += u32::from(u.question);
         row.last_word = u.start;
+        let minute = usize::try_from((u.start - first_word).num_minutes()).expect("in start order");
+        if row.chars_by_minute.len() <= minute {
+            row.chars_by_minute.resize(minute + 1, 0);
+        }
+        row.chars_by_minute[minute] += u.chars;
     }
 
     Some(TranscriptFacts {
@@ -267,6 +276,19 @@ mod tests {
                 (Voice::Others, 3, 0)
             ]
         );
+    }
+
+    #[test]
+    fn characters_are_binned_by_minute_since_the_first_word() {
+        let facts = summarize(&[
+            said(1, Voice::Others, "Hello"),
+            said(3, Voice::Me, "Hi"),
+            said(3, Voice::Me, "there"),
+        ])
+        .unwrap();
+
+        let me = facts.voices.iter().find(|v| v.voice == Voice::Me).unwrap();
+        assert_eq!(me.chars_by_minute, vec![0, 0, 7]);
     }
 
     #[test]
