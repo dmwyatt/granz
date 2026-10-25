@@ -21,6 +21,7 @@ mod fixtures;
 mod invitees;
 pub mod overview;
 pub mod page;
+pub mod series;
 pub mod time;
 mod transcript;
 
@@ -99,6 +100,14 @@ impl MeetingRow {
             .filter(|i| i.response != Some(Rsvp::Declined))
             .count()
     }
+}
+
+/// The lower median, so the result is always one of the values.
+pub fn median<T: Ord>(values: impl IntoIterator<Item = T>) -> Option<T> {
+    let mut values: Vec<T> = values.into_iter().collect();
+    values.sort();
+    let middle = values.len().checked_sub(1)? / 2;
+    Some(values.swap_remove(middle))
 }
 
 #[cfg(test)]

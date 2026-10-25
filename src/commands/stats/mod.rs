@@ -6,6 +6,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::Connection;
 
 mod load;
+mod recurring;
 mod summary;
 
 use crate::cli::args::{StatsAction, StatsPeriod};
@@ -16,7 +17,7 @@ use crate::output::json::to_json;
 use crate::query::dates::{DateRange, build_date_range};
 use crate::stats::overview::overview;
 use crate::stats::page::{self, Payload};
-use crate::stats::{MeetingRow, summarize, time};
+use crate::stats::{MeetingRow, series, summarize, time};
 
 pub fn run(
     conn: &Connection,
@@ -45,6 +46,17 @@ pub fn run(
                 println!("{}", to_json(&report));
             } else {
                 load::print(&report, *by);
+            }
+        }
+        Some(StatsAction::Series { limit }) => {
+            let mut report = series::report(&rows);
+            if json {
+                if *limit > 0 {
+                    report.series.truncate(*limit);
+                }
+                println!("{}", to_json(&report));
+            } else {
+                recurring::print(&report, *limit, &ctx.tz);
             }
         }
     }

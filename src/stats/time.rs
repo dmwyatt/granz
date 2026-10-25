@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, Timelike, Weekday};
 use serde::Serialize;
 
-use super::MeetingRow;
+use super::{MeetingRow, median};
 
 /// The part of the day free time is measured in.
 pub const WORKDAY_START: u32 = 9;
@@ -258,14 +258,6 @@ fn empty_period(start: NaiveDate) -> PeriodLoad {
         longest_streak: 0,
         sizes: SizeMix::default(),
     }
-}
-
-/// The lower median, so the result is always one of the values.
-fn median<T: Ord>(values: impl Iterator<Item = T>) -> Option<T> {
-    let mut values: Vec<T> = values.collect();
-    values.sort();
-    let middle = values.len().checked_sub(1)? / 2;
-    Some(values.swap_remove(middle))
 }
 
 pub fn weekday_hours(rows: &[MeetingRow], tz: &FixedOffset) -> Vec<WeekdayHours> {

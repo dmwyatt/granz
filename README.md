@@ -461,6 +461,9 @@ grans stats meetings --json    # every field, for your own analysis
 grans stats time
 grans stats time --by week --date last-month
 
+# Recurring meetings: hours, cadence, invite list, punctuality, your share
+grans stats series
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```
