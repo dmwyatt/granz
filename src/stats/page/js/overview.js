@@ -9,7 +9,7 @@ section("overview", "Overview", null, (meetings, body) => {
     { label: "Meetings", value: fmtInt(meetings.length),
       detail: `${fmtInt(transcribed.length)} with a transcript` },
     { label: "Spoken time", value: `${fmtHours(minutes.reduce((a, b) => a + b, 0))} h`,
-      detail: "first word to last" },
+      detail: "talk, summed over meetings" },
     { label: "Typical meeting", value: minutes.length ? `${fmtInt(d3.median(minutes))} min` : "–",
       detail: "median spoken time" },
     { label: "Your share", value: fmtPct(share(mine, others)), detail: "of what was said" },

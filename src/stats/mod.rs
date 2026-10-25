@@ -16,9 +16,12 @@
 //!   are never backfilled. A statistic that spans that date has two eras.
 
 pub mod calendar;
+#[cfg(test)]
+mod fixtures;
 mod invitees;
 pub mod overview;
 pub mod page;
+pub mod time;
 mod transcript;
 
 use chrono::{DateTime, Utc};

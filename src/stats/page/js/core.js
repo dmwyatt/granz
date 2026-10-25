@@ -200,18 +200,20 @@ function gridY() {
   return Plot.gridY({ stroke: token("--grid"), strokeOpacity: 1 });
 }
 
-// A vertical rule where speaker names begin, for charts over time.
+// A vertical rule where speaker names begin, for charts over time. The
+// label sits on whichever side of the rule has more room.
 function eraMarks(domain) {
   if (!NAMED_SINCE || (domain && (NAMED_SINCE < domain[0] || NAMED_SINCE > domain[1]))) return [];
+  const late = domain && (NAMED_SINCE - domain[0]) / (domain[1] - domain[0]) > 0.6;
   return [
     Plot.ruleX([NAMED_SINCE], { stroke: token("--muted"), strokeWidth: 1 }),
     Plot.text([NAMED_SINCE], {
       x: (d) => d,
       text: () => "speaker names from here",
       frameAnchor: "top",
-      textAnchor: "start",
+      textAnchor: late ? "end" : "start",
       lineAnchor: "bottom",
-      dx: 4,
+      dx: late ? -4 : 4,
       dy: -6,
       fill: token("--muted"),
     }),
@@ -229,25 +231,36 @@ function section(id, title, lede, render) {
   SECTIONS.push({ id, title, lede, render });
 }
 
-// A chart card with its table twin. `plot(width)` returns an SVG or null
-// when there is nothing to draw; `table` is { columns, rows } where each
-// column is { label, value(row), num }.
-function figure(parent, { title, caption, plot, table }) {
-  const fig = el("figure", {}, el("h3", {}, title), caption ? el("figcaption", {}, caption) : null);
-  const holder = el("div", { class: "plot" });
-  fig.append(holder);
-  parent.append(fig);
+// Charts are drawn after every section is laid out, so each is measured at
+// the width it will actually have.
+const PENDING_DRAWS = [];
 
-  const width = Math.max(280, holder.clientWidth || fig.clientWidth - 32);
-  const chart = plot ? plot(width) : null;
-  if (chart) holder.append(chart);
-  else if (plot) holder.append(el("div", { class: "empty" }, "Nothing to show for this selection."));
+function drawPending() {
+  for (const draw of PENDING_DRAWS.splice(0)) draw();
+}
+
+// A chart card with its table twin. `plot(width)` returns an SVG (or Plot's
+// figure, when it has a legend) or null when there is nothing to draw;
+// `table` is { columns, rows } where each column is
+// { label, value(row), num }.
+function figure(parent, { title, caption, plot, table }) {
+  const card = el("figure", { class: "card" }, el("h3", {}, title), caption ? el("figcaption", {}, caption) : null);
+  const holder = el("div", { class: "plot" });
+  card.append(holder);
+  parent.append(card);
+
+  if (plot) {
+    PENDING_DRAWS.push(() => {
+      const chart = plot(Math.max(280, holder.clientWidth));
+      holder.append(chart || el("div", { class: "empty" }, "Nothing to show for this selection."));
+    });
+  }
 
   if (table && table.rows.length) {
-    fig.append(el("details", {}, el("summary", {}, plot ? "Table" : `Show ${table.rows.length} rows`),
+    card.append(el("details", {}, el("summary", {}, plot ? "Table" : `Show ${table.rows.length} rows`),
       el("div", { class: "table-wrap" }, renderTable(table))));
   }
-  return fig;
+  return card;
 }
 
 function renderTable({ columns, rows }) {

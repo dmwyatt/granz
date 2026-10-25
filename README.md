@@ -456,6 +456,11 @@ grans stats --date last-month
 grans stats meetings
 grans stats meetings --json    # every field, for your own analysis
 
+# Where the time goes: hours per month (or --by week), workday edges,
+# free time, back-to-back runs, meeting sizes, and a weekday-by-hour grid
+grans stats time
+grans stats time --by week --date last-month
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

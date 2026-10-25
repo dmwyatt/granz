@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 use crate::cli::help;
+use crate::stats::time::Period;
 
 /// Which meetings a statistic covers. Global, so it can follow the
 /// subcommand: `grans stats meetings --date last-month`.
@@ -24,4 +25,13 @@ pub enum StatsAction {
     /// One row per meeting: when, how long, who was invited, and who spoke
     #[command(after_long_help = help::for_command("stats meetings"))]
     Meetings,
+
+    /// Where the time goes: hours per week or month, workday edges, free
+    /// time, meeting sizes, and when in the week meetings happen
+    #[command(after_long_help = help::for_command("stats time"))]
+    Time {
+        /// Group by week or by month
+        #[arg(long, value_enum, default_value = "month")]
+        by: Period,
+    },
 }
