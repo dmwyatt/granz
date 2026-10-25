@@ -34,6 +34,7 @@ const APP: &[&str] = &[
     include_str!("js/people.js"),
     include_str!("js/talk.js"),
     include_str!("js/speakers.js"),
+    include_str!("js/words.js"),
     include_str!("js/main.js"),
 ];
 
