@@ -170,3 +170,8 @@ th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 footer { max-width: 1120px; margin: 48px auto 32px; padding: 0 16px; color: var(--muted); font-size: 12px; }
+
+.year .hero { font-size: 48px; font-weight: 600; line-height: 1.1; margin-top: 6px; }
+.year h4 { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 16px 0 4px; }
+.year ol { margin: 0; padding-left: 20px; }
+.year li { margin: 2px 0; }
