@@ -51,6 +51,9 @@ pub struct MeetingRow {
     pub organized_by_me: bool,
     /// The user's own response to the invitation.
     pub my_response: Option<Rsvp>,
+    /// The user's email, lowercased: the calendar's own attendee entry, or
+    /// else the creator of Granola's note.
+    pub my_email: Option<String>,
     /// Everyone invited other than the user, including those who declined.
     /// An invitation says nothing about who actually came.
     pub invitees: Vec<Invitee>,
@@ -78,13 +81,21 @@ pub struct MeetingRecord {
 impl MeetingRow {
     pub fn new(record: MeetingRecord, transcript: Option<TranscriptFacts>) -> Self {
         let calendar = record.calendar.as_ref();
+        let organizer = calendar.and_then(CalendarInvite::organizer_email);
+        let my_email = calendar
+            .and_then(CalendarInvite::my_email)
+            .or_else(|| creator_email(record.people.as_ref()));
         MeetingRow {
             invitees: invitees::merge(calendar, record.people.as_ref()),
             series: calendar.and_then(|c| c.recurring_event_id.clone()),
             scheduled: calendar.and_then(CalendarInvite::schedule),
-            organizer: calendar.and_then(|c| c.organizer_email()),
-            organized_by_me: calendar.is_some_and(CalendarInvite::organized_by_me),
+            // Google marks the organizer as `self` only sometimes; an
+            // organizer with the user's own address is the user too.
+            organized_by_me: calendar.is_some_and(CalendarInvite::organized_by_me)
+                || (organizer.is_some() && organizer == my_email),
+            organizer,
             my_response: calendar.and_then(CalendarInvite::my_response),
+            my_email,
             id: record.id,
             title: record.title,
             created_at: record.created_at,
@@ -102,6 +113,10 @@ impl MeetingRow {
     }
 }
 
+fn creator_email(people: Option<&DocumentPeople>) -> Option<String> {
+    Some(people?.creator.as_ref()?.email.as_ref()?.to_lowercase())
+}
+
 /// The lower median, so the result is always one of the values.
 pub fn median<T: Ord>(values: impl IntoIterator<Item = T>) -> Option<T> {
     let mut values: Vec<T> = values.into_iter().collect();
@@ -114,6 +129,37 @@ pub fn median<T: Ord>(values: impl IntoIterator<Item = T>) -> Option<T> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn my_email_falls_back_to_the_note_creator() {
+        let people: DocumentPeople =
+            serde_json::from_value(json!({"creator": {"email": "Me@Example.com"}})).unwrap();
+        let record = MeetingRecord {
+            people: Some(people),
+            calendar: Some(CalendarInvite::default()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            MeetingRow::new(record, None).my_email.as_deref(),
+            Some("me@example.com")
+        );
+    }
+
+    #[test]
+    fn an_organizer_with_my_address_is_me_without_the_self_flag() {
+        let calendar: CalendarInvite = serde_json::from_value(json!({
+            "organizer": {"email": "me@example.com"},
+            "attendees": [{"email": "me@example.com", "self": true}]
+        }))
+        .unwrap();
+        let record = MeetingRecord {
+            calendar: Some(calendar),
+            ..Default::default()
+        };
+
+        assert!(MeetingRow::new(record, None).organized_by_me);
+    }
 
     #[test]
     fn meeting_size_leaves_out_invitees_who_declined() {

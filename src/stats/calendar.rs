@@ -92,6 +92,11 @@ impl CalendarInvite {
         self.organizer.as_ref().is_some_and(|o| o.is_self)
     }
 
+    pub fn my_email(&self) -> Option<String> {
+        let me = self.attendees.iter().find(|a| a.is_self)?;
+        me.email.as_deref().map(str::to_lowercase)
+    }
+
     pub fn my_response(&self) -> Option<Rsvp> {
         self.attendees
             .iter()
