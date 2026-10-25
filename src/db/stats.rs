@@ -104,6 +104,45 @@ pub fn for_each_transcript(
     Ok(())
 }
 
+/// Call `each` with every utterance's text in `range`: its meeting id, the
+/// meeting's creation time, whether it is the user's microphone, and the
+/// text. Only the words statistics read text, so they stream it apart from
+/// the rows.
+pub fn for_each_utterance_text(
+    conn: &Connection,
+    range: Option<&DateRange>,
+    mut each: impl FnMut(&str, DateTime<Utc>, bool, &str),
+) -> Result<()> {
+    let (filter, params) = range_filter(range);
+    let sql = format!(
+        "SELECT u.document_id, d.created_at, u.source = 'microphone', u.text
+         FROM transcript_utterances u
+         JOIN documents d ON d.id = u.document_id
+         WHERE d.deleted_at IS NULL AND u.text IS NOT NULL{filter}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params_refs(&params).as_slice())?;
+    let mut meeting = String::new();
+    let mut created_at = DateTime::<Utc>::MIN_UTC;
+    while let Some(row) = rows.next()? {
+        let id: &str = row.get_ref(0)?.as_str()?;
+        if id != meeting {
+            let created: String = row.get(1)?;
+            created_at = parse_timestamp(&created)
+                .with_context(|| format!("meeting {id} has an unreadable created_at"))?;
+            meeting = id.to_string();
+        }
+        let mine: Option<bool> = row.get(2)?;
+        each(
+            &meeting,
+            created_at,
+            mine.unwrap_or(false),
+            row.get_ref(3)?.as_str()?,
+        );
+    }
+    Ok(())
+}
+
 fn decode_utterance(row: &rusqlite::Row) -> Result<Utterance> {
     let id: String = row.get(1)?;
     let start: Option<String> = row.get(2)?;
@@ -250,6 +289,27 @@ mod tests {
                         question: false,
                     }]
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_arrives_with_its_meeting_and_channel() {
+        let conn = build_test_db(&two_meetings());
+
+        let mut seen = Vec::new();
+        for_each_utterance_text(&conn, None, |id, _, mine, text| {
+            seen.push((id.to_string(), mine, text.to_string()))
+        })
+        .unwrap();
+        seen.sort();
+
+        assert_eq!(
+            seen,
+            vec![
+                ("doc-a".to_string(), false, "Sounds good. ".to_string()),
+                ("doc-a".to_string(), true, "Ready?".to_string()),
+                ("doc-b".to_string(), false, "Hi".to_string()),
             ]
         );
     }

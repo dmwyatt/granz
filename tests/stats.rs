@@ -293,3 +293,19 @@ fn speakers_match_detected_names_to_invitees() {
         (&json!(1), &json!("Robin Diaz"), &json!(1), &json!(1))
     );
 }
+
+#[test]
+fn words_follow_a_term_month_by_month() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["words", "--term", "next week", "--utc"]);
+
+    assert_eq!(
+        (
+            &report["terms"][0]["term"],
+            &report["terms"][0]["mentions"],
+            &report["terms"][0]["first_month"]
+        ),
+        (&json!("next week"), &json!(1), &json!("2026-03-01"))
+    );
+}

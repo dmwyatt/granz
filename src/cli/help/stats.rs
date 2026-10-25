@@ -251,4 +251,38 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats words",
+        examples: &[
+            Example {
+                command: "grans stats words",
+                about: "Your verbal tics, your signature words, and terms new to your meetings",
+            },
+            Example {
+                command: r#"grans stats words --term "roadmap" --term "hiring plan""#,
+                about: "How often those came up, month by month, and when first",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "Tics are phrases such as \"you know\" and \"kind of\" in your own",
+                    "speech, per thousand of your words; Granola already removes most",
+                    "single-word fillers. Signature words are the ones you say far more",
+                    "than everyone else, scored by a log-odds ratio. New terms are words",
+                    "first heard after the first tenth of the period's words, most mentioned",
+                    "first. A --term can be a phrase; it matches whole words, ignoring case.",
+                    "",
+                    "Then people whose full name was said in meetings they were not",
+                    "invited to (or declined). Full names only: first names alone are too",
+                    "often ordinary words or someone else.",
+                    "",
+                    "Common words are left out of the vocabulary lists. This reads every",
+                    "utterance's text, so it takes longer than the other statistics.",
+                ],
+            },
+            DATES,
+        ],
+    },
 ];

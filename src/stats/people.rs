@@ -155,7 +155,7 @@ pub fn report(rows: &[MeetingRow]) -> PeopleReport {
 }
 
 /// Each email's most frequent name, ties broken alphabetically.
-fn names(rows: &[MeetingRow]) -> HashMap<String, String> {
+pub fn names(rows: &[MeetingRow]) -> HashMap<String, String> {
     let mut counts: HashMap<&str, BTreeMap<&str, usize>> = HashMap::new();
     for i in rows.iter().flat_map(|r| &r.invitees) {
         if let Some(name) = &i.name {
