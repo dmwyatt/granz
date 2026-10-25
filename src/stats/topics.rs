@@ -32,8 +32,9 @@ pub struct MeetingTopic {
     pub x: f32,
     pub y: f32,
     pub cluster: usize,
-    /// Similarity to the most similar other meeting.
-    pub nearest: f32,
+    /// Similarity to the most similar other meeting. `None` when no other
+    /// meeting has an embedding.
+    pub nearest: Option<f32>,
     /// Similarity to the previous meeting of its series.
     pub previous_in_series: Option<f32>,
 }
@@ -142,13 +143,14 @@ pub fn report(rows: &[MeetingRow], vectors: &HashMap<String, Vec<f32>>) -> Topic
     }
 }
 
-fn nearest(unit: &[&[f32]]) -> Vec<f32> {
-    let mut best = vec![f32::NEG_INFINITY; unit.len()];
+fn nearest(unit: &[&[f32]]) -> Vec<Option<f32>> {
+    let mut best: Vec<Option<f32>> = vec![None; unit.len()];
+    let mut offer = |i: usize, s: f32| best[i] = Some(best[i].map_or(s, |b| b.max(s)));
     for i in 0..unit.len() {
         for j in i + 1..unit.len() {
             let s = dot(unit[i], unit[j]);
-            best[i] = best[i].max(s);
-            best[j] = best[j].max(s);
+            offer(i, s);
+            offer(j, s);
         }
     }
     best
@@ -241,16 +243,17 @@ fn twins(embedded: &[(&MeetingRow, Vec<f32>)]) -> Vec<Twin> {
     pairs
 }
 
-fn outliers(embedded: &[(&MeetingRow, Vec<f32>)], nearest: &[f32]) -> Vec<Outlier> {
+fn outliers(embedded: &[(&MeetingRow, Vec<f32>)], nearest: &[Option<f32>]) -> Vec<Outlier> {
     let mut out: Vec<Outlier> = embedded
         .iter()
         .zip(nearest)
-        .filter(|(_, n)| n.is_finite())
-        .map(|((row, _), n)| Outlier {
-            id: row.id.clone(),
-            title: row.title.clone(),
-            created_at: row.created_at,
-            nearest: *n,
+        .filter_map(|((row, _), n)| {
+            Some(Outlier {
+                id: row.id.clone(),
+                title: row.title.clone(),
+                created_at: row.created_at,
+                nearest: (*n)?,
+            })
         })
         .collect();
     out.sort_by(|a, b| a.nearest.total_cmp(&b.nearest));
@@ -456,6 +459,14 @@ mod tests {
 
         let r = report(&rows, &vectors(&[("a", [1.0, 0.0, 0.0])]));
         assert_eq!((r.meetings, r.embedded), (2, 1));
+    }
+
+    #[test]
+    fn a_lone_embedded_meeting_has_no_nearest_neighbor() {
+        let rows = [meeting("a", "2026-03-02T10:00:00Z", None, "Budget")];
+
+        let r = report(&rows, &vectors(&[("a", [1.0, 0.0, 0.0])]));
+        assert_eq!((r.map[0].nearest, r.outliers.len()), (None, 0));
     }
 
     #[test]
