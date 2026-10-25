@@ -120,7 +120,9 @@ function rehashTable(parent, embedded) {
 }
 
 function outlierTable(parent, embedded) {
-  const rows = embedded.slice().sort((a, b) => a.t.nearest - b.t.nearest).slice(0, 15);
+  // A meeting with no other embedded meeting to compare has no nearest.
+  const rows = embedded.filter((d) => d.t.nearest != null)
+    .sort((a, b) => a.t.nearest - b.t.nearest).slice(0, 15);
   const card = figure(parent, {
     title: "Meetings unlike any other",
     caption: "The meetings whose most similar other meeting is least similar.",
