@@ -14,6 +14,7 @@ pub mod remote;
 pub mod search;
 pub mod search_common;
 pub mod skill;
+pub mod stats;
 pub mod sync_granola;
 mod sync_panels;
 pub mod sync_pipeline;

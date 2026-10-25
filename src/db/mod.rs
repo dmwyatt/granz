@@ -10,6 +10,7 @@ pub mod panels;
 pub mod people;
 pub mod recipes;
 pub mod schema;
+pub mod stats;
 pub mod sync;
 pub mod templates;
 #[cfg(test)]

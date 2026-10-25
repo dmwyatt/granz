@@ -8,6 +8,7 @@ mod output;
 mod pkce;
 mod platform;
 mod query;
+mod stats;
 mod sync;
 mod tiptap;
 mod update;
@@ -285,6 +286,10 @@ fn main() -> Result<()> {
                     db::connection::default_db_path().expect("Failed to get default db path")
                 });
             commands::info::run(&conn, &db_path, &ctx)?;
+        }
+
+        Commands::Stats { action, period } => {
+            commands::stats::run(&conn, action.as_ref(), period, &ctx)?;
         }
 
         Commands::Benchmark { .. } => unreachable!(), // Handled above

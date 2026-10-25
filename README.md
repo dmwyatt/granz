@@ -84,6 +84,7 @@ grans uses a task-centric CLI design. Common tasks are promoted to top-level com
 - `embed` - Build the embeddings that let search match by meaning
 - `remote` - Share the database between machines through Dropbox or Google Drive
 - `info` - Show what the local database holds
+- `stats` - Statistics about your meetings: where the time goes and who talks
 - `skill` - Print a skill that points AI agents at the help
 
 **Browse Commands** (entity exploration):
@@ -443,6 +444,20 @@ grans with "bob" --from 2026-01-01
 # Include soft-deleted meetings
 grans with "todd" --include-deleted
 ```
+
+### Meeting Statistics
+
+```bash
+# Meetings, spoken time, and your share of what was said
+grans stats
+grans stats --date last-month
+
+# The numbers behind it, one meeting per line
+grans stats meetings
+grans stats meetings --json    # every field, for your own analysis
+```
+
+Statistics are computed when you ask, from what grans already stores. Who said how much is measured in characters of transcript, since Granola's utterance end times are not reliable enough to time speech. A meeting's spoken time runs from its first word to its last, leaving out any silence longer than 30 minutes. "You" is your microphone channel; Granola names the other speakers only in meetings recorded since it started detecting them. Invitees are who the calendar invited, not who came.
 
 ### People
 

@@ -4,6 +4,10 @@ use crate::cli::help;
 use crate::query::filter::SearchTarget;
 use crate::query::speaker::SpeakerSelector;
 
+mod stats;
+
+pub use stats::{StatsAction, StatsPeriod};
+
 fn parse_speaker_selector(s: &str) -> Result<SpeakerSelector, String> {
     SpeakerSelector::parse(s).ok_or_else(|| {
         "empty speaker filter: expected 'me', 'other', or a speaker's name".to_string()
@@ -255,6 +259,16 @@ pub enum Commands {
     /// Show what the local database holds
     #[command(after_long_help = help::for_command("info"))]
     Info,
+
+    /// Statistics about your meetings: where the time goes and who talks
+    #[command(after_long_help = help::for_command("stats"))]
+    Stats {
+        #[command(subcommand)]
+        action: Option<StatsAction>,
+
+        #[command(flatten)]
+        period: StatsPeriod,
+    },
 
     /// Fetch your meetings from Granola into the local database
     #[command(
