@@ -66,7 +66,8 @@ pub fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn is_content_word(word: &str) -> bool {
+/// Not a stopword, a number, or shorter than three letters.
+pub fn is_content_word(word: &str) -> bool {
     word.len() > 2 && !STOPWORDS.contains(&word) && !word.chars().all(|c| c.is_ascii_digit())
 }
 

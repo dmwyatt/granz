@@ -11,19 +11,22 @@ mod load;
 mod people;
 mod recurring;
 mod summary;
+mod themes;
 mod vocabulary;
 mod voices;
 
 use crate::cli::args::{StatsAction, StatsPeriod};
 use crate::cli::context::RunContext;
-use crate::db::stats::{for_each_transcript, for_each_utterance_text, meeting_records};
+use crate::db::stats::{
+    for_each_transcript, for_each_utterance_text, meeting_records, meeting_vectors,
+};
 use crate::output::format::{OutputMode, format_number};
 use crate::output::json::to_json;
 use crate::query::dates::{DateRange, build_date_range};
 use crate::stats::overview::overview;
 use crate::stats::page::{self, Payload, WordsPayload};
 use crate::stats::words::WordCounter;
-use crate::stats::{MeetingRow, series, summarize, time};
+use crate::stats::{MeetingRow, series, summarize, time, topics};
 
 pub fn run(
     conn: &Connection,
@@ -43,6 +46,14 @@ pub fn run(
             let counter = count_words(conn, range.as_ref(), terms, &rows, ctx)?;
             emit(ctx, &counter.report(&rows), |r| {
                 vocabulary::print(r, &ctx.tz)
+            });
+            Ok(())
+        }
+        (None, Some(StatsAction::Topics)) => {
+            let rows = meeting_rows(conn, range.as_ref())?;
+            let vectors = meeting_vectors(conn, range.as_ref())?;
+            emit(ctx, &topics::report(&rows, &vectors), |r| {
+                themes::print(r, &ctx.tz)
             });
             Ok(())
         }
@@ -89,7 +100,9 @@ fn report_on_rows(action: Option<&StatsAction>, rows: &[MeetingRow], ctx: &RunCo
             truncate(&mut report.people, *limit, ctx);
             emit(ctx, &report, |r| voices::print(r, *limit, tz));
         }
-        Some(StatsAction::Words { .. }) => unreachable!("words read text, not rows"),
+        Some(StatsAction::Words { .. } | StatsAction::Topics) => {
+            unreachable!("words and topics read more than the rows")
+        }
     }
 }
 
@@ -127,10 +140,12 @@ fn write_page(
 ) -> Result<()> {
     let rows = meeting_rows(conn, range)?;
     let words = count_words(conn, range, &[], &rows, ctx)?;
+    let topics = topics::report(&rows, &meeting_vectors(conn, range)?);
     let html = page::render(&Payload {
         generated_at: Utc::now(),
         meetings: &rows,
         words: WordsPayload::new(&words, &rows),
+        topics: &topics,
     })?;
     std::fs::write(path, html).with_context(|| format!("writing {}", path.display()))?;
     match ctx.output_mode {
