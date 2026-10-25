@@ -3,8 +3,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, Utc};
-use colored::Colorize;
 use rusqlite::Connection;
+
+mod summary;
 
 use crate::cli::args::{StatsAction, StatsPeriod};
 use crate::cli::context::RunContext;
@@ -12,7 +13,7 @@ use crate::db::stats::{for_each_transcript, meeting_records};
 use crate::output::format::{OutputMode, format_number};
 use crate::output::json::to_json;
 use crate::query::dates::{DateRange, build_date_range};
-use crate::stats::overview::{Overview, overview, share};
+use crate::stats::overview::overview;
 use crate::stats::page::{self, Payload};
 use crate::stats::{MeetingRow, summarize};
 
@@ -31,11 +32,12 @@ pub fn run(
     }
     let rows = meeting_rows(conn, period_range(period, ctx).as_ref())?;
 
-    match (action, ctx.output_mode) {
-        (None, OutputMode::Json) => println!("{}", to_json(&overview(&rows))),
-        (None, OutputMode::Tty) => print_overview(&overview(&rows), &ctx.tz),
-        (Some(StatsAction::Meetings), OutputMode::Json) => println!("{}", to_json(&rows)),
-        (Some(StatsAction::Meetings), OutputMode::Tty) => print_meetings(&rows, &ctx.tz),
+    let json = ctx.output_mode == OutputMode::Json;
+    match action {
+        None if json => println!("{}", to_json(&overview(&rows))),
+        None => summary::print_overview(&overview(&rows), &ctx.tz),
+        Some(StatsAction::Meetings) if json => println!("{}", to_json(&rows)),
+        Some(StatsAction::Meetings) => summary::print_meetings(&rows, &ctx.tz),
     }
     Ok(())
 }
@@ -89,74 +91,12 @@ pub fn meeting_rows(conn: &Connection, range: Option<&DateRange>) -> Result<Vec<
         .collect())
 }
 
-fn print_overview(o: &Overview, tz: &FixedOffset) {
-    if o.meetings == 0 {
-        println!("No meetings found.");
-        return;
-    }
-    println!(
-        "Meetings:       {} ({} with a transcript)",
-        format_number(o.meetings as i64).bold(),
-        format_number(o.with_transcript as i64)
-    );
-    if let (Some(first), Some(last)) = (o.first_meeting, o.last_meeting) {
-        println!("Date range:     {} to {}", day(first, tz), day(last, tz));
-    }
-    println!(
-        "Spoken time:    {} hours",
-        format_number(o.spoken_hours.round() as i64)
-    );
-    if let Some(mine) = o.my_share {
-        println!("Your share:     {} of what was said", percent(mine));
-    }
-    match o.speaker_names_since {
-        Some(since) => println!(
-            "Speaker names:  since {} ({} meetings)",
-            day(since, tz),
-            format_number(o.meetings_with_speaker_names as i64)
-        ),
-        None => println!("Speaker names:  none detected"),
-    }
-}
-
-fn print_meetings(rows: &[MeetingRow], tz: &FixedOffset) {
-    if rows.is_empty() {
-        println!("No meetings found.");
-        return;
-    }
-    println!(
-        "{}",
-        format!(
-            "{:<10}  {:>8}  {:>4}  {:>7}  {:>5}  title",
-            "date", "spoken", "you", "invited", "named"
-        )
-        .dimmed()
-    );
-    for row in rows {
-        let (spoken, mine, named) = match &row.transcript {
-            Some(t) => (
-                format!("{} min", t.span().num_minutes()),
-                share(t.my_chars(), t.others_chars()).map_or("-".to_string(), percent),
-                t.named_speakers().to_string(),
-            ),
-            None => ("-".to_string(), "-".to_string(), "-".to_string()),
-        };
-        println!(
-            "{:<10}  {:>8}  {:>4}  {:>7}  {:>5}  {}",
-            day(row.created_at, tz),
-            spoken,
-            mine,
-            row.invited(),
-            named,
-            row.title.bold()
-        );
-    }
-}
-
+/// A local date, as the tables print it.
 fn day(at: DateTime<Utc>, tz: &FixedOffset) -> String {
     at.with_timezone(tz).format("%Y-%m-%d").to_string()
 }
 
+/// A 0-1 fraction as a whole percentage.
 fn percent(fraction: f64) -> String {
     format!("{:.0}%", fraction * 100.0)
 }
