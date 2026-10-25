@@ -30,6 +30,19 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Format a count with thousands separators: 1234567 -> "1,234,567".
+pub fn format_number(n: i64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.insert(0, ',');
+        }
+        result.insert(0, c);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +64,13 @@ mod tests {
         assert_eq!(format_size(1048576), "1.0 MB");
         assert_eq!(format_size(47185920), "45.0 MB");
         assert_eq!(format_size(1073741824), "1.0 GB");
+    }
+
+    #[test]
+    fn format_number_groups_thousands() {
+        assert_eq!(
+            (format_number(999), format_number(1234567)),
+            ("999".to_string(), "1,234,567".to_string())
+        );
     }
 }

@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 use crate::cli::context::RunContext;
 use crate::db::info::{DbInfo, get_info_db_only};
-use crate::output::format::{OutputMode, format_size};
+use crate::output::format::{OutputMode, format_number, format_size};
 
 /// Run info command
 pub fn run(conn: &Connection, db_path: &Path, ctx: &RunContext) -> Result<()> {
@@ -95,18 +95,6 @@ fn print_tty(info: &DbInfo, tz: &FixedOffset) {
     println!("Path:           {}", info.db_path.display());
     println!("Size:           {}", format_size(info.db_size_bytes));
     println!("Schema version: {}", info.schema_version);
-}
-
-fn format_number(n: i64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.insert(0, ',');
-        }
-        result.insert(0, c);
-    }
-    result
 }
 
 fn format_date(iso_date: &str, tz: &FixedOffset) -> String {
