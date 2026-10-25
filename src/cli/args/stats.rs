@@ -90,4 +90,9 @@ pub enum StatsAction {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// The record book: the longest meeting and monologue, the busiest day,
+    /// the biggest invite list, and more, with where each was set
+    #[command(after_long_help = help::for_command("stats records"))]
+    Records,
 }

@@ -348,4 +348,30 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats records",
+        examples: &[
+            Example {
+                command: "grans stats records",
+                about: "The most of everything, and which meeting or day set it",
+            },
+            Example {
+                command: "grans stats records --date last-month",
+                about: "Last month's records",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "A monologue is the most one person said, in characters, with no one",
+                    "else speaking in between: you, or a speaker Granola named. Back and",
+                    "forth counts meetings of at least 10 minutes. Days are your local",
+                    "days.",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
+    },
 ];

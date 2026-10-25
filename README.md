@@ -488,6 +488,9 @@ grans stats topics
 # templates over time, and how often you typed your own notes
 grans stats notes
 
+# The record book: longest meeting and monologue, busiest day, and more
+grans stats records
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

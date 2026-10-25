@@ -325,3 +325,24 @@ fn notes_count_typed_notes_per_month() {
         (&json!("2026-03-01"), &json!(2), &json!(0))
     );
 }
+
+#[test]
+fn records_name_the_longest_meeting() {
+    let env = TestEnv::with_state(&team_state());
+
+    let records = stats_json(&env, &["records"]);
+
+    let longest = &records[0];
+    assert_eq!(
+        (
+            &longest["name"],
+            &longest["value"],
+            &longest["meeting"]["id"]
+        ),
+        (
+            &json!("Longest meeting"),
+            &json!(30.0),
+            &json!("one-on-one-1")
+        )
+    );
+}
