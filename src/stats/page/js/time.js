@@ -1,7 +1,7 @@
 section("time", "Time and load", "Where the hours go. A meeting's hours run from its first spoken word to its last.", (meetings, body) => {
-  const transcribed = meetings.filter((m) => m.transcript);
-  const weeks = d3.rollups(transcribed, (ms) => d3.sum(ms, (m) => m.spokenMinutes) / 60,
-    (m) => d3.timeMonday.floor(m.date))
+  const sessions = meetings.flatMap((m) => m.sessions);
+  const weeks = d3.rollups(sessions, (ss) => d3.sum(ss, (s) => s.end - s.start) / 3600000,
+    (s) => d3.timeMonday.floor(s.start))
     .map(([week, hours]) => ({ week, hours }))
     .sort((a, b) => a.week - b.week);
 

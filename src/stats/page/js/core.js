@@ -16,14 +16,15 @@ const isOthers = (v) => v.voice === "named" || v.voice === "others";
 const MEETINGS = DATA.meetings.map((m) => {
   const t = m.transcript;
   const voices = t ? t.voices : [];
-  const firstWord = t ? new Date(t.first_word) : null;
-  const lastWord = t ? new Date(t.last_word) : null;
+  // Stretches of talk; a note reopened later for another talk has several.
+  const sessions = t
+    ? t.sessions.map((s) => ({ start: new Date(s.start), end: new Date(s.end) }))
+    : [];
   return {
     ...m,
     date: new Date(m.created_at),
-    firstWord,
-    lastWord,
-    spokenMinutes: t ? (lastWord - firstWord) / 60000 : 0,
+    sessions,
+    spokenMinutes: d3.sum(sessions, (s) => (s.end - s.start) / 60000),
     myChars: sumChars(voices, (v) => v.voice === "me"),
     othersChars: sumChars(voices, isOthers),
     namedSpeakers: voices.filter((v) => v.voice === "named").length,
