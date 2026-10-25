@@ -1,3 +1,7 @@
 # Compiled into the binary and printed verbatim by `grans skill`, so its bytes
 # must not depend on the platform that built grans.
 src/commands/skill.md text eol=lf
+
+# Third-party libraries copied verbatim from npm (see their README); keep
+# their bytes exact and out of diffs and language stats.
+src/stats/page/vendor/*.js -text -diff linguist-vendored
