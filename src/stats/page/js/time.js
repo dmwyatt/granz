@@ -7,7 +7,6 @@ const BACK_TO_BACK_MS = 10 * 60000;
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const SIZE_BUCKETS = ["none", "1", "2", "3-5", "6-10", "11+"];
 
-const hoursOf = (s) => (s.end - s.start) / 3600000;
 const timeOfDay = (d) => d.getHours() + d.getMinutes() / 60;
 const weekdayIndex = (d) => (d.getDay() + 6) % 7;
 

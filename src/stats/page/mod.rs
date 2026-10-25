@@ -27,6 +27,7 @@ const APP: &[&str] = &[
     include_str!("js/core.js"),
     include_str!("js/overview.js"),
     include_str!("js/time.js"),
+    include_str!("js/series.js"),
     include_str!("js/main.js"),
 ];
 

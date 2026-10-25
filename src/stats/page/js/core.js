@@ -63,6 +63,9 @@ const PEOPLE = (() => {
 
 const personName = (email) => PEOPLE.get(email) || email;
 
+// Hours in one session of talk.
+const hoursOf = (session) => (session.end - session.start) / 3600000;
+
 // ---------------------------------------------------------------------------
 // Filters
 
