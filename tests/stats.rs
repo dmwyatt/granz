@@ -275,3 +275,21 @@ fn talk_reports_my_share_and_questions() {
         (&json!(2), &json!(0.3333333333333333))
     );
 }
+
+#[test]
+fn speakers_match_detected_names_to_invitees() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["speakers"]);
+
+    let robin = &report["people"][0];
+    assert_eq!(
+        (
+            &report["meetings_with_names"],
+            &robin["name"],
+            &robin["spoke_in"],
+            &robin["heard_not_invited"]
+        ),
+        (&json!(1), &json!("Robin Diaz"), &json!(1), &json!(1))
+    );
+}

@@ -23,6 +23,7 @@ pub mod overview;
 pub mod page;
 pub mod people;
 pub mod series;
+pub mod speakers;
 pub mod talk;
 pub mod time;
 mod transcript;
