@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, Utc};
 use colored::Colorize;
 use rusqlite::Connection;
@@ -12,22 +13,23 @@ use crate::output::format::{OutputMode, format_number};
 use crate::output::json::to_json;
 use crate::query::dates::{DateRange, build_date_range};
 use crate::stats::overview::{Overview, overview, share};
+use crate::stats::page::{self, Payload};
 use crate::stats::{MeetingRow, summarize};
 
 pub fn run(
     conn: &Connection,
     action: Option<&StatsAction>,
+    html: Option<&Path>,
     period: &StatsPeriod,
     ctx: &RunContext,
 ) -> Result<()> {
-    let range = build_date_range(
-        period.from.as_deref(),
-        period.to.as_deref(),
-        period.date.as_deref(),
-        Utc::now(),
-        &ctx.tz,
-    );
-    let rows = meeting_rows(conn, range.as_ref())?;
+    if let Some(path) = html {
+        if action.is_some() {
+            bail!("--html writes the whole page and does not take a subcommand");
+        }
+        return write_page(conn, path, period, ctx);
+    }
+    let rows = meeting_rows(conn, period_range(period, ctx).as_ref())?;
 
     match (action, ctx.output_mode) {
         (None, OutputMode::Json) => println!("{}", to_json(&overview(&rows))),
@@ -36,6 +38,40 @@ pub fn run(
         (Some(StatsAction::Meetings), OutputMode::Tty) => print_meetings(&rows, &ctx.tz),
     }
     Ok(())
+}
+
+/// Write the stats page for the meetings in `period` to `path`.
+fn write_page(
+    conn: &Connection,
+    path: &Path,
+    period: &StatsPeriod,
+    ctx: &RunContext,
+) -> Result<()> {
+    let rows = meeting_rows(conn, period_range(period, ctx).as_ref())?;
+    let html = page::render(&Payload {
+        generated_at: Utc::now(),
+        meetings: &rows,
+    })?;
+    std::fs::write(path, html).with_context(|| format!("writing {}", path.display()))?;
+    match ctx.output_mode {
+        OutputMode::Json => println!("{}", to_json(&serde_json::json!({ "path": path }))),
+        OutputMode::Tty => println!(
+            "Wrote {} meetings to {}",
+            format_number(rows.len() as i64),
+            path.display()
+        ),
+    }
+    Ok(())
+}
+
+fn period_range(period: &StatsPeriod, ctx: &RunContext) -> Option<DateRange> {
+    build_date_range(
+        period.from.as_deref(),
+        period.to.as_deref(),
+        period.date.as_deref(),
+        Utc::now(),
+        &ctx.tz,
+    )
 }
 
 /// Every meeting in `range` with its transcript summarized, oldest first.

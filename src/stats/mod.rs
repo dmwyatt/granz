@@ -18,6 +18,7 @@
 pub mod calendar;
 mod invitees;
 pub mod overview;
+pub mod page;
 mod transcript;
 
 use chrono::{DateTime, Utc};

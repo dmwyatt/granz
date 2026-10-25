@@ -455,7 +455,12 @@ grans stats --date last-month
 # The numbers behind it, one meeting per line
 grans stats meetings
 grans stats meetings --json    # every field, for your own analysis
+
+# Charts of it all, as one page to open in a browser
+grans stats --html meetings.html
 ```
+
+The page is a single file with the data and charts inside it. It fetches nothing, so it works offline and meeting data stays on your machine. Its filters (period, recurring series, invitee) narrow every chart at once.
 
 Statistics are computed when you ask, from what grans already stores. Who said how much is measured in characters of transcript, since Granola's utterance end times are not reliable enough to time speech. A meeting's spoken time runs from its first word to its last, leaving out any silence longer than 30 minutes. "You" is your microphone channel; Granola names the other speakers only in meetings recorded since it started detecting them. Invitees are who the calendar invited, not who came.
 
