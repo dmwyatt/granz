@@ -58,8 +58,11 @@ jobs:
           use_commit_signing: "true"
 
           # Comments by anyone else on the thread are left out of what Claude
-          # reads.
-          include_comments_by_actor: "${{ github.repository_owner }},*[bot]"
+          # reads. The action takes comment authors from GraphQL, which names
+          # bots without the `[bot]` suffix, so a `*[bot]` pattern matches
+          # nothing. The two bots that comment here are listed by those names.
+          # `claude` also matches a human account of that name.
+          include_comments_by_actor: "${{ github.repository_owner }},claude,github-actions"
 
           additional_permissions: |
             actions: read
