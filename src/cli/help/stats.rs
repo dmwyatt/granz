@@ -8,7 +8,8 @@ const MEASURES: Section = Section {
     lines: &[
         "Who said how much is counted in characters of transcript, because",
         "Granola's end times are not reliable enough to time speech. A meeting's",
-        "spoken time runs from its first word to its last.",
+        "spoken time runs from its first word to its last, leaving out any",
+        "silence longer than 30 minutes (a note reopened later for another talk).",
         "",
         "\"You\" is your microphone; everyone else shares the other audio",
         "channel. Granola has named the speakers on that channel only for",

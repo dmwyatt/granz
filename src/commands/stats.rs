@@ -67,7 +67,7 @@ fn print_overview(o: &Overview, tz: &FixedOffset) {
         println!("Date range:     {} to {}", day(first, tz), day(last, tz));
     }
     println!(
-        "Spoken time:    {} hours, first word to last",
+        "Spoken time:    {} hours",
         format_number(o.spoken_hours.round() as i64)
     );
     if let Some(mine) = o.my_share {

@@ -11,7 +11,7 @@ pub struct Overview {
     pub with_transcript: usize,
     pub first_meeting: Option<DateTime<Utc>>,
     pub last_meeting: Option<DateTime<Utc>>,
-    /// First spoken word to last, summed over meetings.
+    /// Spoken time ([`TranscriptFacts::span`]), summed over meetings.
     pub spoken_hours: f64,
     /// The user's share of transcribed characters, 0 to 1. `None` when
     /// nothing was transcribed.
@@ -124,12 +124,13 @@ mod tests {
     }
 
     #[test]
-    fn spoken_hours_sum_first_to_last_word() {
+    fn spoken_hours_sum_each_meetings_spoken_time() {
         let rows = [
             meeting(
                 "2026-03-02T16:00:00Z",
                 &[
                     ("2026-03-02T16:00:00Z", Voice::Me, 1),
+                    ("2026-03-02T16:20:00Z", Voice::Me, 1),
                     ("2026-03-02T16:45:00Z", Voice::Me, 1),
                 ],
             ),

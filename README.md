@@ -457,7 +457,7 @@ grans stats meetings
 grans stats meetings --json    # every field, for your own analysis
 ```
 
-Statistics are computed when you ask, from what grans already stores. Who said how much is measured in characters of transcript, since Granola's utterance end times are not reliable enough to time speech. "You" is your microphone channel; Granola names the other speakers only in meetings recorded since it started detecting them. Invitees are who the calendar invited, not who came.
+Statistics are computed when you ask, from what grans already stores. Who said how much is measured in characters of transcript, since Granola's utterance end times are not reliable enough to time speech. A meeting's spoken time runs from its first word to its last, leaving out any silence longer than 30 minutes. "You" is your microphone channel; Granola names the other speakers only in meetings recorded since it started detecting them. Invitees are who the calendar invited, not who came.
 
 ### People
 

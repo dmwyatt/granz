@@ -69,6 +69,10 @@ pub struct TranscriptFacts {
     pub first_word: DateTime<Utc>,
     /// The latest utterance start. End timestamps are not trusted.
     pub last_word: DateTime<Utc>,
+    /// Stretches of talk separated by more than [`SESSION_BREAK`] of
+    /// silence, in order. Nearly every meeting has one; a note reopened
+    /// days later to record another conversation has more.
+    pub sessions: Vec<Session>,
     /// Times the conversation passed between the user and everyone else,
     /// in start order.
     pub handoffs: u32,
@@ -76,9 +80,24 @@ pub struct TranscriptFacts {
     pub voices: Vec<VoiceRow>,
 }
 
+/// A silence longer than this ends one session of talk and starts another.
+pub const SESSION_BREAK: Duration = Duration::minutes(30);
+
+/// From the first utterance start of a stretch of talk to the last.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Session {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
 impl TranscriptFacts {
+    /// Spoken time: the sessions' lengths, summed, so a meeting resumed
+    /// days later does not count the days in between.
     pub fn span(&self) -> Duration {
-        self.last_word - self.first_word
+        self.sessions
+            .iter()
+            .map(|s| s.end - s.start)
+            .fold(Duration::zero(), |total, d| total + d)
     }
 
     pub fn my_chars(&self) -> u64 {
@@ -134,9 +153,25 @@ pub fn summarize(utterances: &[Utterance]) -> Option<TranscriptFacts> {
     Some(TranscriptFacts {
         first_word,
         last_word,
+        sessions: sessions(&ordered),
         handoffs: handoffs(&ordered),
         voices: voices.into_values().collect(),
     })
+}
+
+/// `ordered` must be non-empty and in start order.
+fn sessions(ordered: &[&Utterance]) -> Vec<Session> {
+    let mut sessions: Vec<Session> = Vec::new();
+    for u in ordered {
+        match sessions.last_mut() {
+            Some(current) if u.start - current.end <= SESSION_BREAK => current.end = u.start,
+            _ => sessions.push(Session {
+                start: u.start,
+                end: u.start,
+            }),
+        }
+    }
+    sessions
 }
 
 /// Channel changes between consecutive utterances whose channel is known.
@@ -184,6 +219,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(facts.span(), Duration::minutes(28));
+    }
+
+    #[test]
+    fn a_long_silence_splits_the_talk_into_sessions() {
+        let facts = summarize(&[
+            said(0, Voice::Me, "Hi"),
+            said(20, Voice::Others, "Bye"),
+            Utterance {
+                start: "2026-03-04T09:00:00Z".parse().unwrap(),
+                voice: Voice::Me,
+                chars: 2,
+                question: false,
+            },
+            Utterance {
+                start: "2026-03-04T09:10:00Z".parse().unwrap(),
+                voice: Voice::Others,
+                chars: 3,
+                question: false,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(facts.span(), Duration::minutes(30));
     }
 
     #[test]
