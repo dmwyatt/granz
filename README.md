@@ -484,6 +484,10 @@ grans stats words --term "roadmap"
 # topic groups, series that repeat themselves, overlapping series, outliers
 grans stats topics
 
+# Notes: action items per series and the ones naming you, summary
+# templates over time, and how often you typed your own notes
+grans stats notes
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

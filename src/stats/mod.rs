@@ -20,6 +20,7 @@ pub mod calendar;
 mod fixtures;
 mod invitees;
 mod mentions;
+pub mod notes;
 pub mod overview;
 pub mod page;
 pub mod people;
@@ -36,6 +37,7 @@ use serde::Serialize;
 
 use crate::models::DocumentPeople;
 use calendar::{CalendarInvite, Rsvp};
+use notes::{PanelRecord, Summary};
 
 pub use invitees::Invitee;
 pub use transcript::{TranscriptFacts, Utterance, Voice, summarize};
@@ -63,8 +65,14 @@ pub struct MeetingRow {
     /// Everyone invited other than the user, including those who declined.
     /// An invitation says nothing about who actually came.
     pub invitees: Vec<Invitee>,
+    /// The user's name as Granola's note gives its creator.
+    pub my_name: Option<String>,
     /// `None` for a meeting with no transcript.
     pub transcript: Option<TranscriptFacts>,
+    /// Characters of notes the user typed during the meeting.
+    pub typed_note_chars: u32,
+    /// Granola's AI summaries of the meeting.
+    pub summaries: Vec<Summary>,
 }
 
 /// The meeting's slot on the calendar.
@@ -82,6 +90,8 @@ pub struct MeetingRecord {
     pub created_at: DateTime<Utc>,
     pub people: Option<DocumentPeople>,
     pub calendar: Option<CalendarInvite>,
+    pub typed_note_chars: u32,
+    pub panels: Vec<PanelRecord>,
 }
 
 impl MeetingRow {
@@ -102,6 +112,9 @@ impl MeetingRow {
             organizer,
             my_response: calendar.and_then(CalendarInvite::my_response),
             my_email,
+            my_name: creator_name(record.people.as_ref()),
+            typed_note_chars: record.typed_note_chars,
+            summaries: record.panels.iter().map(Summary::new).collect(),
             id: record.id,
             title: record.title,
             created_at: record.created_at,
@@ -117,6 +130,10 @@ impl MeetingRow {
             .filter(|i| i.response != Some(Rsvp::Declined))
             .count()
     }
+}
+
+fn creator_name(people: Option<&DocumentPeople>) -> Option<String> {
+    people?.creator.as_ref()?.name.clone()
 }
 
 fn creator_email(people: Option<&DocumentPeople>) -> Option<String> {

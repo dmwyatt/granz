@@ -10,6 +10,7 @@ mod conversation;
 mod load;
 mod people;
 mod recurring;
+mod summaries;
 mod summary;
 mod themes;
 mod vocabulary;
@@ -99,6 +100,11 @@ fn report_on_rows(action: Option<&StatsAction>, rows: &[MeetingRow], ctx: &RunCo
             let mut report = crate::stats::speakers::report(rows, tz);
             truncate(&mut report.people, *limit, ctx);
             emit(ctx, &report, |r| voices::print(r, *limit, tz));
+        }
+        Some(StatsAction::Notes { limit }) => {
+            let mut report = crate::stats::notes::report(rows, tz);
+            truncate(&mut report.mine, *limit, ctx);
+            emit(ctx, &report, |r| summaries::print(r, *limit));
         }
         Some(StatsAction::Words { .. } | StatsAction::Topics) => {
             unreachable!("words and topics read more than the rows")

@@ -309,3 +309,19 @@ fn words_follow_a_term_month_by_month() {
         (&json!("next week"), &json!(1), &json!("2026-03-01"))
     );
 }
+
+#[test]
+fn notes_count_typed_notes_per_month() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["notes", "--utc"]);
+
+    assert_eq!(
+        (
+            &report["months"][0]["month"],
+            &report["months"][0]["meetings"],
+            &report["months"][0]["with_typed_notes"]
+        ),
+        (&json!("2026-03-01"), &json!(2), &json!(0))
+    );
+}
