@@ -19,6 +19,7 @@ pub mod calendar;
 #[cfg(test)]
 mod fixtures;
 mod invitees;
+mod mentions;
 pub mod overview;
 pub mod page;
 pub mod people;
@@ -27,6 +28,7 @@ pub mod speakers;
 pub mod talk;
 pub mod time;
 mod transcript;
+pub mod words;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;

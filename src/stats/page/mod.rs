@@ -10,7 +10,10 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use std::collections::{BTreeMap, HashMap};
+
 use super::MeetingRow;
+use super::words::{MeetingTics, SignatureWord, TICS, TermLife, WordCounter};
 
 const TEMPLATE: &str = include_str!("page.html");
 const STYLE: &str = include_str!("page.css");
@@ -39,6 +42,33 @@ const APP: &[&str] = &[
 pub struct Payload<'a> {
     pub generated_at: DateTime<Utc>,
     pub meetings: &'a [MeetingRow],
+    pub words: WordsPayload<'a>,
+}
+
+/// What the page needs from the text pass: each meeting's tics, so they
+/// follow the filters, and the vocabulary findings over the whole file.
+#[derive(Debug, Serialize)]
+pub struct WordsPayload<'a> {
+    pub tics: &'static [&'static str],
+    pub meeting_tics: &'a HashMap<String, MeetingTics>,
+    pub signature: Vec<SignatureWord>,
+    pub emerging: Vec<TermLife>,
+    /// Full-name mentions per meeting id, then per email, so the page can
+    /// tell who was talked about while not invited.
+    pub meeting_mentions: &'a HashMap<String, BTreeMap<String, u32>>,
+}
+
+impl<'a> WordsPayload<'a> {
+    pub fn new(counter: &'a WordCounter, rows: &[MeetingRow]) -> Self {
+        let report = counter.report(rows);
+        WordsPayload {
+            tics: TICS,
+            meeting_tics: counter.meeting_tics(),
+            signature: report.signature,
+            emerging: report.emerging,
+            meeting_mentions: counter.mentions(),
+        }
+    }
 }
 
 pub fn render(payload: &Payload) -> Result<String> {
@@ -71,9 +101,12 @@ mod tests {
             },
             None,
         );
+        let words = WordCounter::new(chrono::FixedOffset::east_opt(0).unwrap(), &[], &[]);
+        let rows = [row];
         render(&Payload {
             generated_at: "2026-03-02T16:00:00Z".parse().unwrap(),
-            meetings: &[row],
+            meetings: &rows,
+            words: WordsPayload::new(&words, &rows),
         })
         .unwrap()
     }

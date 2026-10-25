@@ -66,4 +66,14 @@ pub enum StatsAction {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// Words: your verbal tics by month, the words you use more than anyone
+    /// else, terms that entered the conversation, and how terms you name
+    /// rose and fell
+    #[command(after_long_help = help::for_command("stats words"))]
+    Words {
+        /// A word or phrase to follow month by month (repeatable)
+        #[arg(long = "term", value_name = "TERM")]
+        terms: Vec<String>,
+    },
 }

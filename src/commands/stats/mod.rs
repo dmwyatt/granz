@@ -4,22 +4,25 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::Connection;
+use serde::Serialize;
 
 mod conversation;
 mod load;
 mod people;
 mod recurring;
 mod summary;
+mod vocabulary;
 mod voices;
 
 use crate::cli::args::{StatsAction, StatsPeriod};
 use crate::cli::context::RunContext;
-use crate::db::stats::{for_each_transcript, meeting_records};
+use crate::db::stats::{for_each_transcript, for_each_utterance_text, meeting_records};
 use crate::output::format::{OutputMode, format_number};
 use crate::output::json::to_json;
 use crate::query::dates::{DateRange, build_date_range};
 use crate::stats::overview::overview;
-use crate::stats::page::{self, Payload};
+use crate::stats::page::{self, Payload, WordsPayload};
+use crate::stats::words::WordCounter;
 use crate::stats::{MeetingRow, series, summarize, time};
 
 pub fn run(
@@ -29,84 +32,105 @@ pub fn run(
     period: &StatsPeriod,
     ctx: &RunContext,
 ) -> Result<()> {
-    if let Some(path) = html {
-        if action.is_some() {
-            bail!("--html writes the whole page and does not take a subcommand");
+    let range = period_range(period, ctx);
+    match (html, action) {
+        (Some(_), Some(_)) => {
+            bail!("--html writes the whole page and does not take a subcommand")
         }
-        return write_page(conn, path, period, ctx);
+        (Some(path), None) => write_page(conn, path, range.as_ref(), ctx),
+        (None, Some(StatsAction::Words { terms })) => {
+            let rows = meeting_rows(conn, range.as_ref())?;
+            let counter = count_words(conn, range.as_ref(), terms, &rows, ctx)?;
+            emit(ctx, &counter.report(&rows), |r| {
+                vocabulary::print(r, &ctx.tz)
+            });
+            Ok(())
+        }
+        (None, action) => {
+            let rows = meeting_rows(conn, range.as_ref())?;
+            report_on_rows(action, &rows, ctx);
+            Ok(())
+        }
     }
-    let rows = meeting_rows(conn, period_range(period, ctx).as_ref())?;
+}
 
-    let json = ctx.output_mode == OutputMode::Json;
+/// Print `report` as JSON, or with `print` for a terminal.
+fn emit<T: Serialize>(ctx: &RunContext, report: &T, print: impl FnOnce(&T)) {
+    match ctx.output_mode {
+        OutputMode::Json => println!("{}", to_json(report)),
+        OutputMode::Tty => print(report),
+    }
+}
+
+/// The statistics built from the meeting rows alone.
+fn report_on_rows(action: Option<&StatsAction>, rows: &[MeetingRow], ctx: &RunContext) {
+    let tz = &ctx.tz;
     match action {
-        None if json => println!("{}", to_json(&overview(&rows))),
-        None => summary::print_overview(&overview(&rows), &ctx.tz),
-        Some(StatsAction::Meetings) if json => println!("{}", to_json(&rows)),
-        Some(StatsAction::Meetings) => summary::print_meetings(&rows, &ctx.tz),
+        None => emit(ctx, &overview(rows), |o| summary::print_overview(o, tz)),
+        Some(StatsAction::Meetings) => emit(ctx, &rows, |r| summary::print_meetings(r, tz)),
         Some(StatsAction::Time { by }) => {
-            let report = time::report(&rows, *by, &ctx.tz);
-            if json {
-                println!("{}", to_json(&report));
-            } else {
-                load::print(&report, *by);
-            }
+            emit(ctx, &time::report(rows, *by, tz), |r| load::print(r, *by))
         }
         Some(StatsAction::Series { limit }) => {
-            let mut report = series::report(&rows);
-            if json {
-                if *limit > 0 {
-                    report.series.truncate(*limit);
-                }
-                println!("{}", to_json(&report));
-            } else {
-                recurring::print(&report, *limit, &ctx.tz);
-            }
+            let mut report = series::report(rows);
+            truncate(&mut report.series, *limit, ctx);
+            emit(ctx, &report, |r| recurring::print(r, *limit, tz));
         }
         Some(StatsAction::People { limit }) => {
-            let mut report = crate::stats::people::report(&rows);
-            if json {
-                if *limit > 0 {
-                    report.people.truncate(*limit);
-                }
-                println!("{}", to_json(&report));
-            } else {
-                people::print(&report, *limit, &ctx.tz);
-            }
+            let mut report = crate::stats::people::report(rows);
+            truncate(&mut report.people, *limit, ctx);
+            emit(ctx, &report, |r| people::print(r, *limit, tz));
         }
-        Some(StatsAction::Talk) => {
-            let report = crate::stats::talk::report(&rows, &ctx.tz);
-            if json {
-                println!("{}", to_json(&report));
-            } else {
-                conversation::print(&report, &ctx.tz);
-            }
-        }
+        Some(StatsAction::Talk) => emit(ctx, &crate::stats::talk::report(rows, tz), |r| {
+            conversation::print(r, tz)
+        }),
         Some(StatsAction::Speakers { limit }) => {
-            let mut report = crate::stats::speakers::report(&rows, &ctx.tz);
-            if json {
-                if *limit > 0 {
-                    report.people.truncate(*limit);
-                }
-                println!("{}", to_json(&report));
-            } else {
-                voices::print(&report, *limit, &ctx.tz);
-            }
+            let mut report = crate::stats::speakers::report(rows, tz);
+            truncate(&mut report.people, *limit, ctx);
+            emit(ctx, &report, |r| voices::print(r, *limit, tz));
         }
+        Some(StatsAction::Words { .. }) => unreachable!("words read text, not rows"),
     }
-    Ok(())
+}
+
+/// `--limit` cuts JSON lists to the same length the table shows; the
+/// table printers apply it themselves so they can say how many are hidden.
+fn truncate<T>(list: &mut Vec<T>, limit: usize, ctx: &RunContext) {
+    if ctx.output_mode == OutputMode::Json && limit > 0 {
+        list.truncate(limit);
+    }
+}
+
+/// One pass over the transcript text in `range`, listening for the full
+/// names of everyone invited to `rows`.
+fn count_words(
+    conn: &Connection,
+    range: Option<&DateRange>,
+    terms: &[String],
+    rows: &[MeetingRow],
+    ctx: &RunContext,
+) -> Result<WordCounter> {
+    let people: Vec<(String, String)> = crate::stats::people::names(rows).into_iter().collect();
+    let mut counter = WordCounter::new(ctx.tz, terms, &people);
+    for_each_utterance_text(conn, range, |meeting, created_at, mine, text| {
+        counter.add(meeting, created_at, mine, text)
+    })?;
+    Ok(counter)
 }
 
 /// Write the stats page for the meetings in `period` to `path`.
 fn write_page(
     conn: &Connection,
     path: &Path,
-    period: &StatsPeriod,
+    range: Option<&DateRange>,
     ctx: &RunContext,
 ) -> Result<()> {
-    let rows = meeting_rows(conn, period_range(period, ctx).as_ref())?;
+    let rows = meeting_rows(conn, range)?;
+    let words = count_words(conn, range, &[], &rows, ctx)?;
     let html = page::render(&Payload {
         generated_at: Utc::now(),
         meetings: &rows,
+        words: WordsPayload::new(&words, &rows),
     })?;
     std::fs::write(path, html).with_context(|| format!("writing {}", path.display()))?;
     match ctx.output_mode {

@@ -475,6 +475,11 @@ grans stats talk
 # against heard, share of the talk, who answers whom, evenness
 grans stats speakers
 
+# Words: your verbal tics, your signature words, terms new to your meetings,
+# people talked about while not invited, and how terms you name rose and fell
+grans stats words
+grans stats words --term "roadmap"
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```
