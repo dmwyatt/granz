@@ -286,7 +286,7 @@ function internalExternal(body, meetings) {
     plot: (width) => rows.length ? Plot.plot({
       ...plotDefaults(width),
       height: 240,
-      x: { type: "band", label: null, tickFormat: (d) => d3.timeFormat(d.getMonth() === 0 ? "%b %Y" : "%b")(d) },
+      x: { type: "band", label: null, tickFormat: monthTick },
       y: { label: "hours" },
       color: { domain: kinds, range: [seriesColor(0), seriesColor(1)], legend: true },
       marks: [

@@ -169,6 +169,9 @@ const fmtInt = (n) => Math.round(n).toLocaleString();
 const fmtPct = (f) => (f == null || Number.isNaN(f) ? "–" : `${Math.round(f * 100)}%`);
 const fmtHours = (minutes) => (minutes / 60).toLocaleString(undefined, { maximumFractionDigits: 1 });
 
+// A month on a band axis: its short name, or the year for January.
+const monthTick = (d) => d3.timeFormat(d.getMonth() === 0 ? "%Y" : "%b")(d);
+
 function isoDay(date) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
