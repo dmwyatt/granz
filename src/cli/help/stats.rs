@@ -285,4 +285,39 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats topics",
+        examples: &[
+            Example {
+                command: "grans stats topics",
+                about: "Topic groups, repetitive series, overlapping series, and outliers",
+            },
+            Example {
+                command: "grans stats topics --json",
+                about: "The same, with every meeting's place on a map of topics",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "Uses the embeddings `grans embed` builds; meetings it has not reached",
+                    "are left out. A meeting is the average of its transcript's embedded",
+                    "windows, and two meetings are as alike as the cosine between them.",
+                    "",
+                    "Topic groups come from k-means into 8 groups, named by words their",
+                    "titles use more than other titles do. A recurring meeting that",
+                    "repeats itself has consecutive meetings that are very alike. Series",
+                    "with nearly the same content are compared by their average, over",
+                    "series with at least 3 embedded meetings and different titles (a",
+                    "series split by a calendar edit keeps its title). Outliers are the",
+                    "meetings whose most similar other meeting is least similar.",
+                    "",
+                    "Similarities rank meetings against each other; they are not a",
+                    "percentage, and verbatim repeats do not spike them.",
+                ],
+            },
+            DATES,
+        ],
+    },
 ];

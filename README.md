@@ -480,6 +480,10 @@ grans stats speakers
 grans stats words
 grans stats words --term "roadmap"
 
+# What meetings are about, from the embeddings (run grans embed first):
+# topic groups, series that repeat themselves, overlapping series, outliers
+grans stats topics
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

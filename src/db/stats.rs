@@ -2,11 +2,14 @@
 //! and its utterances reduced to [`Utterance`]s. JSON columns and timestamps
 //! are decoded here, so `stats` works with typed values only.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use rusqlite::types::ToSql;
 
+use crate::embed::store::blob_to_vector;
 use crate::models::DocumentPeople;
 use crate::query::dates::DateRange;
 use crate::stats::calendar::CalendarInvite;
@@ -141,6 +144,47 @@ pub fn for_each_utterance_text(
         );
     }
     Ok(())
+}
+
+/// Each meeting's transcript embedding: the mean of its transcript
+/// windows' vectors, for meetings in `range` that `grans embed` has
+/// reached. Notes and AI-summary chunks are left out, so a meeting is
+/// represented by what was said.
+pub fn meeting_vectors(
+    conn: &Connection,
+    range: Option<&DateRange>,
+) -> Result<HashMap<String, Vec<f32>>> {
+    let (filter, params) = range_filter(range);
+    let sql = format!(
+        "SELECT c.document_id, e.vector
+         FROM chunks c
+         JOIN embeddings e ON e.chunk_id = c.id
+         JOIN documents d ON d.id = c.document_id
+         WHERE c.source_type = 'transcript_window' AND d.deleted_at IS NULL{filter}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params_refs(&params).as_slice())?;
+    let mut sums: HashMap<String, (Vec<f32>, u32)> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let vector = blob_to_vector(row.get_ref(1)?.as_blob()?);
+        let (sum, n) = sums
+            .entry(id)
+            .or_insert_with(|| (vec![0.0; vector.len()], 0));
+        if sum.len() != vector.len() {
+            anyhow::bail!(
+                "embeddings of different lengths in one database; rebuild them with `grans embed clear` and `grans embed`"
+            );
+        }
+        for (s, v) in sum.iter_mut().zip(&vector) {
+            *s += v;
+        }
+        *n += 1;
+    }
+    Ok(sums
+        .into_iter()
+        .map(|(id, (sum, n))| (id, sum.into_iter().map(|s| s / n as f32).collect()))
+        .collect())
 }
 
 fn decode_utterance(row: &rusqlite::Row) -> Result<Utterance> {
@@ -311,6 +355,35 @@ mod tests {
                 ("doc-a".to_string(), true, "Ready?".to_string()),
                 ("doc-b".to_string(), false, "Hi".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_meetings_vector_is_the_mean_of_its_transcript_windows() {
+        let conn = build_test_db(&two_meetings());
+        let chunk = |source_type: &str, vector: [f32; 2]| {
+            conn.execute(
+                "INSERT INTO chunks (source_type, source_id, document_id, content_hash, text, created_at)
+                 VALUES (?1, ?2, 'doc-a', 'h', 't', '2026-03-02T16:00:00Z')",
+                rusqlite::params![source_type, format!("{source_type}-{}", vector[0])],
+            )
+            .unwrap();
+            let blob: Vec<u8> = vector.iter().flat_map(|x| x.to_le_bytes()).collect();
+            conn.execute(
+                "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![conn.last_insert_rowid(), blob],
+            )
+            .unwrap();
+        };
+        chunk("transcript_window", [1.0, 0.0]);
+        chunk("transcript_window", [3.0, 2.0]);
+        chunk("panel_section", [100.0, 100.0]);
+
+        let vectors = meeting_vectors(&conn, None).unwrap();
+
+        assert_eq!(
+            vectors,
+            HashMap::from([("doc-a".to_string(), vec![2.0, 1.0])])
         );
     }
 

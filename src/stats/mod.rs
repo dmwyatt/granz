@@ -27,6 +27,7 @@ pub mod series;
 pub mod speakers;
 pub mod talk;
 pub mod time;
+pub mod topics;
 mod transcript;
 pub mod words;
 

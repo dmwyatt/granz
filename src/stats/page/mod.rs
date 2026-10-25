@@ -13,6 +13,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
 use super::MeetingRow;
+use super::topics::TopicsReport;
 use super::words::{MeetingTics, SignatureWord, TICS, TermLife, WordCounter};
 
 const TEMPLATE: &str = include_str!("page.html");
@@ -44,6 +45,7 @@ pub struct Payload<'a> {
     pub generated_at: DateTime<Utc>,
     pub meetings: &'a [MeetingRow],
     pub words: WordsPayload<'a>,
+    pub topics: &'a TopicsReport,
 }
 
 /// What the page needs from the text pass: each meeting's tics, so they
@@ -104,10 +106,12 @@ mod tests {
         );
         let words = WordCounter::new(chrono::FixedOffset::east_opt(0).unwrap(), &[], &[]);
         let rows = [row];
+        let topics = crate::stats::topics::report(&rows, &HashMap::new());
         render(&Payload {
             generated_at: "2026-03-02T16:00:00Z".parse().unwrap(),
             meetings: &rows,
             words: WordsPayload::new(&words, &rows),
+            topics: &topics,
         })
         .unwrap()
     }

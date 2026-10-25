@@ -76,4 +76,9 @@ pub enum StatsAction {
         #[arg(long = "term", value_name = "TERM")]
         terms: Vec<String>,
     },
+
+    /// What meetings are about, from the embeddings: topic groups, recurring
+    /// meetings that repeat themselves, overlapping series, and outliers
+    #[command(after_long_help = help::for_command("stats topics"))]
+    Topics,
 }
