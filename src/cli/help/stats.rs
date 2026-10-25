@@ -114,4 +114,37 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats series",
+        examples: &[
+            Example {
+                command: "grans stats series",
+                about: "Your recurring meetings, most hours first",
+            },
+            Example {
+                command: "grans stats series --limit 0 --json",
+                about: "Every series, for your own analysis",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "A series is the calendar's recurring event; its title is the latest",
+                    "meeting's. Editing a recurring meeting from some date on can give the",
+                    "rest a new series, so one meeting can appear as several.",
+                    "",
+                    "For each series: meetings, hours, first and last meeting, the",
+                    "median days between meetings, invitees who did not decline at the",
+                    "first and the latest meeting, the median minutes the talk started",
+                    "after the slot began and ran past its end, and your share of the talk.",
+                    "",
+                    "Punctuality uses a meeting's first stretch of talk, so a note reopened",
+                    "later for another conversation does not count as running over.",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
+    },
 ];

@@ -226,3 +226,21 @@ fn time_by_week_starts_weeks_on_monday() {
 
     assert_eq!(report["periods"][0]["start"], "2026-03-02");
 }
+
+#[test]
+fn series_rolls_up_a_recurring_meeting() {
+    let env = TestEnv::with_state(&team_state());
+
+    let report = stats_json(&env, &["series"]);
+
+    let s = &report["series"][0];
+    assert_eq!(
+        (
+            &s["title"],
+            &s["meetings"],
+            &s["hours"],
+            &s["typical_start_delay_minutes"]
+        ),
+        (&json!("Robin / me"), &json!(2), &json!(0.75), &json!(1.0))
+    );
+}

@@ -34,4 +34,13 @@ pub enum StatsAction {
         #[arg(long, value_enum, default_value = "month")]
         by: Period,
     },
+
+    /// Recurring meetings: hours, cadence, invite list, punctuality, and
+    /// your share of the talk, per series
+    #[command(after_long_help = help::for_command("stats series"))]
+    Series {
+        /// How many series to show, most hours first (0 for all)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
