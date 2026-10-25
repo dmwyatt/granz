@@ -10,6 +10,7 @@ mod load;
 mod people;
 mod recurring;
 mod summary;
+mod voices;
 
 use crate::cli::args::{StatsAction, StatsPeriod};
 use crate::cli::context::RunContext;
@@ -78,6 +79,17 @@ pub fn run(
                 println!("{}", to_json(&report));
             } else {
                 conversation::print(&report, &ctx.tz);
+            }
+        }
+        Some(StatsAction::Speakers { limit }) => {
+            let mut report = crate::stats::speakers::report(&rows, &ctx.tz);
+            if json {
+                if *limit > 0 {
+                    report.people.truncate(*limit);
+                }
+                println!("{}", to_json(&report));
+            } else {
+                voices::print(&report, *limit, &ctx.tz);
             }
         }
     }

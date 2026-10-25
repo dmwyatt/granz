@@ -471,6 +471,10 @@ grans stats people
 # questions, when in a meeting you speak, and meetings where you never did
 grans stats talk
 
+# Named speakers (meetings since Granola started naming them): invited
+# against heard, share of the talk, who answers whom, evenness
+grans stats speakers
+
 # Charts of it all, as one page to open in a browser
 grans stats --html meetings.html
 ```

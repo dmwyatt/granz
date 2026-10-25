@@ -81,6 +81,18 @@ pub struct TranscriptFacts {
     pub handoffs: u32,
     /// The user first, then named speakers by name, then unnamed others.
     pub voices: Vec<VoiceRow>,
+    /// How often one voice spoke right after another, in start order.
+    /// Only meetings with speaker names say who followed whom among
+    /// everyone else.
+    pub turns: Vec<Turn>,
+}
+
+/// One voice speaking right after a different one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Turn {
+    pub from: Voice,
+    pub to: Voice,
+    pub count: u32,
 }
 
 /// A silence longer than this ends one session of talk and starts another.
@@ -164,6 +176,7 @@ pub fn summarize(utterances: &[Utterance]) -> Option<TranscriptFacts> {
         last_word,
         sessions: sessions(&ordered),
         handoffs: handoffs(&ordered),
+        turns: turns(&ordered),
         voices: voices.into_values().collect(),
     })
 }
@@ -191,6 +204,28 @@ fn handoffs(ordered: &[&Utterance]) -> u32 {
         .map(|u| u.voice == Voice::Me)
         .collect();
     is_me.windows(2).filter(|w| w[0] != w[1]).count() as u32
+}
+
+/// Changes of voice between consecutive utterances whose channel is known,
+/// counted per pair, ordered by voice.
+fn turns(ordered: &[&Utterance]) -> Vec<Turn> {
+    let known: Vec<&Voice> = ordered
+        .iter()
+        .map(|u| &u.voice)
+        .filter(|v| **v != Voice::Unknown)
+        .collect();
+    let mut counts: BTreeMap<(&Voice, &Voice), u32> = BTreeMap::new();
+    for pair in known.windows(2).filter(|w| w[0] != w[1]) {
+        *counts.entry((pair[0], pair[1])).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|((from, to), count)| Turn {
+            from: from.clone(),
+            to: to.clone(),
+            count,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -316,6 +351,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(facts.handoffs, 2);
+    }
+
+    #[test]
+    fn turns_count_who_spoke_right_after_whom() {
+        let facts = summarize(&[
+            said(1, named("Ana"), "a"),
+            said(2, Voice::Me, "b"),
+            said(3, named("Ana"), "c"),
+            said(4, Voice::Me, "d"),
+            said(5, Voice::Me, "e"),
+            said(6, named("Bo"), "f"),
+        ])
+        .unwrap();
+
+        let turns: Vec<_> = facts
+            .turns
+            .iter()
+            .map(|t| (t.from.clone(), t.to.clone(), t.count))
+            .collect();
+        assert_eq!(
+            turns,
+            vec![
+                (Voice::Me, named("Ana"), 1),
+                (Voice::Me, named("Bo"), 1),
+                (named("Ana"), Voice::Me, 2),
+            ]
+        );
     }
 
     #[test]

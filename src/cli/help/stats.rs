@@ -217,4 +217,38 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             DATES,
         ],
     },
+    CommandHelp {
+        path: "stats speakers",
+        examples: &[
+            Example {
+                command: "grans stats speakers",
+                about: "Who talks most, and who was invited but never heard",
+            },
+            Example {
+                command: "grans stats speakers --date last-month --json",
+                about: "Last month's speakers, series and evenness as JSON",
+            },
+        ],
+        sections: &[
+            Section {
+                title: "Notes",
+                lines: &[
+                    "Covers only meetings where Granola named at least one speaker. A",
+                    "speaker is a name as Granola heard it, compared without case or extra",
+                    "spaces. It is matched to the invitee with the same name, or else to",
+                    "the one invitee of that meeting sharing its first name. Two people on",
+                    "one microphone come out as one speaker.",
+                    "",
+                    "For each speaker: meetings they were heard in and their share of the",
+                    "talk there; meetings they were invited to, of which never heard; and",
+                    "meetings they spoke in without an invitation. Then how often you",
+                    "spoke right after them and they after you, who talks most in each",
+                    "series, and how evenly talk is spread among you and the named",
+                    "speakers (1 is perfectly even).",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
+    },
 ];

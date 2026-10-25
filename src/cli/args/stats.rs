@@ -57,4 +57,13 @@ pub enum StatsAction {
     /// size and month, back and forth, questions, and silent meetings
     #[command(after_long_help = help::for_command("stats talk"))]
     Talk,
+
+    /// Who was heard in meetings with speaker names: invited against heard,
+    /// share of the talk, who answers whom, and how evenly talk is spread
+    #[command(after_long_help = help::for_command("stats speakers"))]
+    Speakers {
+        /// How many speakers to list, most talk first (0 for all)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
