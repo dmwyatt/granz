@@ -168,3 +168,31 @@ fn empty_database_says_so() {
         "No meetings found.\n"
     );
 }
+
+#[test]
+fn html_writes_a_page_with_the_meetings_embedded() {
+    let env = TestEnv::with_state(&team_state());
+    let page = env.dir.path().join("stats.html");
+
+    env.cmd()
+        .args(["stats", "--html"])
+        .arg(&page)
+        .assert()
+        .success();
+
+    let html = std::fs::read_to_string(&page).unwrap();
+    assert!(html.contains(r#""title":"Planning""#));
+}
+
+#[test]
+fn html_does_not_combine_with_a_subcommand() {
+    let env = TestEnv::with_state(&team_state());
+    let page = env.dir.path().join("stats.html");
+
+    env.cmd()
+        .args(["stats", "--html"])
+        .arg(&page)
+        .arg("meetings")
+        .assert()
+        .failure();
+}

@@ -288,8 +288,12 @@ fn main() -> Result<()> {
             commands::info::run(&conn, &db_path, &ctx)?;
         }
 
-        Commands::Stats { action, period } => {
-            commands::stats::run(&conn, action.as_ref(), period, &ctx)?;
+        Commands::Stats {
+            action,
+            html,
+            period,
+        } => {
+            commands::stats::run(&conn, action.as_ref(), html.as_deref(), period, &ctx)?;
         }
 
         Commands::Benchmark { .. } => unreachable!(), // Handled above

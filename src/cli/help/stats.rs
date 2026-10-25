@@ -36,8 +36,24 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
                 command: "grans stats meetings",
                 about: "The numbers behind it, one meeting per line",
             },
+            Example {
+                command: "grans stats --html meetings.html",
+                about: "Charts of it all, as a page to open in a browser",
+            },
         ],
-        sections: &[MEASURES, DATES],
+        sections: &[
+            Section {
+                title: "The page",
+                lines: &[
+                    "--html writes one file with the data and charts inside it. Open it in",
+                    "a browser; it fetches nothing, so it works offline and your meetings",
+                    "stay on this machine. Its filters narrow every chart at once. The date",
+                    "filters choose which meetings go into the file.",
+                ],
+            },
+            MEASURES,
+            DATES,
+        ],
     },
     CommandHelp {
         path: "stats meetings",

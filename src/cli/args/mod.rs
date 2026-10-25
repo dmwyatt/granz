@@ -266,6 +266,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: Option<StatsAction>,
 
+        /// Write the statistics as a web page to this file, to open in a browser.
+        /// Not combined with a subcommand
+        #[arg(long, value_name = "PATH")]
+        html: Option<std::path::PathBuf>,
+
         #[command(flatten)]
         period: StatsPeriod,
     },
