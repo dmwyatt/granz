@@ -22,7 +22,7 @@ pub fn meeting_records(conn: &Connection, range: Option<&DateRange>) -> Result<V
     let (filter, params) = range_filter(range);
     let sql = format!(
         "SELECT id, title, created_at, people_json, google_calendar_event_json,
-                coalesce(length(trim(notes_plain)), 0)
+                coalesce(length(trim(notes_plain, ' ' || char(9, 10, 13))), 0)
          FROM documents d
          WHERE deleted_at IS NULL{filter}
          ORDER BY created_at, id"
@@ -303,6 +303,25 @@ mod tests {
                 ]
             }
         })
+    }
+
+    #[test]
+    fn notes_of_only_blank_lines_are_not_typed_notes() {
+        let conn = build_test_db(&json!({
+            "documents": {
+                "blank": {"id": "blank", "title": "T", "created_at": "2026-03-02T16:00:00Z",
+                          "notes_plain": "\n \r\n\t"},
+                "typed": {"id": "typed", "title": "T", "created_at": "2026-03-03T16:00:00Z",
+                          "notes_plain": "\n Ship it \n"}
+            }
+        }));
+
+        let chars: Vec<_> = meeting_records(&conn, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.typed_note_chars)
+            .collect();
+        assert_eq!(chars, vec![0, 7]);
     }
 
     #[test]
