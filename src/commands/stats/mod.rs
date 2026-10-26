@@ -6,6 +6,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 
+mod book;
 mod conversation;
 mod load;
 mod people;
@@ -106,6 +107,9 @@ fn report_on_rows(action: Option<&StatsAction>, rows: &[MeetingRow], ctx: &RunCo
             truncate(&mut report.mine, *limit, ctx);
             emit(ctx, &report, |r| summaries::print(r, *limit));
         }
+        Some(StatsAction::Records) => emit(ctx, &crate::stats::records::report(rows, tz), |r| {
+            book::print(r, tz)
+        }),
         Some(StatsAction::Words { .. } | StatsAction::Topics) => {
             unreachable!("words and topics read more than the rows")
         }

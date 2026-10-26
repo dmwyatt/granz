@@ -24,6 +24,7 @@ pub mod notes;
 pub mod overview;
 pub mod page;
 pub mod people;
+pub mod records;
 pub mod series;
 pub mod speakers;
 pub mod talk;

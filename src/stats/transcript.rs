@@ -64,6 +64,10 @@ pub struct VoiceRow {
     /// Characters of utterances starting in each minute since the
     /// meeting's first word: entry 0 is the first minute.
     pub chars_by_minute: Vec<u32>,
+    /// The most characters this voice said without another voice speaking
+    /// in between. Before speaker names, everyone else is one voice, so
+    /// their run can join several people.
+    pub longest_run: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -150,7 +154,12 @@ pub fn summarize(utterances: &[Utterance]) -> Option<TranscriptFacts> {
     let last_word = ordered.last()?.start;
 
     let mut voices: BTreeMap<&Voice, VoiceRow> = BTreeMap::new();
+    let mut run: (Option<&Voice>, u64) = (None, 0);
     for u in &ordered {
+        run = match run {
+            (Some(voice), chars) if *voice == u.voice => (Some(voice), chars + u64::from(u.chars)),
+            _ => (Some(&u.voice), u64::from(u.chars)),
+        };
         let row = voices.entry(&u.voice).or_insert_with(|| VoiceRow {
             voice: u.voice.clone(),
             utterances: 0,
@@ -159,7 +168,9 @@ pub fn summarize(utterances: &[Utterance]) -> Option<TranscriptFacts> {
             first_word: u.start,
             last_word: u.start,
             chars_by_minute: Vec::new(),
+            longest_run: 0,
         });
+        row.longest_run = row.longest_run.max(run.1);
         row.utterances += 1;
         row.chars += u64::from(u.chars);
         row.questions += u32::from(u.question);
@@ -378,6 +389,25 @@ mod tests {
                 (named("Ana"), Voice::Me, 2),
             ]
         );
+    }
+
+    #[test]
+    fn a_voices_longest_run_is_the_most_it_said_without_interruption() {
+        let facts = summarize(&[
+            said(1, Voice::Me, "Short"),
+            said(2, named("Ana"), "A fairly long point"),
+            said(3, named("Ana"), "and another one"),
+            said(4, Voice::Me, "Interrupting with many words"),
+            said(5, named("Ana"), "Back"),
+        ])
+        .unwrap();
+
+        let runs: Vec<_> = facts
+            .voices
+            .iter()
+            .map(|v| (v.voice.clone(), v.longest_run))
+            .collect();
+        assert_eq!(runs, vec![(Voice::Me, 28), (named("Ana"), 34)]);
     }
 
     #[test]
