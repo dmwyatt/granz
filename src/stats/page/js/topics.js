@@ -140,7 +140,7 @@ function outlierTable(parent, embedded) {
 function twinsTable(body) {
   const card = figure(body, {
     title: "Different series, nearly the same content",
-    caption: "Series compared by the average of their meetings, for series with at least 3 embedded meetings and different titles. Over every meeting in this file.",
+    caption: "Series compared by the average of their meetings, for series with at least 3 embedded meetings. Over every meeting in this file.",
   });
   if (!DATA.topics.twins.length) {
     card.append(el("div", { class: "empty" }, "Not enough recurring meetings with embeddings."));

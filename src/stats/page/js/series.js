@@ -1,5 +1,5 @@
-// Recurring series. Mirrors src/stats/series.rs: a series is the calendar's
-// recurring event id, titled by its latest meeting, and punctuality uses a
+// Recurring series. Mirrors src/stats/series.rs: a series is a recurring
+// meeting grouped by title (MeetingRow::series), and punctuality uses a
 // meeting's first session of talk against its slot.
 
 // The series with the most hours across all the data keep the same color
@@ -50,7 +50,7 @@ function seriesRollups(meetings) {
 const fmtSigned = (m) => (m == null ? "–" : `${m >= 0 ? "+" : ""}${Math.round(m)}`);
 
 section("series", "Recurring meetings",
-  "A series is the calendar's recurring event. Editing a recurring meeting from some date on can start a new series, so one meeting can appear as several.",
+  "A series is a recurring meeting, identified by its title: calendar recurrences with the same title count as one, because calendars split a recurring meeting whenever it is edited from some date on. Renaming a meeting starts a new series, and unrelated recurring meetings sharing a title count as one.",
   (meetings, body) => {
     hoursBySeries(body, meetings);
     seriesTable(body, meetings);

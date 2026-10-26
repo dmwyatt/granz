@@ -497,7 +497,7 @@ grans stats --html meetings.html
 
 The page is a single file with the data and charts inside it. It fetches nothing, so it works offline and meeting data stays on your machine. Its filters (period, recurring series, invitee) narrow every chart at once.
 
-Statistics are computed when you ask, from what grans already stores. Who said how much is measured in characters of transcript, since Granola's utterance end times are not reliable enough to time speech. A meeting's spoken time runs from its first word to its last, leaving out any silence longer than 30 minutes. "You" is your microphone channel; Granola names the other speakers only in meetings recorded since it started detecting them. Invitees are who the calendar invited, not who came.
+Statistics are computed when you ask, from what grans already stores. Who said how much is measured in characters of transcript, since Granola's utterance end times are not reliable enough to time speech. A meeting's spoken time runs from its first word to its last, leaving out any silence longer than 30 minutes. "You" is your microphone channel; Granola names the other speakers only in meetings recorded since it started detecting them. Invitees are who the calendar invited, not who came. A recurring series is identified by its title: calendar recurrences with the same title count as one series, because calendars split a recurring meeting whenever it is edited from some date on. Renaming a meeting starts a new series, and unrelated recurring meetings that share a title count as one.
 
 ### People
 

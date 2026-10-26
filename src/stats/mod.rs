@@ -51,9 +51,15 @@ pub struct MeetingRow {
     /// When the meeting's Granola document was created, which is when
     /// recording started for nearly every meeting. Date filters apply to it.
     pub created_at: DateTime<Utc>,
-    /// The calendar's recurring event id, shared by every instance of a
-    /// recurring meeting.
+    /// The recurring meeting this is an instance of: its title, lowercased
+    /// with spacing collapsed. Calendars split one recurring meeting into
+    /// several recurrences whenever it is edited from some date on, so
+    /// recurrences are grouped by title. Renaming a meeting starts a new
+    /// series, and recurring meetings that share a title are one series.
+    /// `None` for a meeting the calendar does not mark as recurring.
     pub series: Option<String>,
+    /// The calendar's own recurrence id, as given.
+    pub recurring_event_id: Option<String>,
     pub scheduled: Option<Schedule>,
     /// The organizer's email, as the calendar gives it.
     pub organizer: Option<String>,
@@ -104,7 +110,10 @@ impl MeetingRow {
             .or_else(|| creator_email(record.people.as_ref()));
         MeetingRow {
             invitees: invitees::merge(calendar, record.people.as_ref()),
-            series: calendar.and_then(|c| c.recurring_event_id.clone()),
+            series: calendar
+                .and_then(|c| c.recurring_event_id.as_ref())
+                .map(|_| series_key(&record.title)),
+            recurring_event_id: calendar.and_then(|c| c.recurring_event_id.clone()),
             scheduled: calendar.and_then(CalendarInvite::schedule),
             // Google marks the organizer as `self` only sometimes; an
             // organizer with the user's own address is the user too.
@@ -133,6 +142,16 @@ impl MeetingRow {
     }
 }
 
+/// A title as series compare it: lowercased, with runs of whitespace
+/// collapsed.
+fn series_key(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn creator_name(people: Option<&DocumentPeople>) -> Option<String> {
     people?.creator.as_ref()?.name.clone()
 }
@@ -153,6 +172,44 @@ pub fn median<T: Ord>(values: impl IntoIterator<Item = T>) -> Option<T> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn recurring(id: &str, title: &str) -> MeetingRow {
+        let calendar: CalendarInvite =
+            serde_json::from_value(json!({"recurringEventId": id})).unwrap();
+        MeetingRow::new(
+            MeetingRecord {
+                title: title.to_string(),
+                calendar: Some(calendar),
+                ..Default::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn recurrences_with_the_same_title_are_one_series() {
+        let before_edit = recurring("abc", "Team  Standup");
+        let after_edit = recurring("abc_R20260301", "team standup");
+
+        assert_eq!(
+            (before_edit.series, after_edit.series),
+            (
+                Some("team standup".to_string()),
+                Some("team standup".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn a_one_off_meeting_is_in_no_series_whatever_its_title() {
+        let record = MeetingRecord {
+            title: "Team standup".to_string(),
+            calendar: Some(CalendarInvite::default()),
+            ..Default::default()
+        };
+
+        assert_eq!(MeetingRow::new(record, None).series, None);
+    }
 
     #[test]
     fn my_email_falls_back_to_the_note_creator() {

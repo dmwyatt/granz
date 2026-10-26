@@ -2,6 +2,20 @@
 
 use super::{CommandHelp, DATES, Example, Section};
 
+/// What a recurring series is, wherever statistics group by one.
+const SERIES: Section = Section {
+    title: "Recurring series",
+    lines: &[
+        "A series is a recurring meeting, identified by its title: calendar",
+        "recurrences with the same title, ignoring case and spacing, count as one",
+        "series. Calendars give a recurring meeting a new recurrence whenever it",
+        "is edited from some date on, so without this one standup would appear",
+        "as many series. The cost: renaming a meeting starts a new series, and",
+        "unrelated recurring meetings that share a title count as one. Meetings",
+        "the calendar does not mark as recurring are in no series.",
+    ],
+};
+
 /// What every statistic shares about how it reads the transcript.
 const MEASURES: Section = Section {
     title: "How things are measured",
@@ -52,6 +66,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
                 ],
             },
             MEASURES,
+            SERIES,
             DATES,
         ],
     },
@@ -130,19 +145,17 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
             Section {
                 title: "Notes",
                 lines: &[
-                    "A series is the calendar's recurring event; its title is the latest",
-                    "meeting's. Editing a recurring meeting from some date on can give the",
-                    "rest a new series, so one meeting can appear as several.",
-                    "",
-                    "For each series: meetings, hours, first and last meeting, the",
-                    "median days between meetings, invitees who did not decline at the",
-                    "first and the latest meeting, the median minutes the talk started",
-                    "after the slot began and ran past its end, and your share of the talk.",
+                    "For each series (a recurring meeting, by title; see below): meetings,",
+                    "hours, first and last meeting, the median days between meetings,",
+                    "invitees who did not decline at the first and the latest meeting, the",
+                    "median minutes the talk started after the slot began and ran past its",
+                    "end, and your share of the talk.",
                     "",
                     "Punctuality uses a meeting's first stretch of talk, so a note reopened",
                     "later for another conversation does not count as running over.",
                 ],
             },
+            SERIES,
             MEASURES,
             DATES,
         ],
@@ -309,9 +322,8 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
                     "titles use more than other titles do. A recurring meeting that",
                     "repeats itself has consecutive meetings that are very alike. Series",
                     "with nearly the same content are compared by their average, over",
-                    "series with at least 3 embedded meetings and different titles (a",
-                    "series split by a calendar edit keeps its title). Outliers are the",
-                    "meetings whose most similar other meeting is least similar.",
+                    "series with at least 3 embedded meetings. Outliers are the meetings",
+                    "whose most similar other meeting is least similar.",
                     "",
                     "Similarities rank meetings against each other; they are not a",
                     "percentage, and verbatim repeats do not spike them.",

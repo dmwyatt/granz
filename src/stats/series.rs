@@ -1,8 +1,9 @@
 //! Recurring meetings: each series' hours, cadence, invite list, how
 //! punctually it runs, and how much of it the user talks.
 //!
-//! A series is the calendar's recurring event id. Its title is the most
-//! recent instance's, since titles change over a series' life.
+//! A series is a recurring meeting, grouped by title (see
+//! [`MeetingRow::series`]). Its title is the most recent instance's
+//! spelling.
 
 use std::collections::BTreeMap;
 
